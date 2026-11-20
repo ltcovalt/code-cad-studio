@@ -2,14 +2,11 @@ package server
 
 import (
 	"context"
-	"embed"
 	"encoding/json"
 	"fmt"
-	"html/template"
 	"log"
 	"net/http"
 	"sync"
-	"sync/atomic"
 
 	"github.com/ltcovalt/code-cad-studio/internal/config"
 	"github.com/ltcovalt/code-cad-studio/internal/watcher"
@@ -24,52 +21,31 @@ type DesktopDialogs interface {
 	SaveFile(title, defaultFilename, filterName, filterPattern string) (string, error)
 }
 
-type cachedMesh struct {
-	modelID string
-	version int64
-	shapes  json.RawMessage
-}
-
 // Server holds the standard net/http router and coordinates the worker, config, presets, and SSE hub.
 type Server struct {
-	mux       *http.ServeMux
-	templates *template.Template
-	cfgStore  *config.Store
-	worker    *worker.Manager
-	watcher   *watcher.Watcher
-	dialogs   DesktopDialogs
-
-	meshMu      sync.RWMutex
-	meshes      map[string]cachedMesh
-	meshVersion atomic.Int64
+	mux      *http.ServeMux
+	cfgStore *config.Store
+	worker   *worker.Manager
+	watcher  *watcher.Watcher
+	dialogs  DesktopDialogs
 
 	sseMu      sync.Mutex
 	sseClients map[chan string]struct{}
 }
 
-// New creates a new HTTP server with all HTMX and JSON routes registered.
-func New(templateFS embed.FS, cfgStore *config.Store, workerMgr *worker.Manager, dialogs DesktopDialogs) (*Server, error) {
-	funcMap := template.FuncMap{
-		"eq": func(a, b any) bool { return fmt.Sprint(a) == fmt.Sprint(b) },
-	}
-	tmpl, err := template.New("").Funcs(funcMap).ParseFS(templateFS, "templates/*.html")
-	if err != nil {
-		return nil, fmt.Errorf("parse templates: %w", err)
-	}
-
+// New creates a new HTTP server with all JSON API and SSE routes registered.
+func New(cfgStore *config.Store, workerMgr *worker.Manager, dialogs DesktopDialogs) *Server {
 	s := &Server{
 		mux:        http.NewServeMux(),
-		templates:  tmpl,
 		cfgStore:   cfgStore,
 		worker:     workerMgr,
 		dialogs:    dialogs,
-		meshes:     make(map[string]cachedMesh),
 		sseClients: make(map[chan string]struct{}),
 	}
 
 	s.watcher = watcher.New(s.handlePyFileChanged, s.handlePresetFileChanged)
 	s.registerRoutes()
-	return s, nil
+	return s
 }
 
 // StartServices boots the Python worker and project watcher using persisted config.
@@ -102,7 +78,7 @@ func (s *Server) Handler() http.Handler {
 }
 
 // Middleware adapts the Go ServeMux for Wails3 AssetOptions.Middleware.
-// Any matched /hx/*, /api/*, or /events route is handled by Go; everything else
+// Any matched /api/* or /events route is handled by Go; everything else
 // falls through to Wails' static/dev asset server.
 func (s *Server) Middleware(next http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
@@ -118,39 +94,40 @@ func (s *Server) Middleware(next http.Handler) http.Handler {
 }
 
 func (s *Server) registerRoutes() {
-	// HTMX partials
-	s.mux.HandleFunc("GET /hx/header", s.handleHeader)
-	s.mux.HandleFunc("GET /hx/theme-controller", s.handleThemeController)
-	s.mux.HandleFunc("POST /hx/theme", s.handleThemeSave)
-	s.mux.HandleFunc("GET /hx/sidebar", s.handleSidebar)
-	s.mux.HandleFunc("GET /hx/models", s.handleModelList)
-	s.mux.HandleFunc("GET /hx/models/{id}", s.handleModelForm)
-	s.mux.HandleFunc("POST /hx/models/{id}/render", s.handleModelRender)
-	s.mux.HandleFunc("POST /hx/models/{id}/export", s.handleModelExport)
-	s.mux.HandleFunc("GET /hx/models/{id}/presets", s.handlePresetBar)
-	s.mux.HandleFunc("POST /hx/models/{id}/presets", s.handleSavePreset)
+	// Config & Health
+	s.mux.HandleFunc("GET /api/config", s.handleGetConfig)
+	s.mux.HandleFunc("POST /api/config", s.handleSaveConfig)
+	s.mux.HandleFunc("POST /api/config/theme", s.handleSaveTheme)
+	s.mux.HandleFunc("GET /api/health", s.handleHealth)
 
-	// Settings
-	s.mux.HandleFunc("GET /hx/settings", s.handleSettingsModal)
-	s.mux.HandleFunc("GET /hx/settings/health", s.handleSettingsHealth)
-	s.mux.HandleFunc("POST /hx/settings", s.handleSettingsSave)
-	s.mux.HandleFunc("POST /hx/settings/browse-project", s.handleBrowseProject)
-	s.mux.HandleFunc("POST /hx/settings/browse-python", s.handleBrowsePython)
+	// Native OS Dialogs
+	s.mux.HandleFunc("POST /api/dialogs/project", s.handleDialogProject)
+	s.mux.HandleFunc("POST /api/dialogs/python", s.handleDialogPython)
 
-	// Data / Download APIs
-	s.mux.HandleFunc("GET /api/models/{id}/mesh", s.handleGetMesh)
-	s.mux.HandleFunc("POST /api/models/{id}/export", s.handleDownloadExport)
+	// Models, Rendering, Exporting & Presets
+	s.mux.HandleFunc("GET /api/models", s.handleListModels)
+	s.mux.HandleFunc("GET /api/models/{id}", s.handleGetModel)
+	s.mux.HandleFunc("POST /api/models/{id}/render", s.handleRenderModel)
+	s.mux.HandleFunc("POST /api/models/{id}/export", s.handleExportModel)
+	s.mux.HandleFunc("GET /api/models/{id}/presets", s.handleGetPresets)
+	s.mux.HandleFunc("POST /api/models/{id}/presets", s.handleSavePreset)
 
 	// SSE for hot-reload
 	s.mux.HandleFunc("GET /events", s.handleSSE)
 }
 
-func (s *Server) renderTemplate(w http.ResponseWriter, name string, data any) {
-	w.Header().Set("Content-Type", "text/html; charset=utf-8")
-	if err := s.templates.ExecuteTemplate(w, name, data); err != nil {
-		log.Printf("template %s error: %v", name, err)
-		http.Error(w, err.Error(), http.StatusInternalServerError)
+func writeJSON(w http.ResponseWriter, status int, payload any) {
+	w.Header().Set("Content-Type", "application/json; charset=utf-8")
+	w.WriteHeader(status)
+	if err := json.NewEncoder(w).Encode(payload); err != nil {
+		log.Printf("json encode error: %v", err)
 	}
+}
+
+func decodeJSON(r *http.Request, dst any) error {
+	defer r.Body.Close()
+	dec := json.NewDecoder(r.Body)
+	return dec.Decode(dst)
 }
 
 func (s *Server) broadcastSSE(eventName string, payload any) {

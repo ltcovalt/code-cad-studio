@@ -13,9 +13,6 @@ import (
 //go:embed all:frontend/dist
 var assets embed.FS
 
-//go:embed templates/*.html
-var templateFS embed.FS
-
 //go:embed worker/worker.py
 var workerScript []byte
 
@@ -65,10 +62,7 @@ func main() {
 	workerMgr := worker.NewManager(workerScript)
 	dialogs := &wailsDialogs{}
 
-	srv, err := server.New(templateFS, cfgStore, workerMgr, dialogs)
-	if err != nil {
-		log.Fatalf("Failed to initialize HTTP server: %v", err)
-	}
+	srv := server.New(cfgStore, workerMgr, dialogs)
 
 	app := application.New(application.Options{
 		Name:        "Code CAD Studio",

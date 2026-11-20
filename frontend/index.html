@@ -8,51 +8,8 @@
 </head>
 
 <body class="h-screen w-screen flex flex-col bg-base-100 text-base-content overflow-hidden">
-  <!-- Top Header (HTMX managed) -->
-  <div id="header-slot" hx-get="/hx/header" hx-trigger="load, projectChanged from:body" hx-swap="innerHTML"></div>
-
-  <!-- Main Workspace: Resizable Sidebar + Persistent three-cad-viewer Canvas -->
-  <div id="workspace-root" class="flex-1 flex min-h-0 overflow-hidden">
-    <!-- Left Sidebar (HTMX swap target, resizable width & stacked/side-by-side layout) -->
-    <aside
-      id="sidebar-slot"
-      data-sidebar-layout="stacked"
-      class="bg-base-100 flex min-h-0 overflow-hidden shrink-0"
-      style="width: 320px;"
-      hx-get="/hx/sidebar"
-      hx-trigger="load, projectChanged from:body"
-      hx-swap="innerHTML">
-    </aside>
-
-    <!-- Outer Vertical Splitter (Sidebar <-> 3D Viewport) -->
-    <div id="splitter-sidebar-viewport" class="splitter splitter-v" title="Drag to resize panel"></div>
-
-    <!-- Persistent 3D Viewport (NEVER swapped by HTMX) -->
-    <main class="flex-1 relative min-w-0 min-h-0 bg-base-300/40 overflow-hidden p-2">
-      <div id="cad-viewer-root"></div>
-      <div id="viewer-empty-state" class="absolute inset-0 flex items-center justify-center pointer-events-none">
-        <div class="text-center opacity-50 space-y-1">
-          <div class="text-lg font-semibold">3D CAD Viewport</div>
-          <div class="text-xs">Select a model from the sidebar to render</div>
-        </div>
-      </div>
-    </main>
-
-    <!-- Right Vertical Splitter (3D Viewport <-> Right Parameters Panel) -->
-    <div id="splitter-viewport-right" class="splitter splitter-v hidden" title="Drag to resize parameters panel"></div>
-
-    <!-- Right Panel Dock (hosts #model-workspace when layout is 'right') -->
-    <aside
-      id="right-panel-slot"
-      class="bg-base-100 flex flex-col min-h-0 overflow-hidden shrink-0 hidden"
-      style="width: 320px;">
-    </aside>
-  </div>
-
-  <!-- Settings / Dialog Modal Container -->
-  <div id="modal-container"></div>
-
-  <script type="module" src="./src/main.js"></script>
+  <div id="app" class="h-full w-full flex flex-col overflow-hidden"></div>
+  <script type="module" src="/src/main.ts"></script>
 </body>
 
 </html>

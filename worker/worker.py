@@ -8,6 +8,7 @@ Keeps build123d / OCP imported in memory and serves a local HTTP JSON API for:
   - GET  /models
   - GET  /models/<id>/schema
   - POST /models/<id>/render
+  - POST /models/<id>/export-name
   - POST /models/<id>/export
 """
 
@@ -181,18 +182,22 @@ def _discover_script_metadata(py_file: Path, project_root: Path) -> dict[str, An
     }
 
 
-def _unwrap_optional(tp: Any) -> Any:
+def _unwrap_optional(tp: Any) -> tuple[Any, bool]:
     origin = get_origin(tp)
     if origin is Union:
-        args = [a for a in get_args(tp) if a is not type(None)]
-        if len(args) == 1:
-            return args[0]
+        args = get_args(tp)
+        non_none = [a for a in args if a is not type(None)]
+        has_none = len(non_none) < len(args)
+        if has_none and len(non_none) == 1:
+            return non_none[0], True
     # Python 3.10+ X | None
     if str(origin) == "types.UnionType":
-        args = [a for a in get_args(tp) if a is not type(None)]
-        if len(args) == 1:
-            return args[0]
-    return tp
+        args = get_args(tp)
+        non_none = [a for a in args if a is not type(None)]
+        has_none = len(non_none) < len(args)
+        if has_none and len(non_none) == 1:
+            return non_none[0], True
+    return tp, False
 
 
 def _serialize_default(val: Any) -> Any:
@@ -255,7 +260,7 @@ def _introspect_dataclass(
             continue
 
         raw_type = hints.get(f.name, f.type)
-        unwrapped = _unwrap_optional(raw_type)
+        unwrapped, is_nullable = _unwrap_optional(raw_type)
         default_val = getattr(instance, f.name)
         serialized_default = _serialize_default(default_val)
         defaults[f.name] = serialized_default
@@ -270,16 +275,20 @@ def _introspect_dataclass(
             nested_cls = unwrapped if dataclasses.is_dataclass(unwrapped) else type(default_val)
             nested_fields, nested_defaults = _introspect_dataclass(nested_cls, None, prefix=field_path)
             defaults[f.name] = nested_defaults
-            fields_schema.append(
-                {
-                    "name": f.name,
-                    "path": field_path,
-                    "label": label,
-                    "type": "group",
-                    "description": desc,
-                    "children": nested_fields,
-                }
-            )
+            if not desc:
+                nested_doc = inspect.getdoc(nested_cls) or ""
+                desc = nested_doc.splitlines()[0].strip() if nested_doc else ""
+            group_info: dict[str, Any] = {
+                "name": f.name,
+                "path": field_path,
+                "label": label,
+                "type": "group",
+                "description": desc,
+                "children": nested_fields,
+            }
+            if "when" in meta and isinstance(meta["when"], dict):
+                group_info["when"] = meta["when"]
+            fields_schema.append(group_info)
             continue
 
         origin = get_origin(unwrapped)
@@ -290,16 +299,20 @@ def _introspect_dataclass(
             "default": serialized_default,
             "description": desc,
         }
+        if is_nullable:
+            field_info["nullable"] = True
+        if "when" in meta and isinstance(meta["when"], dict):
+            field_info["when"] = meta["when"]
 
         if origin is Literal:
             choices = list(get_args(unwrapped))
             field_info["type"] = "enum"
             field_info["choices"] = [str(c) for c in choices]
-            field_info["default"] = str(serialized_default)
+            field_info["default"] = None if (is_nullable and serialized_default is None) else str(serialized_default)
         elif inspect.isclass(unwrapped) and issubclass(unwrapped, enum.Enum):
             field_info["type"] = "enum"
             field_info["choices"] = [str(m.value) for m in unwrapped]
-            field_info["default"] = str(serialized_default)
+            field_info["default"] = None if (is_nullable and serialized_default is None) else str(serialized_default)
         elif unwrapped is bool or isinstance(default_val, bool):
             field_info["type"] = "bool"
         elif unwrapped is int or (isinstance(default_val, int) and not isinstance(default_val, bool)):
@@ -322,7 +335,7 @@ def _introspect_dataclass(
                 field_info["max"] = meta["max"]
         else:
             field_info["type"] = "str"
-            field_info["default"] = "" if serialized_default is None else str(serialized_default)
+            field_info["default"] = None if (is_nullable and serialized_default is None) else ("" if serialized_default is None else str(serialized_default))
 
         fields_schema.append(field_info)
 
@@ -345,7 +358,10 @@ def _introspect_function_signature(func: Any) -> tuple[list[dict[str, Any]], dic
             continue
         default_val = None if param.default is inspect.Parameter.empty else param.default
         raw_type = hints.get(param_name, param.annotation)
-        unwrapped = _unwrap_optional(raw_type) if raw_type is not inspect.Parameter.empty else type(default_val)
+        if raw_type is not inspect.Parameter.empty:
+            unwrapped, is_nullable = _unwrap_optional(raw_type)
+        else:
+            unwrapped, is_nullable = type(default_val), default_val is None
 
         serialized_default = _serialize_default(default_val)
         defaults[param_name] = serialized_default
@@ -357,6 +373,8 @@ def _introspect_function_signature(func: Any) -> tuple[list[dict[str, Any]], dic
             "default": serialized_default,
             "description": "",
         }
+        if is_nullable:
+            field_info["nullable"] = True
 
         origin = get_origin(unwrapped)
         if origin is Literal:
@@ -367,18 +385,18 @@ def _introspect_function_signature(func: Any) -> tuple[list[dict[str, Any]], dic
             field_info["choices"] = [str(m.value) for m in unwrapped]
         elif unwrapped is bool or isinstance(default_val, bool):
             field_info["type"] = "bool"
-            field_info["default"] = bool(default_val) if default_val is not None else False
+            field_info["default"] = None if (is_nullable and default_val is None) else (bool(default_val) if default_val is not None else False)
         elif unwrapped is int or (isinstance(default_val, int) and not isinstance(default_val, bool)):
             field_info["type"] = "int"
             field_info["step"] = 1
-            field_info["default"] = int(default_val) if default_val is not None else 0
+            field_info["default"] = None if (is_nullable and default_val is None) else (int(default_val) if default_val is not None else 0)
         elif unwrapped is float or isinstance(default_val, float):
             field_info["type"] = "float"
             field_info["step"] = 0.5
-            field_info["default"] = float(default_val) if default_val is not None else 0.0
+            field_info["default"] = None if (is_nullable and default_val is None) else (float(default_val) if default_val is not None else 0.0)
         else:
             field_info["type"] = "str"
-            field_info["default"] = "" if default_val is None else str(default_val)
+            field_info["default"] = None if (is_nullable and default_val is None) else ("" if default_val is None else str(default_val))
 
         fields_schema.append(field_info)
 
@@ -386,9 +404,9 @@ def _introspect_function_signature(func: Any) -> tuple[list[dict[str, Any]], dic
 
 
 def _coerce_value(val: Any, target_type: Any, default_val: Any) -> Any:
-    unwrapped = _unwrap_optional(target_type)
+    unwrapped, is_nullable = _unwrap_optional(target_type)
     if val is None:
-        return default_val
+        return None if is_nullable else default_val
 
     if dataclasses.is_dataclass(unwrapped) or dataclasses.is_dataclass(default_val):
         cls = unwrapped if dataclasses.is_dataclass(unwrapped) else type(default_val)
@@ -410,6 +428,35 @@ def _coerce_value(val: Any, target_type: Any, default_val: Any) -> Any:
                 return c
         return default_val
 
+    if origin in (list, tuple):
+        if isinstance(val, str):
+            stripped = val.strip()
+            if stripped == "":
+                return None if (is_nullable or default_val is None) else default_val
+            try:
+                parsed = json.loads(stripped)
+                if isinstance(parsed, list):
+                    val = parsed
+                else:
+                    val = [parsed]
+            except Exception:
+                val = [part.strip() for part in stripped.strip("[]()").split(",") if part.strip()]
+        if isinstance(val, (list, tuple)):
+            elem_args = get_args(unwrapped)
+            if origin is tuple and elem_args and not (len(elem_args) == 2 and elem_args[1] is Ellipsis):
+                coerced_items = [
+                    _coerce_value(item, elem_args[i] if i < len(elem_args) else Any, None)
+                    for i, item in enumerate(val)
+                ]
+                return tuple(coerced_items)
+            elem_type = elem_args[0] if elem_args else Any
+            coerced_items = [
+                _coerce_value(item, elem_type, None) if elem_type is not Any else item
+                for item in val
+            ]
+            return tuple(coerced_items) if origin is tuple else coerced_items
+        return None if is_nullable else default_val
+
     if unwrapped is bool or isinstance(default_val, bool):
         if isinstance(val, bool):
             return val
@@ -419,12 +466,12 @@ def _coerce_value(val: Any, target_type: Any, default_val: Any) -> Any:
 
     if unwrapped is int or (isinstance(default_val, int) and not isinstance(default_val, bool)):
         if val == "":
-            return None if default_val is None else default_val
+            return None if (is_nullable or default_val is None) else default_val
         return int(round(float(val)))
 
     if unwrapped is float or isinstance(default_val, float):
         if val == "":
-            return None if default_val is None else default_val
+            return None if (is_nullable or default_val is None) else default_val
         return float(val)
 
     return str(val)
@@ -447,6 +494,19 @@ def _instantiate_dataclass(cls: type, overrides: dict[str, Any]) -> Any:
             kwargs[name] = _coerce_value(overrides[name], target_type, default_val)
 
     return cls(**kwargs)
+
+
+def _sanitize_filename_stem(raw: str, fallback: str) -> str:
+    """Sanitize a candidate filename stem to safe lowercase snake_case without extension."""
+    stem = Path(str(raw).strip()).name
+    for ext in (".step", ".stp", ".stl", ".3mf"):
+        if stem.lower().endswith(ext):
+            stem = stem[: -len(ext)]
+            break
+    stem = stem.strip().lower()
+    stem = re.sub(r"[^a-z0-9._-]+", "_", stem)
+    stem = re.sub(r"_+", "_", stem).strip("._-")
+    return stem or fallback
 
 
 def _to_json_safe(obj: Any) -> Any:
@@ -945,7 +1005,38 @@ class WorkerState:
                 "defaults": defaults,
             }
 
-    def _build_shape(self, model_id: str, params_dict: dict[str, Any]) -> tuple[dict[str, Any], Any, float]:
+    def _resolve_export_filename(
+        self,
+        model_id: str,
+        module: Any,
+        params_cls: type | None,
+        params_dict: dict[str, Any],
+        params_obj: Any = None,
+    ) -> str:
+        hook = getattr(module, "export_filename", None)
+        if not callable(hook):
+            return model_id
+        try:
+            if params_obj is None and params_cls is not None:
+                params_obj = _instantiate_dataclass(params_cls, params_dict)
+            if params_obj is not None:
+                raw = hook(params_obj)
+            else:
+                raw = hook(params_dict)
+            if isinstance(raw, str) and raw.strip():
+                return _sanitize_filename_stem(raw, model_id)
+        except Exception:
+            pass
+        return model_id
+
+    def get_export_filename(self, model_id: str, params_dict: dict[str, Any]) -> dict[str, Any]:
+        with self.lock:
+            meta, module = self._load_model_module(model_id)
+            params_cls, _ = self._resolve_entrypoints(meta, module)
+            stem = self._resolve_export_filename(model_id, module, params_cls, params_dict)
+            return {"ok": True, "export_filename": stem}
+
+    def _build_shape(self, model_id: str, params_dict: dict[str, Any]) -> tuple[dict[str, Any], Any, float, str]:
         if not HAS_BUILD123D:
             raise RuntimeError(f"build123d is not available in {sys.executable}: {BUILD123D_ERROR}")
 
@@ -953,6 +1044,7 @@ class WorkerState:
         params_cls, func = self._resolve_entrypoints(meta, module)
 
         t0 = time.perf_counter()
+        params_obj = None
         if params_cls is not None:
             params_obj = _instantiate_dataclass(params_cls, params_dict)
             result = func(params_obj)
@@ -970,17 +1062,19 @@ class WorkerState:
             result = func(**kwargs)
 
         build_ms = (time.perf_counter() - t0) * 1000.0
+        export_stem = self._resolve_export_filename(model_id, module, params_cls, params_dict, params_obj)
         self.last_build = {
             "model_id": model_id,
             "params_json": json.dumps(params_dict, sort_keys=True),
             "result": result,
             "meta": meta,
+            "export_filename": export_stem,
         }
-        return meta, result, build_ms
+        return meta, result, build_ms, export_stem
 
     def render(self, model_id: str, params_dict: dict[str, Any]) -> dict[str, Any]:
         with self.lock:
-            meta, result, build_ms = self._build_shape(model_id, params_dict)
+            meta, result, build_ms, export_stem = self._build_shape(model_id, params_dict)
             t1 = time.perf_counter()
             shapes, bbox = tessellate_result(result, meta["name"])
             tess_ms = (time.perf_counter() - t1) * 1000.0
@@ -991,6 +1085,7 @@ class WorkerState:
                 "tessellate_time_ms": round(tess_ms, 1),
                 "bbox": bbox,
                 "shapes": _to_json_safe(shapes),
+                "export_filename": export_stem,
             }
 
     def export(self, model_id: str, params_dict: dict[str, Any], fmt: str, output_path: str = "") -> tuple[dict[str, Any] | None, bytes | None]:
@@ -1003,7 +1098,7 @@ class WorkerState:
             ):
                 result = self.last_build["result"]
             else:
-                _, result, _ = self._build_shape(model_id, params_dict)
+                _, result, _, _ = self._build_shape(model_id, params_dict)
 
             if output_path:
                 out = Path(output_path).expanduser().resolve()
@@ -1095,6 +1190,13 @@ def make_handler(state: WorkerState) -> type[BaseHTTPRequestHandler]:
                     model_id = unquote(m_render.group(1))
                     params = body.get("params", {})
                     self._send_json(state.render(model_id, params))
+                    return
+
+                m_export_name = re.match(r"^/models/([^/]+)/export-name$", path)
+                if m_export_name:
+                    model_id = unquote(m_export_name.group(1))
+                    params = body.get("params", {})
+                    self._send_json(state.get_export_filename(model_id, params))
                     return
 
                 m_export = re.match(r"^/models/([^/]+)/export$", path)

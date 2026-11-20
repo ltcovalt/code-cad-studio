@@ -29,17 +29,19 @@ type ModelsResponse struct {
 }
 
 type ParamField struct {
-	Name        string       `json:"name"`
-	Path        string       `json:"path"`
-	Label       string       `json:"label"`
-	Type        string       `json:"type"` // bool, int, float, str, enum, group
-	Default     any          `json:"default"`
-	Description string       `json:"description"`
-	Choices     []string     `json:"choices,omitempty"`
-	Min         *float64     `json:"min,omitempty"`
-	Max         *float64     `json:"max,omitempty"`
-	Step        *float64     `json:"step,omitempty"`
-	Children    []ParamField `json:"children,omitempty"`
+	Name        string         `json:"name"`
+	Path        string         `json:"path"`
+	Label       string         `json:"label"`
+	Type        string         `json:"type"` // bool, int, float, str, enum, group
+	Default     any            `json:"default"`
+	Description string         `json:"description"`
+	Nullable    bool           `json:"nullable,omitempty"`
+	When        map[string]any `json:"when,omitempty"`
+	Choices     []string       `json:"choices,omitempty"`
+	Min         *float64       `json:"min,omitempty"`
+	Max         *float64       `json:"max,omitempty"`
+	Step        *float64       `json:"step,omitempty"`
+	Children    []ParamField   `json:"children,omitempty"`
 }
 
 type SchemaResponse struct {
@@ -71,8 +73,15 @@ type RenderResponse struct {
 	TessellateTimeMs float64         `json:"tessellate_time_ms"`
 	BBox             *BBox           `json:"bbox,omitempty"`
 	Shapes           json.RawMessage `json:"shapes,omitempty"`
+	ExportFilename   string          `json:"export_filename,omitempty"`
 	Error            string          `json:"error,omitempty"`
 	Traceback        string          `json:"traceback,omitempty"`
+}
+
+type ExportNameResponse struct {
+	OK             bool   `json:"ok"`
+	ExportFilename string `json:"export_filename,omitempty"`
+	Error          string `json:"error,omitempty"`
 }
 
 type ExportResponse struct {

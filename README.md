@@ -1,19 +1,17 @@
 # Code CAD Studio
 
-A local-first, model-agnostic desktop GUI for parametric [`build123d`](https://github.com/gumyr/build123d) Python scripts, built with **Wails v3 (Go) + HTMX + Tailwind CSS v4 + daisyUI + `three-cad-viewer`** and backed by a **persistent Python worker**.
-
-Based on the [`wails-htmx-tailwind-daisyui-template`](https://github.com/ltcovalt/wails-htmx-tailwind-daisyui-template) architecture, upgraded to Wails v3.
+A local-first, model-agnostic desktop GUI for parametric [`build123d`](https://github.com/gumyr/build123d) Python scripts, built with **Wails v3 (Go) + Svelte 5 + TypeScript + Tailwind CSS v4 + daisyUI v5 + `three-cad-viewer`** and backed by a **persistent Python worker**.
 
 ## Features
 
 - **Model-Agnostic Discovery**: Point the app at any folder of `build123d` scripts (`models/<name>/<name>.py` or standalone `.py` files) with shared `components/`.
-- **Automatic Parameter UI**: Introspects `<Model>Params` `@dataclass` fields (`bool`, `int`, `float`, `str`, `Literal`, `Enum`, inline comments, and `field(metadata={"min", "max", "step"})`). Nested `@dataclass` fields render as explicit collapsible sections—and any nested dataclass with an `enabled: bool` field automatically promotes that toggle into its section header. Ungrouped top-level fields render inside a collapsible **Core Parameters** section.
+- **Automatic Parameter UI**: Introspects `<Model>Params` `@dataclass` fields (`bool`, `int`, `float`, `str`, `Literal`, `Enum`, `Optional[T]` nullable `Auto` controls, inline comments, nested dataclass docstrings, `field(metadata={"min", "max", "step"})`, and conditional `metadata={"when": {...}}` visibility). Nested `@dataclass` fields render as collapsible sections—and any nested dataclass with a non-nullable `enabled: bool` field promotes that toggle into its section header.
 - **Persistent Python Worker**: Keeps `build123d`/`OCP` imported in memory for fast debounced slider/input updates without per-render Python startup overhead.
-- **Interactive 3D Viewport**: `three-cad-viewer` mounted outside HTMX swap targets so camera angle and zoom are preserved across parameter edits.
+- **Interactive 3D Viewport**: Permanently mounted `three-cad-viewer` across all 3 resizable layouts (`Single Column`, `Side by Side`, `Right Parameters`) so WebGL state, camera angle, and zoom are preserved across parameter edits, presets, layout changes, and hot reloads.
 - **Presets**: Synthesizes a `Default` preset from `<Model>Params()`, loads project `presets.json` + user-local `~/.config/code-cad-studio/presets/`, and saves sparse diffs.
-- **Hot Reload**: Recursive `fsnotify` watcher restarts the Python worker on `.py` edits (including `components/`) and re-renders the active model in place via SSE.
-- **Native Exports**: Export `.step`, `.stl`, and `.3mf` via native OS Save-As dialogs.
-- **Web-Portable Core**: `internal/server` uses standard Go `net/http` with zero Wails imports.
+- **Hot Reload**: Recursive `fsnotify` watcher restarts the Python worker on `.py` edits (including `components/`), refreshes schemas/presets while preserving active user edits, and re-renders in place via SSE.
+- **Smart Native Exports**: Export `.step`, `.stl`, and `.3mf` via native OS Save-As dialogs (or browser downloads in web mode), pre-filling filenames from an optional `export_filename(params)` hook.
+- **Web-Portable Core**: `internal/server` exposes a clean JSON REST API (`/api/*`) + SSE (`/events`) using standard Go `net/http` with zero Wails imports.
 
 ## Quick Start
 
@@ -23,10 +21,11 @@ Based on the [`wails-htmx-tailwind-daisyui-template`](https://github.com/ltcoval
 wails3 dev
 ```
 
-### Production Build
+### Typecheck & Production Build
 
 ```bash
-cd frontend && npm run build && cd ..
+cd frontend && npm run check && npm run build && cd ..
+go test ./...
 go build -o bin/code-cad-studio .
 ```
 

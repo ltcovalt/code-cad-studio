@@ -295,6 +295,18 @@ func (m *Manager) Render(ctx context.Context, modelID string, params map[string]
 	return &out, nil
 }
 
+func (m *Manager) ExportName(ctx context.Context, modelID string, params map[string]any) (string, error) {
+	var out ExportNameResponse
+	p := "/models/" + url.PathEscape(modelID) + "/export-name"
+	if err := m.doJSON(ctx, http.MethodPost, p, map[string]any{"params": params}, &out); err != nil {
+		return "", err
+	}
+	if !out.OK || strings.TrimSpace(out.ExportFilename) == "" {
+		return modelID, nil
+	}
+	return out.ExportFilename, nil
+}
+
 func (m *Manager) ExportToPath(ctx context.Context, modelID string, params map[string]any, format, outputPath string) (*ExportResponse, error) {
 	var out ExportResponse
 	p := "/models/" + url.PathEscape(modelID) + "/export"
