@@ -5,6 +5,7 @@ Persistent Python worker for Code CAD Studio.
 Keeps build123d / OCP imported in memory and serves a local HTTP JSON API for:
   - GET  /health
   - POST /configure
+  - POST /reload
   - GET  /models
   - GET  /models/<id>/schema
   - POST /models/<id>/render
@@ -15,7 +16,10 @@ Keeps build123d / OCP imported in memory and serves a local HTTP JSON API for:
 from __future__ import annotations
 
 import argparse
+import array
 import ast
+import base64
+from collections import OrderedDict
 import dataclasses
 import enum
 import importlib.util
@@ -767,6 +771,85 @@ def _tessellate_shape_ocp(shape: Any, linear_deflection: float = 0.1, angular_de
     return shape_payload, bbox
 
 
+def _encode_b64_array(values: Any, dtype: str) -> dict[str, str]:
+    """Encode a numpy array or Python sequence as a three-cad-viewer inline b64 buffer."""
+    if hasattr(values, "tobytes"):
+        np_dtype = "<f4" if dtype == "float32" else "<u4"
+        raw = values.astype(np_dtype, copy=False).tobytes()
+    else:
+        typecode = "f" if dtype == "float32" else "I"
+        arr = array.array(typecode, values)
+        if sys.byteorder != "little":
+            arr.byteswap()
+        raw = arr.tobytes()
+    return {
+        "dtype": dtype,
+        "codec": "b64",
+        "buffer": base64.b64encode(raw).decode("ascii"),
+    }
+
+
+def _encode_shape_buffers(raw_shape: dict[str, Any]) -> dict[str, Any]:
+    """Convert raw numeric arrays in a three-cad-viewer shape payload to compact b64 buffers."""
+    float_keys = ("vertices", "normals", "edges", "obj_vertices")
+    uint_keys = ("triangles", "triangles_per_face", "segments_per_edge", "face_types", "edge_types")
+    encoded: dict[str, Any] = {}
+    for k in float_keys:
+        encoded[k] = _encode_b64_array(raw_shape.get(k, ()), "float32")
+    for k in uint_keys:
+        encoded[k] = _encode_b64_array(raw_shape.get(k, ()), "uint32")
+    return encoded
+
+
+def _tessellate_shape_fast(
+    shape: Any,
+    cache_tag: str,
+    linear_deflection: float = 0.1,
+    angular_deflection: float = 0.2,
+) -> tuple[dict[str, Any], dict[str, float]]:
+    """Use ocp_tessellate when available for fast NumPy tessellation, else fallback to pure OCP."""
+    if HAS_OCP_TESSELLATE:
+        try:
+            from OCP.Bnd import Bnd_Box
+            from OCP.BRepBndLib import BRepBndLib
+            from ocp_tessellate.tessellator import tessellate as ocp_tess
+
+            wrapped = getattr(shape, "wrapped", shape)
+            bnd = Bnd_Box()
+            BRepBndLib.AddOptimal_s(wrapped, bnd, True, False)
+            xmin, ymin, zmin, xmax, ymax, zmax = bnd.Get()
+            diag = math.sqrt((xmax - xmin) ** 2 + (ymax - ymin) ** 2 + (zmax - zmin) ** 2)
+            defl = max(0.02, min(linear_deflection, diag * 0.002 if diag > 0 else 0.1))
+
+            mesh = ocp_tess(
+                [wrapped],
+                cache_tag,
+                quality=defl,
+                deviation=defl,
+                angular_tolerance=angular_deflection,
+                compute_edges=True,
+                compute_faces=True,
+            )
+            bbox = {
+                "xmin": xmin,
+                "xmax": xmax,
+                "ymin": ymin,
+                "ymax": ymax,
+                "zmin": zmin,
+                "zmax": zmax,
+            }
+            return _encode_shape_buffers(mesh), bbox
+        except Exception:
+            pass
+
+    shape_data, bbox = _tessellate_shape_ocp(
+        shape,
+        linear_deflection=linear_deflection,
+        angular_deflection=angular_deflection,
+    )
+    return _encode_shape_buffers(shape_data), bbox
+
+
 def tessellate_result(result: Any, model_name: str) -> tuple[dict[str, Any], dict[str, float]]:
     """Tessellate a model's returned shape(s) into three-cad-viewer v5 Shapes JSON."""
     named_parts = _collect_named_parts(result, model_name)
@@ -779,6 +862,7 @@ def tessellate_result(result: Any, model_name: str) -> tuple[dict[str, Any], dic
     g_xmax = g_ymax = g_zmax = float("-inf")
 
     seen_names: dict[str, int] = {}
+    ts_ns = time.monotonic_ns()
     for name, shp, hex_color, alpha in named_parts:
         clean_name = re.sub(r"[^A-Za-z0-9_\- ]+", "_", name).strip() or "Part"
         count = seen_names.get(clean_name, 0)
@@ -786,7 +870,7 @@ def tessellate_result(result: Any, model_name: str) -> tuple[dict[str, Any], dic
         if count > 0:
             clean_name = f"{clean_name}_{count + 1}"
 
-        shape_data, bb = _tessellate_shape_ocp(shp)
+        shape_data, bb = _tessellate_shape_fast(shp, f"{clean_name}_{id(shp)}_{ts_ns}")
         g_xmin = min(g_xmin, bb["xmin"])
         g_xmax = max(g_xmax, bb["xmax"])
         g_ymin = min(g_ymin, bb["ymin"])
@@ -867,21 +951,79 @@ def export_shape_to_file(result: Any, fmt: str, out_path: Path) -> None:
         raise ValueError(f"Unsupported export format: {fmt}")
 
 
+MAX_RENDER_CACHE = 24
+
+
 class WorkerState:
     def __init__(self, project_root: str = "") -> None:
         self.lock = threading.RLock()
+        self._seq_lock = threading.Lock()
+        self._render_seq = 0
         self.project_root: Path | None = None
         self.models: dict[str, dict[str, Any]] = {}
         self.loaded_modules: dict[str, Any] = {}
         self.last_build: dict[str, Any] = {}
+        self._render_cache: OrderedDict[tuple[str, str], dict[str, Any]] = OrderedDict()
         if project_root:
             self.configure(project_root)
+
+    def _next_render_seq(self) -> int:
+        with self._seq_lock:
+            self._render_seq += 1
+            return self._render_seq
+
+    def _latest_render_seq(self) -> int:
+        with self._seq_lock:
+            return self._render_seq
+
+    def _evict_project_modules(self) -> None:
+        """Evict loaded model and project helper modules from sys.modules for warm reload."""
+        roots: list[Path] = []
+        if self.project_root is not None:
+            roots.append(self.project_root)
+            if self.project_root.name == "models" and (self.project_root.parent / "components").is_dir():
+                roots.append(self.project_root.parent / "components")
+
+        to_delete: list[str] = []
+        for mod_name, mod in list(sys.modules.items()):
+            if mod_name.startswith("code_cad_model_"):
+                to_delete.append(mod_name)
+                continue
+            mod_file = getattr(mod, "__file__", None)
+            if not mod_file or not roots:
+                continue
+            try:
+                resolved = Path(mod_file).resolve()
+            except Exception:
+                continue
+            for root in roots:
+                try:
+                    resolved.relative_to(root)
+                    to_delete.append(mod_name)
+                    break
+                except ValueError:
+                    continue
+
+        for mod_name in to_delete:
+            sys.modules.pop(mod_name, None)
+
+        self.loaded_modules.clear()
+        self.last_build.clear()
+        self._render_cache.clear()
+
+    def reload_project(self) -> list[dict[str, Any]]:
+        """Warm-reload project scripts without restarting Python or re-importing build123d."""
+        with self.lock:
+            self._evict_project_modules()
+            return self.discover_models()
 
     def configure(self, project_root: str) -> list[dict[str, Any]]:
         with self.lock:
             root = Path(project_root).expanduser().resolve()
             if not root.exists() or not root.is_dir():
                 raise FileNotFoundError(f"Project root does not exist: {root}")
+
+            self._evict_project_modules()
 
             # Remove previous project root from sys.path
             if self.project_root is not None:
@@ -900,8 +1042,6 @@ class WorkerState:
                 if parent_str not in sys.path:
                     sys.path.insert(0, parent_str)
 
-            self.loaded_modules.clear()
-            self.last_build.clear()
             return self.discover_models()
 
     def discover_models(self) -> list[dict[str, Any]]:
@@ -1073,12 +1213,27 @@ class WorkerState:
         return meta, result, build_ms, export_stem
 
     def render(self, model_id: str, params_dict: dict[str, Any]) -> dict[str, Any]:
+        my_seq = self._next_render_seq()
+        params_key = json.dumps(params_dict, sort_keys=True)
+        cache_key = (model_id, params_key)
+
         with self.lock:
+            if my_seq != self._latest_render_seq():
+                return {"ok": False, "superseded": True, "model_id": model_id}
+
+            cached = self._render_cache.get(cache_key)
+            if cached is not None:
+                self._render_cache.move_to_end(cache_key)
+                return {**cached, "cached": True, "build_time_ms": 0.0, "tessellate_time_ms": 0.0}
+
             meta, result, build_ms, export_stem = self._build_shape(model_id, params_dict)
+            if my_seq != self._latest_render_seq():
+                return {"ok": False, "superseded": True, "model_id": model_id}
+
             t1 = time.perf_counter()
             shapes, bbox = tessellate_result(result, meta["name"])
             tess_ms = (time.perf_counter() - t1) * 1000.0
-            return {
+            payload = {
                 "ok": True,
                 "model_id": model_id,
                 "build_time_ms": round(build_ms, 1),
@@ -1087,6 +1242,11 @@ class WorkerState:
                 "shapes": _to_json_safe(shapes),
                 "export_filename": export_stem,
             }
+            self._render_cache[cache_key] = payload
+            self._render_cache.move_to_end(cache_key)
+            while len(self._render_cache) > MAX_RENDER_CACHE:
+                self._render_cache.popitem(last=False)
+            return payload
 
     def export(self, model_id: str, params_dict: dict[str, Any], fmt: str, output_path: str = "") -> tuple[dict[str, Any] | None, bytes | None]:
         with self.lock:
@@ -1120,7 +1280,7 @@ def make_handler(state: WorkerState) -> type[BaseHTTPRequestHandler]:
             sys.stderr.flush()
 
         def _send_json(self, payload: dict[str, Any], status: int = 200) -> None:
-            body = json.dumps(payload).encode("utf-8")
+            body = json.dumps(payload, separators=(",", ":")).encode("utf-8")
             self.send_response(status)
             self.send_header("Content-Type", "application/json")
             self.send_header("Content-Length", str(len(body)))
@@ -1183,6 +1343,11 @@ def make_handler(state: WorkerState) -> type[BaseHTTPRequestHandler]:
                     project_root = body.get("project_root", "")
                     models = state.configure(project_root)
                     self._send_json({"ok": True, "project_root": str(state.project_root), "models": models})
+                    return
+
+                if path == "/reload":
+                    models = state.reload_project()
+                    self._send_json({"ok": True, "models": models})
                     return
 
                 m_render = re.match(r"^/models/([^/]+)/render$", path)

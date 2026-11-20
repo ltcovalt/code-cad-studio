@@ -16,6 +16,7 @@ type configResponse struct {
 	ResolvedPython string                 `json:"resolved_python"`
 	HasDesktop     bool                   `json:"has_desktop"`
 	WorkerRunning  bool                   `json:"worker_running"`
+	WorkerStarting bool                   `json:"worker_starting"`
 	WorkerError    string                 `json:"worker_error"`
 	Health         *worker.HealthResponse `json:"health,omitempty"`
 	HealthError    string                 `json:"health_error,omitempty"`
@@ -32,6 +33,7 @@ func (s *Server) handleGetConfig(w http.ResponseWriter, r *http.Request) {
 		ResolvedPython: cfg.ResolvePython(),
 		HasDesktop:     s.dialogs != nil,
 		WorkerRunning:  running,
+		WorkerStarting: s.worker.Starting(),
 		WorkerError:    lastErr,
 	})
 }
@@ -58,7 +60,7 @@ func (s *Server) handleSaveConfig(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	workerErr := s.worker.Restart(cfg.ResolvePython(), cfg.ProjectRoot)
+	workerErr := s.worker.ConfigureOrRestart(r.Context(), cfg.ResolvePython(), cfg.ProjectRoot)
 	if cfg.ProjectRoot != "" {
 		_ = s.watcher.Watch(cfg.ProjectRoot)
 	} else {
@@ -80,6 +82,7 @@ func (s *Server) handleSaveConfig(w http.ResponseWriter, r *http.Request) {
 		ResolvedPython: cfg.ResolvePython(),
 		HasDesktop:     s.dialogs != nil,
 		WorkerRunning:  running,
+		WorkerStarting: s.worker.Starting(),
 		WorkerError:    lastErr,
 		Health:         health,
 		HealthError:    healthErrStr,
@@ -105,17 +108,30 @@ func (s *Server) handleSaveTheme(w http.ResponseWriter, r *http.Request) {
 }
 
 func (s *Server) handleHealth(w http.ResponseWriter, r *http.Request) {
-	health, healthErr := s.worker.Health(r.Context())
 	running, lastErr := s.worker.Status()
+	starting := s.worker.Starting()
+	if starting || !running {
+		writeJSON(w, http.StatusOK, map[string]any{
+			"worker_running":  running,
+			"worker_starting": starting,
+			"worker_error":    lastErr,
+			"health":          nil,
+			"health_error":    "",
+		})
+		return
+	}
+
+	health, healthErr := s.worker.Health(r.Context())
 	healthErrStr := ""
 	if healthErr != nil {
 		healthErrStr = healthErr.Error()
 	}
 	writeJSON(w, http.StatusOK, map[string]any{
-		"worker_running": running,
-		"worker_error":   lastErr,
-		"health":         health,
-		"health_error":   healthErrStr,
+		"worker_running":  running,
+		"worker_starting": false,
+		"worker_error":    lastErr,
+		"health":          health,
+		"health_error":    healthErrStr,
 	})
 }
 

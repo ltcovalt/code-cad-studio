@@ -47,15 +47,15 @@ export function getParamByPath(root: ParamsRecord, path: string): unknown {
 }
 
 export function setParamByPath(root: ParamsRecord, path: string, value: unknown): ParamsRecord {
-  const next = deepClone(root);
   const parts = path.split('.');
+  const next: ParamsRecord = { ...root };
   let curr: ParamsRecord = next;
   for (let i = 0; i < parts.length - 1; i++) {
     const part = parts[i];
-    if (!isPlainObject(curr[part])) {
-      curr[part] = {};
-    }
-    curr = curr[part] as ParamsRecord;
+    const existing = curr[part];
+    const clonedChild: ParamsRecord = isPlainObject(existing) ? { ...existing } : {};
+    curr[part] = clonedChild;
+    curr = clonedChild;
   }
   curr[parts[parts.length - 1]] = value;
   return next;

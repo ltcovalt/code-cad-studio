@@ -22,15 +22,18 @@ import (
 
 // Manager supervises the persistent Python worker process and provides typed HTTP calls.
 type Manager struct {
-	mu           sync.Mutex
+	lifecycleMu sync.Mutex // serializes Start / Restart / Stop
+	stateMu     sync.RWMutex
+
 	workerScript []byte
 	scriptPath   string
 	pythonPath   string
 	projectRoot  string
 	cmd          *exec.Cmd
 	baseURL      string
-	httpClient   *http.Client
+	starting     bool
 	lastErr      string
+	httpClient   *http.Client
 }
 
 // NewManager creates a new Python worker manager using the embedded worker.py script bytes.
@@ -66,21 +69,30 @@ func (m *Manager) ensureScriptPath() (string, error) {
 
 // Start launches the persistent Python worker subprocess and waits for READY <port>.
 func (m *Manager) Start(pythonPath, projectRoot string) error {
-	m.mu.Lock()
-	defer m.mu.Unlock()
+	m.lifecycleMu.Lock()
+	defer m.lifecycleMu.Unlock()
 	return m.startLocked(pythonPath, projectRoot)
 }
 
 func (m *Manager) startLocked(pythonPath, projectRoot string) error {
 	m.stopLocked()
 
+	m.stateMu.Lock()
 	m.pythonPath = pythonPath
 	m.projectRoot = projectRoot
+	m.starting = true
 	m.lastErr = ""
+	m.stateMu.Unlock()
+
+	defer func() {
+		m.stateMu.Lock()
+		m.starting = false
+		m.stateMu.Unlock()
+	}()
 
 	scriptPath, err := m.ensureScriptPath()
 	if err != nil {
-		m.lastErr = err.Error()
+		m.setErr(err.Error())
 		return err
 	}
 
@@ -92,18 +104,19 @@ func (m *Manager) startLocked(pythonPath, projectRoot string) error {
 	cmd := exec.Command(pythonPath, args...)
 	stdout, err := cmd.StdoutPipe()
 	if err != nil {
-		m.lastErr = err.Error()
+		m.setErr(err.Error())
 		return err
 	}
 	stderr, err := cmd.StderrPipe()
 	if err != nil {
-		m.lastErr = err.Error()
+		m.setErr(err.Error())
 		return err
 	}
 
 	if err := cmd.Start(); err != nil {
-		m.lastErr = fmt.Sprintf("failed to start python (%s): %v", pythonPath, err)
-		return errors.New(m.lastErr)
+		msg := fmt.Sprintf("failed to start python (%s): %v", pythonPath, err)
+		m.setErr(msg)
+		return errors.New(msg)
 	}
 
 	// Forward stderr logs
@@ -146,69 +159,119 @@ func (m *Manager) startLocked(pythonPath, projectRoot string) error {
 
 	select {
 	case port := <-readyCh:
+		m.stateMu.Lock()
 		m.cmd = cmd
 		m.baseURL = fmt.Sprintf("http://127.0.0.1:%d", port)
-		log.Printf("Python worker started (%s) on %s", pythonPath, m.baseURL)
+		m.stateMu.Unlock()
+		log.Printf("Python worker started (%s) on http://127.0.0.1:%d", pythonPath, port)
 		return nil
 	case err := <-errCh:
 		_ = cmd.Process.Kill()
 		_ = cmd.Wait()
-		m.lastErr = err.Error()
+		m.setErr(err.Error())
 		return err
 	case <-time.After(30 * time.Second):
 		_ = cmd.Process.Kill()
 		_ = cmd.Wait()
-		m.lastErr = "timed out waiting for python worker startup (30s)"
-		return errors.New(m.lastErr)
+		msg := "timed out waiting for python worker startup (30s)"
+		m.setErr(msg)
+		return errors.New(msg)
 	}
 }
 
-// Restart kills and restarts the Python worker (e.g. on .py file change or config change).
+func (m *Manager) setErr(msg string) {
+	m.stateMu.Lock()
+	m.lastErr = msg
+	m.stateMu.Unlock()
+}
+
+// Restart kills and restarts the Python worker (e.g. on Python interpreter change).
 func (m *Manager) Restart(pythonPath, projectRoot string) error {
-	m.mu.Lock()
-	defer m.mu.Unlock()
+	m.lifecycleMu.Lock()
+	defer m.lifecycleMu.Unlock()
+
+	m.stateMu.RLock()
+	curPy := m.pythonPath
+	curRoot := m.projectRoot
+	m.stateMu.RUnlock()
+
 	if pythonPath == "" {
-		pythonPath = m.pythonPath
+		pythonPath = curPy
 	}
 	if projectRoot == "" {
-		projectRoot = m.projectRoot
+		projectRoot = curRoot
 	}
 	return m.startLocked(pythonPath, projectRoot)
 }
 
+// ConfigureOrRestart updates the project root on the warm worker when the Python interpreter
+// is unchanged, avoiding a ~4s cold build123d re-import. Falls back to Restart otherwise.
+func (m *Manager) ConfigureOrRestart(ctx context.Context, pythonPath, projectRoot string) error {
+	m.stateMu.RLock()
+	running := m.baseURL != ""
+	curPy := m.pythonPath
+	m.stateMu.RUnlock()
+
+	if running && curPy == pythonPath && projectRoot != "" {
+		resp, err := m.Configure(ctx, projectRoot)
+		if err == nil && resp.OK {
+			m.stateMu.Lock()
+			m.projectRoot = projectRoot
+			m.lastErr = ""
+			m.stateMu.Unlock()
+			return nil
+		}
+	}
+	return m.Restart(pythonPath, projectRoot)
+}
+
 // Stop terminates the Python worker cleanly.
 func (m *Manager) Stop() {
-	m.mu.Lock()
-	defer m.mu.Unlock()
+	m.lifecycleMu.Lock()
+	defer m.lifecycleMu.Unlock()
 	m.stopLocked()
 }
 
 func (m *Manager) stopLocked() {
-	if m.cmd != nil && m.cmd.Process != nil {
-		_ = m.cmd.Process.Kill()
-		_ = m.cmd.Wait()
-	}
+	m.stateMu.Lock()
+	cmd := m.cmd
 	m.cmd = nil
 	m.baseURL = ""
+	m.stateMu.Unlock()
+
+	if cmd != nil && cmd.Process != nil {
+		_ = cmd.Process.Kill()
+		_ = cmd.Wait()
+	}
 }
 
-// Status returns whether the worker is running and any startup error.
+// Status returns whether the worker is running and any startup error without blocking on startup.
 func (m *Manager) Status() (bool, string) {
-	m.mu.Lock()
-	defer m.mu.Unlock()
+	m.stateMu.RLock()
+	defer m.stateMu.RUnlock()
 	return m.baseURL != "", m.lastErr
 }
 
+// Starting returns true while the Python worker subprocess is booting.
+func (m *Manager) Starting() bool {
+	m.stateMu.RLock()
+	defer m.stateMu.RUnlock()
+	return m.starting
+}
+
 func (m *Manager) getBaseURL() (string, error) {
-	m.mu.Lock()
-	defer m.mu.Unlock()
-	if m.baseURL == "" {
-		if m.lastErr != "" {
-			return "", errors.New(m.lastErr)
+	m.stateMu.RLock()
+	base := m.baseURL
+	lastErr := m.lastErr
+	m.stateMu.RUnlock()
+
+	if base == "" {
+		if lastErr != "" {
+			return "", errors.New(lastErr)
 		}
 		return "", errors.New("python worker is not running")
 	}
-	return m.baseURL, nil
+	return base, nil
 }
 
 func (m *Manager) doJSON(ctx context.Context, method, path string, reqBody any, dst any) error {
@@ -267,6 +330,21 @@ func (m *Manager) Configure(ctx context.Context, projectRoot string) (*ModelsRes
 		return nil, err
 	}
 	return &out, nil
+}
+
+// Reload evicts project modules and clears caches inside the running worker without restarting Python.
+func (m *Manager) Reload(ctx context.Context) error {
+	var out struct {
+		OK    bool   `json:"ok"`
+		Error string `json:"error,omitempty"`
+	}
+	if err := m.doJSON(ctx, http.MethodPost, "/reload", map[string]any{}, &out); err != nil {
+		return err
+	}
+	if !out.OK {
+		return errors.New(out.Error)
+	}
+	return nil
 }
 
 func (m *Manager) ListModels(ctx context.Context) (*ModelsResponse, error) {

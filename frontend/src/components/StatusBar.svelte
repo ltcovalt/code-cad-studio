@@ -61,7 +61,11 @@
         </span>
       {/if}
       <span title="Build + Tessellate time">
-        {Math.round(status.buildTimeMs)}ms + {Math.round(status.tessellateTimeMs)}ms
+        {#if status.cached}
+          cached
+        {:else}
+          {Math.round(status.buildTimeMs)}ms + {Math.round(status.tessellateTimeMs)}ms
+        {/if}
       </span>
     </div>
   {:else}

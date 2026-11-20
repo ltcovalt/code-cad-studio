@@ -7,6 +7,7 @@ import (
 	"log"
 	"net/http"
 	"sync"
+	"time"
 
 	"github.com/ltcovalt/code-cad-studio/internal/config"
 	"github.com/ltcovalt/code-cad-studio/internal/watcher"
@@ -147,6 +148,16 @@ func (s *Server) broadcastSSE(eventName string, payload any) {
 }
 
 func (s *Server) handlePyFileChanged(path string) {
+	ctx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
+	defer cancel()
+
+	// Fast warm reload (~20ms) keeps build123d/OCP loaded in memory.
+	if err := s.worker.Reload(ctx); err == nil {
+		log.Printf("Python file changed (%s) -> warm reloaded worker", path)
+		s.broadcastSSE("file-changed", map[string]string{"path": path})
+		return
+	}
+
 	log.Printf("Python file changed (%s) -> restarting worker", path)
 	cfg := s.cfgStore.Get()
 	if err := s.worker.Restart(cfg.ResolvePython(), cfg.ProjectRoot); err != nil {

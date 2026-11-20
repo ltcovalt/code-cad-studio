@@ -12,7 +12,7 @@ import type {
 } from './types';
 
 const THEME_STORAGE_KEY = 'code-cad-theme';
-const RENDER_DEBOUNCE_MS = 175;
+const RENDER_DEBOUNCE_MS = 80;
 
 class StudioState {
   // Config & environment
@@ -65,6 +65,8 @@ class StudioState {
   private viewport: CadViewportController | null = null;
   private latestRenderSeq = 0;
   private renderAbort: AbortController | null = null;
+  private renderInFlight = false;
+  private pendingCoalescedRender = false;
   private debounceTimer: ReturnType<typeof setTimeout> | null = null;
   private reloadBadgeTimer: ReturnType<typeof setTimeout> | null = null;
   private unsubscribeSSE: (() => void) | null = null;
@@ -271,12 +273,20 @@ class StudioState {
         clearTimeout(this.debounceTimer);
         this.debounceTimer = null;
       }
-      void this.triggerRender(false);
+      if (this.renderInFlight) {
+        this.pendingCoalescedRender = true;
+        return;
+      }
+      void this.triggerRender(false, false);
     } else {
       if (this.debounceTimer) clearTimeout(this.debounceTimer);
       this.debounceTimer = setTimeout(() => {
         this.debounceTimer = null;
-        void this.triggerRender(false);
+        if (this.renderInFlight) {
+          this.pendingCoalescedRender = true;
+          return;
+        }
+        void this.triggerRender(false, false);
       }, RENDER_DEBOUNCE_MS);
     }
   }
@@ -286,25 +296,35 @@ class StudioState {
       clearTimeout(this.debounceTimer);
       this.debounceTimer = null;
     }
+    this.pendingCoalescedRender = false;
     if (this.renderAbort) {
       this.renderAbort.abort();
       this.renderAbort = null;
     }
+    this.renderInFlight = false;
   }
 
-  async triggerRender(resetCamera: boolean): Promise<void> {
+  async triggerRender(resetCamera: boolean, forceAbort = true): Promise<void> {
     const modelId = this.activeModelId;
     if (!modelId) return;
 
-    this.cancelPendingRender();
+    if (forceAbort) {
+      this.cancelPendingRender();
+    } else if (this.debounceTimer) {
+      clearTimeout(this.debounceTimer);
+      this.debounceTimer = null;
+    }
+
     const seq = ++this.latestRenderSeq;
     const abort = new AbortController();
     this.renderAbort = abort;
+    this.renderInFlight = true;
     this.rendering = true;
 
     try {
       const resp = await api.renderModel(modelId, this.params, abort.signal);
       if (seq !== this.latestRenderSeq) return;
+      if (resp.superseded) return;
 
       if (!resp.ok) {
         this.status = {
@@ -329,6 +349,7 @@ class StudioState {
         bbox: resp.bbox ?? null,
         buildTimeMs: resp.build_time_ms ?? 0,
         tessellateTimeMs: resp.tessellate_time_ms ?? 0,
+        cached: resp.cached,
       };
     } catch (err) {
       if (abort.signal.aborted || seq !== this.latestRenderSeq) return;
@@ -338,7 +359,12 @@ class StudioState {
       };
     } finally {
       if (seq === this.latestRenderSeq) {
+        this.renderInFlight = false;
         this.rendering = false;
+        if (this.pendingCoalescedRender && this.activeModelId === modelId) {
+          this.pendingCoalescedRender = false;
+          void this.triggerRender(false, false);
+        }
       }
     }
   }

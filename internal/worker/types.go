@@ -68,6 +68,8 @@ type BBox struct {
 
 type RenderResponse struct {
 	OK               bool            `json:"ok"`
+	Superseded       bool            `json:"superseded,omitempty"`
+	Cached           bool            `json:"cached,omitempty"`
 	ModelID          string          `json:"model_id"`
 	BuildTimeMs      float64         `json:"build_time_ms"`
 	TessellateTimeMs float64         `json:"tessellate_time_ms"`

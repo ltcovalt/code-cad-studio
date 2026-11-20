@@ -279,4 +279,34 @@ def create_list_demo(params: ListDemoParams):
 	if dialogs.lastSave != "list_demo_10_25_40.stl" {
 		t.Fatalf("expected CSV list coercion -> 'list_demo_10_25_40.stl', got %q", dialogs.lastSave)
 	}
+
+	// Verify warm reload picks up edited .py without restarting worker
+	editedSrc := `from dataclasses import dataclass, field
+from typing import List, Optional
+
+@dataclass
+class SlotsParams:
+    z_positions: Optional[List[float]] = None
+
+@dataclass
+class ListDemoParams:
+    slots: SlotsParams = field(default_factory=SlotsParams)
+
+def export_filename(params: ListDemoParams) -> str:
+    return "list_demo_reloaded"
+
+def create_list_demo(params: ListDemoParams):
+    return None
+`
+	if err := os.WriteFile(filepath.Join(modelDir, "list_demo.py"), []byte(editedSrc), 0o644); err != nil {
+		t.Fatalf("rewrite list_demo.py: %v", err)
+	}
+	if err := srv.worker.Reload(t.Context()); err != nil {
+		t.Fatalf("warm Reload failed: %v", err)
+	}
+	rec = httptest.NewRecorder()
+	srv.Handler().ServeHTTP(rec, httptest.NewRequest(http.MethodPost, "/api/models/list_demo/export", bytes.NewBufferString(`{"format":"stl","params":{}}`)))
+	if dialogs.lastSave != "list_demo_reloaded.stl" {
+		t.Fatalf("expected warm reload to update module -> 'list_demo_reloaded.stl', got %q", dialogs.lastSave)
+	}
 }

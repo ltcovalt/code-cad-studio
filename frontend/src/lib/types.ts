@@ -18,6 +18,7 @@ export interface ConfigResponse {
   resolved_python: string;
   has_desktop: boolean;
   worker_running: boolean;
+  worker_starting?: boolean;
   worker_error: string;
   health?: HealthResponse | null;
   health_error?: string;
@@ -25,6 +26,7 @@ export interface ConfigResponse {
 
 export interface HealthCheckResponse {
   worker_running: boolean;
+  worker_starting?: boolean;
   worker_error: string;
   health?: HealthResponse | null;
   health_error?: string;
@@ -107,6 +109,8 @@ export interface BBox {
 
 export interface RenderResponse {
   ok: boolean;
+  superseded?: boolean;
+  cached?: boolean;
   model_id?: string;
   build_time_ms?: number;
   tessellate_time_ms?: number;
@@ -153,6 +157,6 @@ export type ExportFormat = 'step' | 'stl' | '3mf';
 
 export type StatusState =
   | { kind: 'idle' }
-  | { kind: 'ok'; bbox: BBox | null; buildTimeMs: number; tessellateTimeMs: number }
+  | { kind: 'ok'; bbox: BBox | null; buildTimeMs: number; tessellateTimeMs: number; cached?: boolean }
   | { kind: 'message'; message: string }
   | { kind: 'error'; error: string; traceback?: string };

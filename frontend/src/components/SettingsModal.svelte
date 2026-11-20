@@ -7,6 +7,7 @@
   let pythonPath = $state('');
   let resolvedPython = $state('');
   let workerRunning = $state(false);
+  let workerStarting = $state(false);
   let workerError = $state('');
   let health = $state<HealthResponse | null>(null);
   let healthError = $state('');
@@ -14,6 +15,15 @@
   let saving = $state(false);
   let savedBanner = $state(false);
   let formError = $state('');
+
+  let pollTimer: ReturnType<typeof setTimeout> | null = null;
+
+  function clearPoll() {
+    if (pollTimer !== null) {
+      clearTimeout(pollTimer);
+      pollTimer = null;
+    }
+  }
 
   $effect(() => {
     if (studio.settingsOpen) {
@@ -25,19 +35,26 @@
       savedBanner = false;
       formError = '';
       void fetchHealth();
+    } else {
+      clearPoll();
     }
+    return () => clearPoll();
   });
 
   async function fetchHealth() {
+    clearPoll();
     healthLoading = true;
-    health = null;
     healthError = '';
     try {
       const resp = await api.getHealth();
       workerRunning = resp.worker_running;
+      workerStarting = Boolean(resp.worker_starting);
       workerError = resp.worker_error;
       health = resp.health ?? null;
       healthError = resp.health_error ?? '';
+      if (workerStarting && studio.settingsOpen) {
+        pollTimer = setTimeout(() => void fetchHealth(), 1200);
+      }
     } catch (err) {
       healthError = err instanceof Error ? err.message : String(err);
     } finally {
@@ -78,6 +95,7 @@
       pythonPath = resp.config.python_path;
       resolvedPython = resp.resolved_python;
       workerRunning = resp.worker_running;
+      workerStarting = Boolean(resp.worker_starting);
       workerError = resp.worker_error;
       health = resp.health ?? null;
       healthError = resp.health_error ?? '';
@@ -91,6 +109,7 @@
   }
 
   function closeModal() {
+    clearPoll();
     studio.settingsOpen = false;
   }
 
@@ -104,10 +123,23 @@
 <svelte:window onkeydown={handleKeydown} />
 
 {#if studio.settingsOpen}
-  <dialog class="modal modal-open">
-    <div class="modal-box max-w-lg space-y-4">
+  <!-- Lightweight zero-transition overlay to avoid WebKitGTK/Wayland software-compositing lag over WebGL -->
+  <!-- svelte-ignore a11y_click_events_have_key_events -->
+  <!-- svelte-ignore a11y_no_static_element_interactions -->
+  <div
+    class="fixed inset-0 z-50 flex items-center justify-center bg-black/50 p-4"
+    onclick={closeModal}
+  >
+    <div
+      role="dialog"
+      aria-modal="true"
+      aria-labelledby="settings-modal-title"
+      tabindex="-1"
+      class="bg-base-100 border border-base-300 rounded-box shadow-md w-full max-w-lg max-h-[90vh] overflow-y-auto p-6 space-y-4"
+      onclick={(e) => e.stopPropagation()}
+    >
       <div class="flex items-center justify-between">
-        <h3 class="font-bold text-base">Project &amp; Python Settings</h3>
+        <h3 id="settings-modal-title" class="font-bold text-base">Project &amp; Python Settings</h3>
         <button
           type="button"
           class="btn btn-sm btn-circle btn-ghost"
@@ -177,11 +209,10 @@
         <!-- Worker Health Status -->
         <div class="rounded-box bg-base-200 p-3 text-xs space-y-1">
           <div class="font-semibold">Python Worker Status</div>
-          {#if healthLoading}
-            <div class="flex items-center gap-2 opacity-60">
-              <span class="loading loading-spinner loading-xs"></span>
-              <span>Checking Python worker...</span>
-            </div>
+          {#if workerStarting}
+            <div class="opacity-70">Starting Python worker (importing build123d)...</div>
+          {:else if healthLoading && !health}
+            <div class="opacity-60">Checking Python worker...</div>
           {:else if workerError}
             <div class="text-error font-mono break-all">{workerError}</div>
           {:else if health}
@@ -224,19 +255,13 @@
           </div>
         {/if}
 
-        <div class="modal-action">
+        <div class="flex justify-end gap-2 pt-2">
           <button type="button" class="btn btn-sm btn-ghost" onclick={closeModal}>Close</button>
           <button type="submit" class="btn btn-sm btn-primary" disabled={saving}>
-            {#if saving}
-              <span class="loading loading-spinner loading-xs"></span>
-            {/if}
-            Save &amp; Reload
+            {saving ? 'Saving...' : 'Save & Reload'}
           </button>
         </div>
       </form>
     </div>
-    <!-- svelte-ignore a11y_click_events_have_key_events -->
-    <!-- svelte-ignore a11y_no_static_element_interactions -->
-    <div class="modal-backdrop" onclick={closeModal}></div>
-  </dialog>
+  </div>
 {/if}
