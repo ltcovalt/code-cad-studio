@@ -53,6 +53,38 @@ func (d *wailsDialogs) SaveFile(title, defaultFilename, filterName, filterPatter
 	return dlg.PromptForSingleSelection()
 }
 
+// wailsWindow bridges Wails3 frameless window controls into internal/server.DesktopWindow.
+type wailsWindow struct {
+	win *application.WebviewWindow
+}
+
+func (w *wailsWindow) Minimise() {
+	if w.win != nil {
+		w.win.Minimise()
+	}
+}
+
+func (w *wailsWindow) ToggleMaximise() bool {
+	if w.win == nil {
+		return false
+	}
+	w.win.ToggleMaximise()
+	return w.win.IsMaximised()
+}
+
+func (w *wailsWindow) IsMaximised() bool {
+	if w.win == nil {
+		return false
+	}
+	return w.win.IsMaximised()
+}
+
+func (w *wailsWindow) Close() {
+	if w.win != nil {
+		w.win.Close()
+	}
+}
+
 func main() {
 	cfgStore, err := config.NewStore()
 	if err != nil {
@@ -81,15 +113,20 @@ func main() {
 	go srv.StartServices()
 	defer srv.Shutdown()
 
-	app.Window.NewWithOptions(application.WebviewWindowOptions{
+	win := app.Window.NewWithOptions(application.WebviewWindowOptions{
 		Title:            "Code CAD Studio",
 		Width:            1400,
 		Height:           900,
 		MinWidth:         1024,
 		MinHeight:        680,
+		Frameless:        true,
 		BackgroundColour: application.NewRGB(25, 30, 36),
 		URL:              "/",
+		Windows: application.WindowsWindow{
+			NonClientRegionSupport: true,
+		},
 	})
+	srv.SetWindow(&wailsWindow{win: win})
 
 	if err := app.Run(); err != nil {
 		log.Fatal(err)

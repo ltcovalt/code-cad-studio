@@ -1,4 +1,6 @@
 <script lang="ts">
+  import { onMount } from 'svelte';
+  import * as api from '../lib/api';
   import { DAISY_THEMES } from '../lib/cadViewer';
   import { studio } from '../lib/studioState.svelte';
   import type { LayoutMode } from '../lib/types';
@@ -9,6 +11,68 @@
   }
 
   let { layoutMode, onLayoutChange }: Props = $props();
+  let isMaximized = $state(false);
+
+  async function syncWindowState() {
+    if (!studio.hasDesktop) return;
+    try {
+      const res = await api.windowState();
+      isMaximized = Boolean(res?.maximized);
+    } catch {
+      // ignore in web mode
+    }
+  }
+
+  async function handleMinimize() {
+    try {
+      await api.windowMinimize();
+    } catch {
+      // ignore
+    }
+  }
+
+  async function handleToggleMaximize() {
+    try {
+      const res = await api.windowToggleMaximize();
+      isMaximized = Boolean(res?.maximized);
+    } catch {
+      // ignore
+    }
+  }
+
+  async function handleClose() {
+    try {
+      await api.windowClose();
+    } catch {
+      // ignore
+    }
+  }
+
+  function handleTitlebarDblClick(evt: MouseEvent) {
+    if (!studio.hasDesktop) return;
+    const target = evt.target as HTMLElement | null;
+    if (target?.closest('.titlebar-no-drag')) return;
+    void handleToggleMaximize();
+  }
+
+  onMount(() => {
+    let timer: ReturnType<typeof setTimeout> | null = null;
+    const onResize = () => {
+      if (timer) clearTimeout(timer);
+      timer = setTimeout(() => void syncWindowState(), 120);
+    };
+    window.addEventListener('resize', onResize);
+    return () => {
+      window.removeEventListener('resize', onResize);
+      if (timer) clearTimeout(timer);
+    };
+  });
+
+  $effect(() => {
+    if (studio.hasDesktop) {
+      void syncWindowState();
+    }
+  });
 
   function selectLayout(mode: LayoutMode) {
     onLayoutChange(mode);
@@ -25,7 +89,11 @@
   }
 </script>
 
-<header class="navbar bg-base-200 border-b border-base-300 min-h-12 px-3 gap-2 shrink-0">
+<!-- svelte-ignore a11y_no_static_element_interactions -->
+<header
+  class="navbar bg-base-200 border-b border-base-300 min-h-10 py-1 px-3 gap-2 shrink-0 titlebar-drag"
+  ondblclick={handleTitlebarDblClick}
+>
   <div class="flex-1 flex items-center gap-3 min-w-0">
     <div class="flex items-center gap-2 font-bold text-base tracking-tight">
       <span class="truncate">Code CAD Studio</span>
@@ -35,13 +103,13 @@
     {/if}
   </div>
 
-  <div class="flex-none flex items-center gap-1">
+  <div class="flex-none flex items-center gap-1 titlebar-no-drag">
     <!-- Layout Switcher Dropdown -->
     <div class="dropdown dropdown-end">
       <div
         tabindex="0"
         role="button"
-        class="btn btn-ghost btn-sm btn-square"
+        class="btn btn-ghost btn-square h-[26px] w-[26px] min-h-0 p-0"
         title="Layout view"
         aria-label="Layout view"
       >
@@ -157,7 +225,7 @@
       <div
         tabindex="0"
         role="button"
-        class="btn btn-ghost btn-sm btn-square"
+        class="btn btn-ghost btn-square h-[26px] w-[26px] min-h-0 p-0"
         title="Theme"
         aria-label="Theme"
       >
@@ -202,7 +270,7 @@
     <!-- Settings Button -->
     <button
       type="button"
-      class="btn btn-ghost btn-sm btn-square"
+      class="btn btn-ghost btn-square h-[26px] w-[26px] min-h-0 p-0"
       title="Project & Python Settings"
       aria-label="Settings"
       onclick={() => (studio.settingsOpen = true)}
@@ -224,5 +292,84 @@
         <circle cx="12" cy="12" r="3" />
       </svg>
     </button>
+
+    {#if studio.hasDesktop}
+      <div class="h-4 w-px bg-base-content/15 mx-1" aria-hidden="true"></div>
+
+      <!-- Minimize Button -->
+      <button
+        type="button"
+        class="btn btn-ghost btn-square h-[26px] w-[26px] min-h-0 p-0"
+        title="Minimize"
+        aria-label="Minimize window"
+        onclick={handleMinimize}
+      >
+        <svg
+          xmlns="http://www.w3.org/2000/svg"
+          class="h-3.5 w-3.5"
+          fill="none"
+          viewBox="0 0 24 24"
+          stroke="currentColor"
+          stroke-width="2"
+          stroke-linecap="round"
+          stroke-linejoin="round"
+          aria-hidden="true"
+        >
+          <line x1="5" y1="12" x2="19" y2="12" />
+        </svg>
+      </button>
+
+      <!-- Maximize / Restore Button -->
+      <button
+        type="button"
+        class="btn btn-ghost btn-square h-[26px] w-[26px] min-h-0 p-0"
+        title={isMaximized ? 'Restore' : 'Maximize'}
+        aria-label={isMaximized ? 'Restore window' : 'Maximize window'}
+        onclick={handleToggleMaximize}
+      >
+        <svg
+          xmlns="http://www.w3.org/2000/svg"
+          class="h-3.5 w-3.5"
+          fill="none"
+          viewBox="0 0 24 24"
+          stroke="currentColor"
+          stroke-width="2"
+          stroke-linecap="round"
+          stroke-linejoin="round"
+          aria-hidden="true"
+        >
+          {#if isMaximized}
+            <rect x="4" y="8" width="12" height="12" rx="1.5" />
+            <path d="M8 8V5.5A1.5 1.5 0 0 1 9.5 4H18.5A1.5 1.5 0 0 1 20 5.5V14.5A1.5 1.5 0 0 1 18.5 16H16" />
+          {:else}
+            <rect x="4" y="4" width="16" height="16" rx="1.5" />
+          {/if}
+        </svg>
+      </button>
+
+      <!-- Close Button -->
+      <button
+        type="button"
+        class="btn btn-ghost btn-square h-[26px] w-[26px] min-h-0 p-0 hover:bg-error/85 hover:text-error-content"
+        title="Close"
+        aria-label="Close window"
+        onclick={handleClose}
+      >
+        <svg
+          xmlns="http://www.w3.org/2000/svg"
+          class="h-4 w-4"
+          fill="none"
+          viewBox="0 0 24 24"
+          stroke="currentColor"
+          stroke-width="2"
+          stroke-linecap="round"
+          stroke-linejoin="round"
+          aria-hidden="true"
+        >
+          <line x1="6" y1="6" x2="18" y2="18" />
+          <line x1="18" y1="6" x2="6" y2="18" />
+        </svg>
+      </button>
+    {/if}
   </div>
 </header>

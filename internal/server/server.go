@@ -22,6 +22,15 @@ type DesktopDialogs interface {
 	SaveFile(title, defaultFilename, filterName, filterPattern string) (string, error)
 }
 
+// DesktopWindow abstracts native frameless window controls so internal/server
+// has zero dependency on Wails and can run identically as a standalone web server.
+type DesktopWindow interface {
+	Minimise()
+	ToggleMaximise() bool
+	IsMaximised() bool
+	Close()
+}
+
 // Server holds the standard net/http router and coordinates the worker, config, presets, and SSE hub.
 type Server struct {
 	mux      *http.ServeMux
@@ -29,9 +38,15 @@ type Server struct {
 	worker   *worker.Manager
 	watcher  *watcher.Watcher
 	dialogs  DesktopDialogs
+	window   DesktopWindow
 
 	sseMu      sync.Mutex
 	sseClients map[chan string]struct{}
+}
+
+// SetWindow attaches native desktop window controls (optional; nil in standalone web mode).
+func (s *Server) SetWindow(win DesktopWindow) {
+	s.window = win
 }
 
 // New creates a new HTTP server with all JSON API and SSE routes registered.
@@ -104,6 +119,12 @@ func (s *Server) registerRoutes() {
 	// Native OS Dialogs
 	s.mux.HandleFunc("POST /api/dialogs/project", s.handleDialogProject)
 	s.mux.HandleFunc("POST /api/dialogs/python", s.handleDialogPython)
+
+	// Native Frameless Window Controls
+	s.mux.HandleFunc("POST /api/window/minimize", s.handleWindowMinimize)
+	s.mux.HandleFunc("POST /api/window/toggle-maximize", s.handleWindowToggleMaximize)
+	s.mux.HandleFunc("GET /api/window/state", s.handleWindowState)
+	s.mux.HandleFunc("POST /api/window/close", s.handleWindowClose)
 
 	// Models, Rendering, Exporting & Presets
 	s.mux.HandleFunc("GET /api/models", s.handleListModels)

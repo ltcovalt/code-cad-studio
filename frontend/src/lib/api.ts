@@ -80,6 +80,24 @@ export function browsePython(current?: string): Promise<DialogResponse> {
   });
 }
 
+export async function windowMinimize(): Promise<void> {
+  await fetch('/api/window/minimize', { method: 'POST' });
+}
+
+export function windowToggleMaximize(): Promise<{ maximized: boolean }> {
+  return fetchJSON<{ maximized: boolean }>('/api/window/toggle-maximize', {
+    method: 'POST',
+  });
+}
+
+export function windowState(): Promise<{ maximized: boolean }> {
+  return fetchJSON<{ maximized: boolean }>('/api/window/state');
+}
+
+export async function windowClose(): Promise<void> {
+  await fetch('/api/window/close', { method: 'POST' });
+}
+
 export function listModels(): Promise<ModelsResponse> {
   return fetchJSON<ModelsResponse>('/api/models');
 }

@@ -18,16 +18,27 @@
       <span class="text-xs font-semibold uppercase tracking-wider opacity-70">Models</span>
       <button
         type="button"
-        class="btn btn-ghost btn-xs px-1.5"
+        class="btn btn-ghost btn-xs btn-square"
         title="Refresh model list"
+        aria-label="Refresh model list"
         disabled={studio.modelsLoading}
         onclick={() => studio.refreshModels()}
       >
-        {#if studio.modelsLoading}
-          <span class="loading loading-spinner loading-xs"></span>
-        {:else}
-          Refresh
-        {/if}
+        <svg
+          xmlns="http://www.w3.org/2000/svg"
+          class="h-3.5 w-3.5"
+          class:animate-spin={studio.modelsLoading}
+          fill="none"
+          viewBox="0 0 24 24"
+          stroke="currentColor"
+          stroke-width="2"
+          stroke-linecap="round"
+          stroke-linejoin="round"
+          aria-hidden="true"
+        >
+          <path d="M21 12a9 9 0 1 1-9-9c2.52 0 4.93 1 6.74 2.74L21 8" />
+          <path d="M21 3v5h-5" />
+        </svg>
       </button>
     </div>
     <input

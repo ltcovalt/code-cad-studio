@@ -23,6 +23,15 @@ body {
   overflow: hidden;
   user-select: none;
   -webkit-user-select: none;
+  background-color: transparent !important;
+}
+
+/* Let the parent pane's active daisyUI theme background (bg-base-100) show seamlessly
+   through the transparent WebGL canvas and outer margins across all light & dark themes */
+#cad-viewer-root .tcv_cad_viewer,
+#cad-viewer-root .tcv_cad_view,
+#cad-viewer-root .tcv_cad_toolbar {
+  background-color: transparent !important;
 }
 
 /* Remove three-cad-viewer's built-in outer margins & offsets so parent p-2 provides uniform margins */
@@ -55,6 +64,22 @@ input.no-spinner::-webkit-inner-spin-button {
 input.no-spinner {
   -moz-appearance: textfield;
   appearance: textfield;
+}
+
+/* Frameless window draggable titlebar regions (Wails v3 + WebView2 native non-client regions) */
+.titlebar-drag {
+  --wails-draggable: drag;
+  app-region: drag;
+  -webkit-app-region: drag;
+  user-select: none;
+  -webkit-user-select: none;
+}
+
+.titlebar-no-drag,
+.titlebar-no-drag * {
+  --wails-draggable: no-drag;
+  app-region: no-drag;
+  -webkit-app-region: no-drag;
 }
 
 /* Resizable splitters */

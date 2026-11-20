@@ -189,6 +189,36 @@ func (s *Server) handleDialogPython(w http.ResponseWriter, r *http.Request) {
 	})
 }
 
+func (s *Server) handleWindowMinimize(w http.ResponseWriter, r *http.Request) {
+	if s.window != nil {
+		s.window.Minimise()
+	}
+	w.WriteHeader(http.StatusNoContent)
+}
+
+func (s *Server) handleWindowToggleMaximize(w http.ResponseWriter, r *http.Request) {
+	maximized := false
+	if s.window != nil {
+		maximized = s.window.ToggleMaximise()
+	}
+	writeJSON(w, http.StatusOK, map[string]any{"maximized": maximized})
+}
+
+func (s *Server) handleWindowState(w http.ResponseWriter, r *http.Request) {
+	maximized := false
+	if s.window != nil {
+		maximized = s.window.IsMaximised()
+	}
+	writeJSON(w, http.StatusOK, map[string]any{"maximized": maximized})
+}
+
+func (s *Server) handleWindowClose(w http.ResponseWriter, r *http.Request) {
+	if s.window != nil {
+		s.window.Close()
+	}
+	w.WriteHeader(http.StatusNoContent)
+}
+
 func (s *Server) handleListModels(w http.ResponseWriter, r *http.Request) {
 	cfg := s.cfgStore.Get()
 	if cfg.ProjectRoot == "" {

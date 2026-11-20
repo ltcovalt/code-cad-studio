@@ -16,7 +16,7 @@
   });
 </script>
 
-<main class="flex-1 relative min-w-0 min-h-0 bg-base-300/40 overflow-hidden p-2">
+<main class="flex-1 relative min-w-0 min-h-0 bg-base-100 overflow-hidden p-2">
   <div id="cad-viewer-root" bind:this={containerEl}></div>
   {#if !studio.hasMesh}
     <div class="absolute inset-0 flex items-center justify-center pointer-events-none">
