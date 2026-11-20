@@ -23,6 +23,7 @@ var skipDirs = map[string]bool{
 	".ruff_cache":   true,
 	"dist":          true,
 	"build":         true,
+	"exports":       true,
 }
 
 // Watcher monitors a project root recursively for .py and presets.json changes.

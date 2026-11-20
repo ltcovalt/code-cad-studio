@@ -53,7 +53,7 @@ func New(cfgStore *config.Store, workerMgr *worker.Manager, dialogs DesktopDialo
 func (s *Server) StartServices() {
 	cfg := s.cfgStore.Get()
 	pyPath := cfg.ResolvePython()
-	if err := s.worker.Start(pyPath, cfg.ProjectRoot); err != nil {
+	if err := s.worker.EnsureStarted(pyPath, cfg.ProjectRoot); err != nil {
 		log.Printf("Worker startup warning: %v", err)
 	}
 	if cfg.ProjectRoot != "" {
@@ -216,5 +216,5 @@ func (s *Server) ensureWorkerRunning(ctx context.Context) error {
 		return nil
 	}
 	cfg := s.cfgStore.Get()
-	return s.worker.Start(cfg.ResolvePython(), cfg.ProjectRoot)
+	return s.worker.EnsureStarted(cfg.ResolvePython(), cfg.ProjectRoot)
 }

@@ -74,6 +74,28 @@ func (m *Manager) Start(pythonPath, projectRoot string) error {
 	return m.startLocked(pythonPath, projectRoot)
 }
 
+// EnsureStarted guarantees a single running worker without killing an in-flight
+// startup. Concurrent callers wait for an active Start to finish and reuse it.
+func (m *Manager) EnsureStarted(pythonPath, projectRoot string) error {
+	m.stateMu.RLock()
+	if m.baseURL != "" {
+		m.stateMu.RUnlock()
+		return nil
+	}
+	m.stateMu.RUnlock()
+
+	m.lifecycleMu.Lock()
+	defer m.lifecycleMu.Unlock()
+
+	m.stateMu.RLock()
+	alreadyRunning := m.baseURL != ""
+	m.stateMu.RUnlock()
+	if alreadyRunning {
+		return nil
+	}
+	return m.startLocked(pythonPath, projectRoot)
+}
+
 func (m *Manager) startLocked(pythonPath, projectRoot string) error {
 	m.stopLocked()
 
@@ -102,6 +124,7 @@ func (m *Manager) startLocked(pythonPath, projectRoot string) error {
 	}
 
 	cmd := exec.Command(pythonPath, args...)
+	configureCmd(cmd)
 	stdout, err := cmd.StdoutPipe()
 	if err != nil {
 		m.setErr(err.Error())

@@ -38,24 +38,51 @@ from pathlib import Path
 from typing import Any, Literal, Union, get_args, get_origin, get_type_hints
 from urllib.parse import unquote, urlparse
 
-# Optional imports checked lazily/at startup so worker can still start and report
-# a helpful error if the selected Python environment lacks build123d.
+# Warmed up on a background thread right after the HTTP server prints READY,
+# so directory discovery (GET /models) returns immediately without blocking on
+# OpenCASCADE / build123d DLL imports.
 HAS_BUILD123D = False
 BUILD123D_ERROR = ""
-try:
-    import build123d as b3d  # noqa: F401
-
-    HAS_BUILD123D = True
-except Exception as exc:  # pragma: no cover - environment dependent
-    BUILD123D_ERROR = str(exc)
-
 HAS_OCP_TESSELLATE = False
-try:
-    import ocp_tessellate  # noqa: F401
+_CAD_WARMUP_DONE = threading.Event()
+_CAD_WARMUP_STARTED = False
+_CAD_WARMUP_LOCK = threading.Lock()
 
-    HAS_OCP_TESSELLATE = True
-except Exception:
-    HAS_OCP_TESSELLATE = False
+
+def _warmup_cad_imports() -> None:
+    global HAS_BUILD123D, BUILD123D_ERROR, HAS_OCP_TESSELLATE
+    try:
+        import build123d as b3d  # noqa: F401
+
+        HAS_BUILD123D = True
+        BUILD123D_ERROR = ""
+    except Exception as exc:  # pragma: no cover - environment dependent
+        HAS_BUILD123D = False
+        BUILD123D_ERROR = str(exc)
+
+    try:
+        import ocp_tessellate  # noqa: F401
+
+        HAS_OCP_TESSELLATE = True
+    except Exception:
+        HAS_OCP_TESSELLATE = False
+
+    _CAD_WARMUP_DONE.set()
+
+
+def _start_cad_warmup() -> None:
+    global _CAD_WARMUP_STARTED
+    with _CAD_WARMUP_LOCK:
+        if _CAD_WARMUP_STARTED:
+            return
+        _CAD_WARMUP_STARTED = True
+        t = threading.Thread(target=_warmup_cad_imports, name="cad-warmup", daemon=True)
+        t.start()
+
+
+def _wait_for_cad_warmup() -> None:
+    _start_cad_warmup()
+    _CAD_WARMUP_DONE.wait()
 
 
 SKIP_DIRS = {
@@ -69,6 +96,7 @@ SKIP_DIRS = {
     ".ruff_cache",
     "build",
     "dist",
+    "exports",
     "components",
     "tests",
     "test",
@@ -592,12 +620,24 @@ def _collect_named_parts(result: Any, root_name: str) -> list[tuple[str, Any, st
     return parts
 
 
+def _compute_bbox_bounds(wrapped: Any) -> tuple[float, float, float, float, float, float]:
+    """Compute (xmin, ymin, zmin, xmax, ymax, zmax) compatible across OCCT 7.7-7.9+."""
+    from OCP.Bnd import Bnd_Box
+    from OCP.BRepBndLib import BRepBndLib
+
+    bnd = Bnd_Box()
+    BRepBndLib.AddOptimal_s(wrapped, bnd, True, False)
+    if bnd.IsVoid():
+        return 0.0, 0.0, 0.0, 0.0, 0.0, 0.0
+    pmin = bnd.CornerMin()
+    pmax = bnd.CornerMax()
+    return pmin.X(), pmin.Y(), pmin.Z(), pmax.X(), pmax.Y(), pmax.Z()
+
+
 def _tessellate_shape_ocp(shape: Any, linear_deflection: float = 0.1, angular_deflection: float = 0.2) -> tuple[dict[str, Any], dict[str, float]]:
     """Pure OCP tessellator producing three-cad-viewer v5 Shape JSON + bbox."""
-    from OCP.Bnd import Bnd_Box
     from OCP.BRep import BRep_Tool
     from OCP.BRepAdaptor import BRepAdaptor_Curve
-    from OCP.BRepBndLib import BRepBndLib
     from OCP.BRepGProp import BRepGProp_Face
     from OCP.BRepMesh import BRepMesh_IncrementalMesh
     from OCP.GCPnts import GCPnts_QuasiUniformDeflection
@@ -610,9 +650,7 @@ def _tessellate_shape_ocp(shape: Any, linear_deflection: float = 0.1, angular_de
     wrapped = getattr(shape, "wrapped", shape)
 
     # Bounding box
-    bnd = Bnd_Box()
-    BRepBndLib.AddOptimal_s(wrapped, bnd, True, False)
-    xmin, ymin, zmin, xmax, ymax, zmax = bnd.Get()
+    xmin, ymin, zmin, xmax, ymax, zmax = _compute_bbox_bounds(wrapped)
     diag = math.sqrt((xmax - xmin) ** 2 + (ymax - ymin) ** 2 + (zmax - zmin) ** 2)
     defl = max(0.02, min(linear_deflection, diag * 0.002 if diag > 0 else 0.1))
 
@@ -624,10 +662,13 @@ def _tessellate_shape_ocp(shape: Any, linear_deflection: float = 0.1, angular_de
     triangles_per_face: list[int] = []
     face_types: list[int] = []
 
+    to_face = getattr(TopoDS, "Face_s", None) or TopoDS.Face
+    to_edge = getattr(TopoDS, "Edge_s", None) or TopoDS.Edge
+
     vertex_offset = 0
     face_exp = TopExp_Explorer(wrapped, TopAbs_FACE)
     while face_exp.More():
-        face = TopoDS.Face_s(face_exp.Current())
+        face = to_face(face_exp.Current())
         loc = TopLoc_Location()
         tri = BRep_Tool.Triangulation_s(face, loc)
         if tri is not None:
@@ -728,7 +769,7 @@ def _tessellate_shape_ocp(shape: Any, linear_deflection: float = 0.1, angular_de
 
     edge_exp = TopExp_Explorer(wrapped, TopAbs_EDGE)
     while edge_exp.More():
-        edge = TopoDS.Edge_s(edge_exp.Current())
+        edge = to_edge(edge_exp.Current())
         if not BRep_Tool.Degenerated_s(edge):
             try:
                 adaptor = BRepAdaptor_Curve(edge)
@@ -810,14 +851,10 @@ def _tessellate_shape_fast(
     """Use ocp_tessellate when available for fast NumPy tessellation, else fallback to pure OCP."""
     if HAS_OCP_TESSELLATE:
         try:
-            from OCP.Bnd import Bnd_Box
-            from OCP.BRepBndLib import BRepBndLib
             from ocp_tessellate.tessellator import tessellate as ocp_tess
 
             wrapped = getattr(shape, "wrapped", shape)
-            bnd = Bnd_Box()
-            BRepBndLib.AddOptimal_s(wrapped, bnd, True, False)
-            xmin, ymin, zmin, xmax, ymax, zmax = bnd.Get()
+            xmin, ymin, zmin, xmax, ymax, zmax = _compute_bbox_bounds(wrapped)
             diag = math.sqrt((xmax - xmin) ** 2 + (ymax - ymin) ** 2 + (zmax - zmin) ** 2)
             defl = max(0.02, min(linear_deflection, diag * 0.002 if diag > 0 else 0.1))
 
@@ -1080,6 +1117,7 @@ class WorkerState:
             return meta, self.loaded_modules[model_id]
 
         py_path = Path(meta["path"])
+        _wait_for_cad_warmup()
         mod_name = f"code_cad_model_{re.sub(r'[^a-zA-Z0-9_]', '_', model_id)}"
         spec = importlib.util.spec_from_file_location(mod_name, str(py_path))
         if spec is None or spec.loader is None:
@@ -1177,6 +1215,7 @@ class WorkerState:
             return {"ok": True, "export_filename": stem}
 
     def _build_shape(self, model_id: str, params_dict: dict[str, Any]) -> tuple[dict[str, Any], Any, float, str]:
+        _wait_for_cad_warmup()
         if not HAS_BUILD123D:
             raise RuntimeError(f"build123d is not available in {sys.executable}: {BUILD123D_ERROR}")
 
@@ -1299,6 +1338,7 @@ def make_handler(state: WorkerState) -> type[BaseHTTPRequestHandler]:
             path = parsed.path
             try:
                 if path == "/health":
+                    _wait_for_cad_warmup()
                     self._send_json(
                         {
                             "ok": True,
@@ -1406,8 +1446,10 @@ def main() -> None:
     server = ThreadingHTTPServer(("127.0.0.1", args.port), make_handler(state))
     actual_port = server.server_address[1]
 
-    # Signal readiness to the Go supervisor
+    # Signal readiness to the Go supervisor immediately, then warm up CAD imports
+    # in the background so GET /models returns without waiting on build123d/OCP.
     print(f"READY {actual_port}", flush=True)
+    _start_cad_warmup()
     try:
         server.serve_forever()
     except KeyboardInterrupt:
