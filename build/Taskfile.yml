@@ -82,16 +82,13 @@ tasks:
     sources:
       - "**/*"
       - exclude: node_modules/**/*
+      - exclude: dist/**/*
     generates:
       - dist/**/*
     deps:
       - task: install:frontend:deps
-      - task: generate:bindings
-        vars:
-          BUILD_FLAGS:
-            ref: .BUILD_FLAGS
-          OBFUSCATED:
-            ref: .OBFUSCATED
+      # Skipping generate:bindings: this app uses pure HTTP (/api/*) + SSE with 0 Wails Go bindings.
+      # Run `wails3 task common:generate:bindings` manually if Go services are ever added.
     cmds:
       - task: frontend:run
         vars:
