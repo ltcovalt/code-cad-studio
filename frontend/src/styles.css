@@ -1,0 +1,117 @@
+@import "tailwindcss";
+@plugin "@tailwindcss/typography";
+@plugin "daisyui" {
+  themes: all;
+}
+@source "../../templates";
+
+html, body {
+  height: 100%;
+  overflow: hidden;
+}
+
+/* Override three-cad-viewer.css global body { user-select: none } so users can copy errors & info */
+body {
+  user-select: text !important;
+  -webkit-user-select: text !important;
+}
+
+/* Keep three-cad-viewer container filling its flex area cleanly with consistent padding */
+#cad-viewer-root {
+  position: relative;
+  width: 100%;
+  height: 100%;
+  overflow: hidden;
+  user-select: none;
+  -webkit-user-select: none;
+}
+
+/* Remove three-cad-viewer's built-in outer margins & offsets so parent p-2 provides uniform margins */
+#cad-viewer-root .tcv_cad_viewer {
+  margin: 0 !important;
+}
+
+#cad-viewer-root .tcv_cad_toolbar {
+  margin: 0 0 2px 0 !important;
+}
+
+#cad-viewer-root .tcv_cad_view {
+  margin: 2px 1px !important;
+}
+
+#cad-viewer-root .tcv_cad_view_glass {
+  left: 0 !important;
+}
+
+#cad-viewer-root .tcv_shape_filter {
+  right: 2px !important;
+}
+
+/* Hide tiny native number spin arrows in favor of our custom stepper buttons */
+input.no-spinner::-webkit-outer-spin-button,
+input.no-spinner::-webkit-inner-spin-button {
+  -webkit-appearance: none;
+  margin: 0;
+}
+input.no-spinner {
+  -moz-appearance: textfield;
+  appearance: textfield;
+}
+
+/* HTMX loading indicator helper */
+.htmx-indicator {
+  opacity: 0;
+  transition: opacity 150ms ease-in;
+}
+.htmx-request .htmx-indicator,
+.htmx-request.htmx-indicator {
+  opacity: 1;
+}
+
+/* Resizable splitters */
+.splitter {
+  flex: none;
+  background-color: var(--color-base-300);
+  transition: background-color 120ms ease;
+  user-select: none;
+  touch-action: none;
+  z-index: 10;
+}
+
+.splitter:hover,
+.splitter.dragging {
+  background-color: var(--color-primary);
+}
+
+.splitter-v {
+  width: 5px;
+  cursor: col-resize;
+}
+
+/* Stacked layout: Models on top, Parameters below */
+#sidebar-slot[data-sidebar-layout="stacked"] #sidebar-panes {
+  flex-direction: column;
+}
+#sidebar-slot[data-sidebar-layout="stacked"] #splitter-models-params {
+  height: 5px;
+  width: 100%;
+  cursor: row-resize;
+}
+
+/* Side-by-side layout: Models on left, Parameters to the right */
+#sidebar-slot[data-sidebar-layout="side-by-side"] #sidebar-panes {
+  flex-direction: row;
+}
+#sidebar-slot[data-sidebar-layout="side-by-side"] #splitter-models-params {
+  width: 5px;
+  height: 100%;
+  cursor: col-resize;
+}
+
+/* Right-panel layout: Models on left, 3D Viewport in center, Parameters on right */
+#sidebar-slot[data-sidebar-layout="right"] #sidebar-panes {
+  flex-direction: column;
+}
+#sidebar-slot[data-sidebar-layout="right"] #splitter-models-params {
+  display: none;
+}

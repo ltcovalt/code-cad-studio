@@ -1,0 +1,56 @@
+<div id="sidebar-panes" class="flex w-full h-full min-h-0 overflow-hidden">
+  <!-- Model Directory Browser -->
+  <section id="models-pane" class="flex flex-col min-h-0 min-w-0 overflow-hidden shrink-0">
+    <div class="p-2.5 pb-2 border-b border-base-300/70 shrink-0 space-y-2">
+      <div class="flex items-center justify-between gap-1">
+        <span class="text-xs font-semibold uppercase tracking-wider opacity-70">Models</span>
+        <button
+          type="button"
+          class="btn btn-ghost btn-xs px-1.5"
+          title="Refresh model list"
+          hx-get="/hx/models"
+          hx-target="#model-list"
+          hx-swap="innerHTML">
+          Refresh
+        </button>
+      </div>
+      <input
+        type="search"
+        name="q"
+        placeholder="Filter models..."
+        class="input input-bordered input-xs w-full"
+        hx-get="/hx/models"
+        hx-trigger="input changed delay:150ms, search"
+        hx-target="#model-list"
+        hx-swap="innerHTML" />
+    </div>
+    <div
+      id="model-list"
+      class="flex-1 overflow-y-auto space-y-1 p-2"
+      hx-get="/hx/models"
+      hx-trigger="load, projectChanged from:body"
+      hx-swap="innerHTML">
+      <div class="text-xs opacity-60 py-2">Loading models...</div>
+    </div>
+  </section>
+
+  <!-- Inner Resizable Splitter (Models <-> Parameters) -->
+  <div id="splitter-models-params" class="splitter" title="Drag to resize models / parameters"></div>
+
+  <!-- Active Model Parameters, Presets & Export -->
+  <section id="model-workspace" class="flex-1 flex flex-col min-h-0 min-w-0 overflow-hidden">
+    <div class="p-4 text-sm opacity-60 flex flex-col items-center justify-center h-full text-center gap-2">
+      <p>Select a model to inspect parameters and render in 3D.</p>
+      {{if not .ProjectRoot}}
+      <button
+        type="button"
+        class="btn btn-primary btn-sm mt-2"
+        hx-get="/hx/settings"
+        hx-target="#modal-container"
+        hx-swap="innerHTML">
+        Choose Project Folder
+      </button>
+      {{end}}
+    </div>
+  </section>
+</div>

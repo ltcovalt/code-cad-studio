@@ -1,0 +1,35 @@
+{{if not .ProjectRoot}}
+  <div class="text-xs opacity-70 py-2">
+    No project folder configured yet.
+    <button
+      type="button"
+      class="link link-primary ml-1"
+      hx-get="/hx/settings"
+      hx-target="#modal-container"
+      hx-swap="innerHTML">Open Settings</button>
+  </div>
+{{else if .Error}}
+  <div class="alert alert-error alert-soft text-xs p-2">
+    <span>{{.Error}}</span>
+  </div>
+{{else if not .Models}}
+  <div class="text-xs opacity-60 py-2">
+    No models found{{if .Query}} matching "{{.Query}}"{{end}}.
+  </div>
+{{else}}
+  {{range .Models}}
+  <button
+    type="button"
+    data-model-id="{{.ID}}"
+    class="model-item btn btn-ghost btn-xs w-full justify-start text-left h-auto py-1.5 px-2 font-normal flex flex-col items-start gap-0.5"
+    hx-get="/hx/models/{{.ID}}"
+    hx-target="#model-workspace"
+    hx-swap="innerHTML"
+    onclick="document.querySelectorAll('.model-item').forEach(el => el.classList.remove('btn-active')); this.classList.add('btn-active');">
+    <span class="font-medium text-xs truncate w-full">{{.Name}}</span>
+    {{if .Description}}
+    <span class="text-[11px] opacity-60 truncate w-full">{{.Description}}</span>
+    {{end}}
+  </button>
+  {{end}}
+{{end}}

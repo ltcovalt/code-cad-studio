@@ -1,0 +1,108 @@
+{{if .Error}}
+<div class="p-3 space-y-2">
+  <div class="alert alert-error alert-soft text-xs p-2.5 flex flex-col items-start gap-1">
+    <span class="font-semibold">Failed to load model</span>
+    <span class="font-mono break-all">{{.Error}}</span>
+  </div>
+  {{if .Traceback}}
+  <details class="collapse collapse-arrow bg-base-200 border border-base-300 rounded-box">
+    <summary class="collapse-title text-xs py-1.5 px-3 min-h-0">Python Traceback</summary>
+    <pre class="collapse-content text-[10px] overflow-x-auto p-2 font-mono whitespace-pre-wrap">{{.Traceback}}</pre>
+  </details>
+  {{end}}
+</div>
+{{else}}
+<div class="flex flex-col h-full overflow-hidden" data-active-model="{{.Model.ID}}">
+  <!-- Model Title & Presets -->
+  <div class="p-3 border-b border-base-300 shrink-0 space-y-2">
+    <div class="flex items-center justify-between gap-2">
+      <div class="min-w-0">
+        <h2 class="font-semibold text-sm truncate">{{.Model.Name}}</h2>
+        {{if .Description}}
+        <p class="text-[11px] opacity-65 truncate">{{.Description}}</p>
+        {{end}}
+      </div>
+      <span id="render-spinner" class="loading loading-spinner loading-xs text-primary htmx-indicator"></span>
+    </div>
+    {{template "PresetBar.html" .}}
+  </div>
+
+  <!-- Scrollable Parameters Form -->
+  <form
+    id="param-form"
+    class="flex-1 overflow-y-auto p-3 space-y-3"
+    hx-post="/hx/models/{{.Model.ID}}/render"
+    hx-trigger="input changed delay:200ms, change, rerender from:body"
+    hx-target="#status-bar"
+    hx-swap="innerHTML"
+    hx-indicator="#render-spinner">
+
+    {{if .CoreFields}}
+    <details class="collapse collapse-arrow bg-base-200/60 border border-base-300 rounded-box" open>
+      <summary class="collapse-title text-xs font-semibold min-h-0 py-2 pl-3 pr-9">
+        Core Parameters
+      </summary>
+      <div class="collapse-content px-3 pb-3 pt-1">
+        <div class="space-y-2.5 pt-1.5 border-t border-base-300/70">
+          {{range .CoreFields}}
+            {{template "ParamField" .}}
+          {{end}}
+        </div>
+      </div>
+    </details>
+    {{end}}
+
+    {{range .NestedGroups}}
+      {{template "ParamField" .}}
+    {{end}}
+  </form>
+
+  <!-- Export & Status Footer -->
+  <div class="p-3 border-t border-base-300 bg-base-200/50 shrink-0 space-y-2">
+    <div class="flex items-center gap-1.5">
+      <span class="text-[11px] font-semibold uppercase opacity-60 mr-auto">Export</span>
+      <button
+        type="button"
+        class="btn btn-xs btn-neutral"
+        hx-post="/hx/models/{{.Model.ID}}/export"
+        hx-include="#param-form"
+        hx-vals='{"format":"step"}'
+        hx-target="#status-bar"
+        hx-swap="innerHTML"
+        hx-indicator="#render-spinner">
+        .STEP
+      </button>
+      <button
+        type="button"
+        class="btn btn-xs btn-neutral"
+        hx-post="/hx/models/{{.Model.ID}}/export"
+        hx-include="#param-form"
+        hx-vals='{"format":"stl"}'
+        hx-target="#status-bar"
+        hx-swap="innerHTML"
+        hx-indicator="#render-spinner">
+        .STL
+      </button>
+      <button
+        type="button"
+        class="btn btn-xs btn-neutral"
+        hx-post="/hx/models/{{.Model.ID}}/export"
+        hx-include="#param-form"
+        hx-vals='{"format":"3mf"}'
+        hx-target="#status-bar"
+        hx-swap="innerHTML"
+        hx-indicator="#render-spinner">
+        .3MF
+      </button>
+    </div>
+
+    <div id="status-bar" class="text-xs">
+      {{if .InitialStatus}}
+        {{template "StatusBar.html" .InitialStatus}}
+      {{else}}
+        <div class="opacity-65">Ready</div>
+      {{end}}
+    </div>
+  </div>
+</div>
+{{end}}

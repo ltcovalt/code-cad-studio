@@ -1,0 +1,15 @@
+{
+	"fixed": {
+		"file_version": "0.1.0"
+	},
+	"info": {
+		"0000": {
+			"ProductVersion": "0.1.0",
+			"CompanyName": "ltcovalt",
+			"FileDescription": "Model-agnostic parametric GUI for build123d",
+			"LegalCopyright": "© 2026, SheprdSoft",
+			"ProductName": "Code CAD Studio",
+			"Comments": "This is a comment"
+		}
+	}
+}

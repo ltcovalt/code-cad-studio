@@ -1,0 +1,98 @@
+<dialog id="settings-dialog" class="modal modal-open">
+  <div class="modal-box max-w-lg space-y-4">
+    <div class="flex items-center justify-between">
+      <h3 class="font-bold text-base">Project &amp; Python Settings</h3>
+      <button type="button" class="btn btn-sm btn-circle btn-ghost" onclick="document.getElementById('modal-container').innerHTML = ''">✕</button>
+    </div>
+
+    <form
+      hx-post="/hx/settings"
+      hx-target="#modal-container"
+      hx-swap="innerHTML"
+      class="space-y-3">
+
+      <div class="form-control">
+        <label class="label py-1">
+          <span class="label-text text-xs font-semibold">Project Root Folder</span>
+        </label>
+        <div class="join w-full">
+          <input
+            id="settings-project-root"
+            name="project_root"
+            type="text"
+            class="input input-bordered input-sm join-item w-full font-mono text-xs"
+            value="{{.Config.ProjectRoot}}"
+            placeholder="/path/to/code-cad" />
+          {{if .HasDesktop}}
+          <button
+            type="button"
+            class="btn btn-sm btn-neutral join-item"
+            hx-post="/hx/settings/browse-project"
+            hx-include="#settings-project-root"
+            hx-target="#settings-project-root"
+            hx-swap="outerHTML">
+            Browse
+          </button>
+          {{end}}
+        </div>
+        <span class="text-[11px] opacity-60 mt-1">Folder containing <code>models/</code>, <code>components/</code>, or standalone <code>.py</code> scripts.</span>
+      </div>
+
+      <div class="form-control">
+        <label class="label py-1">
+          <span class="label-text text-xs font-semibold">Python Interpreter (optional)</span>
+        </label>
+        <div class="join w-full">
+          <input
+            id="settings-python-path"
+            name="python_path"
+            type="text"
+            class="input input-bordered input-sm join-item w-full font-mono text-xs"
+            value="{{.Config.PythonPath}}"
+            placeholder="Auto-detect (.venv/bin/python or python3)" />
+          {{if .HasDesktop}}
+          <button
+            type="button"
+            class="btn btn-sm btn-neutral join-item"
+            hx-post="/hx/settings/browse-python"
+            hx-include="#settings-python-path"
+            hx-target="#settings-python-path"
+            hx-swap="outerHTML">
+            Browse
+          </button>
+          {{end}}
+        </div>
+        <span class="text-[11px] opacity-60 mt-1">Resolved: <code class="font-mono">{{.ResolvedPython}}</code></span>
+      </div>
+
+      <!-- Worker Health Status -->
+      <div class="rounded-box bg-base-200 p-3 text-xs space-y-1">
+        <div class="font-semibold">Python Worker Status</div>
+        {{if .LazyHealth}}
+        <div hx-get="/hx/settings/health" hx-trigger="load" hx-target="this" hx-swap="innerHTML">
+          <div class="flex items-center gap-2 opacity-60">
+            <span class="loading loading-spinner loading-xs"></span>
+            <span>Checking Python worker...</span>
+          </div>
+        </div>
+        {{else}}
+        <div>
+          {{template "WorkerHealth.html" .}}
+        </div>
+        {{end}}
+      </div>
+
+      {{if .Saved}}
+      <div class="alert alert-success alert-soft text-xs py-2">
+        <span>Settings saved and worker reloaded.</span>
+      </div>
+      {{end}}
+
+      <div class="modal-action">
+        <button type="button" class="btn btn-sm btn-ghost" onclick="document.getElementById('modal-container').innerHTML = ''">Close</button>
+        <button type="submit" class="btn btn-sm btn-primary">Save &amp; Reload</button>
+      </div>
+    </form>
+  </div>
+  <div class="modal-backdrop" onclick="document.getElementById('modal-container').innerHTML = ''"></div>
+</dialog>

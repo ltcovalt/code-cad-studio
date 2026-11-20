@@ -1,0 +1,69 @@
+<div id="preset-bar" class="space-y-2">
+  <div class="flex items-center gap-1.5">
+    <select
+      id="preset-select"
+      name="preset"
+      class="select select-bordered select-xs flex-1"
+      hx-get="/hx/models/{{.Model.ID}}?preserve_camera=1"
+      hx-target="#model-workspace"
+      hx-swap="innerHTML"
+      hx-include="this">
+      {{$sel := .SelectedPreset}}
+      {{range .Presets}}
+      <option value="{{.Key}}" {{if eq .Key $sel}}selected{{end}}>
+        {{.Label}}{{if eq .Source "user"}} (local){{end}}
+      </option>
+      {{end}}
+    </select>
+
+    <button
+      type="button"
+      class="btn btn-ghost btn-xs"
+      title="Reset all parameters to canonical dataclass defaults"
+      hx-get="/hx/models/{{.Model.ID}}?preset=default&preserve_camera=1"
+      hx-target="#model-workspace"
+      hx-swap="innerHTML">
+      Reset
+    </button>
+
+    <button
+      type="button"
+      class="btn btn-outline btn-xs"
+      title="Save current parameters as a preset"
+      onclick="document.getElementById('save-preset-drawer').classList.toggle('hidden')">
+      Save
+    </button>
+  </div>
+
+  {{if .SavedMessage}}
+  <div class="text-[11px] text-success">{{.SavedMessage}}</div>
+  {{end}}
+
+  <div id="save-preset-drawer" class="hidden p-2 rounded-box bg-base-200 border border-base-300 space-y-1.5">
+    <input
+      type="text"
+      name="preset_label"
+      placeholder="Preset name (e.g. Prusa 12.7mm)"
+      class="input input-bordered input-xs w-full" />
+    <input
+      type="text"
+      name="preset_description"
+      placeholder="Short description (optional)"
+      class="input input-bordered input-xs w-full" />
+    <div class="flex items-center justify-between gap-2">
+      <select name="preset_scope" class="select select-bordered select-xs">
+        <option value="user">User local (~/.config)</option>
+        <option value="project">Project presets.json</option>
+      </select>
+      <button
+        type="button"
+        class="btn btn-primary btn-xs"
+        hx-post="/hx/models/{{.Model.ID}}/presets"
+        hx-include="#param-form, #save-preset-drawer"
+        hx-target="#preset-bar"
+        hx-swap="outerHTML">
+        Save Preset
+      </button>
+    </div>
+  </div>
+</div>

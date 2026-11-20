@@ -1,0 +1,16 @@
+{{if .WorkerErr}}
+  <div class="text-error font-mono break-all">{{.WorkerErr}}</div>
+{{else if .Health}}
+  <div class="flex items-center gap-2">
+    <span class="badge badge-xs {{if .Health.Build123d}}badge-success{{else}}badge-warning{{end}}"></span>
+    <span>{{if .Health.Build123d}}build123d available{{else}}build123d NOT found in this Python environment{{end}}</span>
+  </div>
+  <div class="font-mono text-[11px] opacity-70 truncate">{{.Health.Python}}</div>
+  {{if not .Health.Build123d}}
+  <div class="text-warning text-[11px]">Point Python Interpreter to your project's <code>.venv/bin/python</code>.</div>
+  {{end}}
+{{else if .HealthErr}}
+  <div class="text-warning font-mono">{{.HealthErr}}</div>
+{{else}}
+  <div class="opacity-60">Not started</div>
+{{end}}

@@ -1,0 +1,15 @@
+{
+  "prusa_spool_holder": {
+    "label": "Prusa Spool Holder (12.7mm)",
+    "description": "Press-fit cap for 1/2-inch rod",
+    "params": {
+      "core": {
+        "shaft_diameter": 12.7,
+        "cap_style": "dome"
+      },
+      "flutes": {
+        "enabled": true
+      }
+    }
+  }
+}
