@@ -111,8 +111,16 @@ func TestConfigAndThemeHandlers(t *testing.T) {
 func TestWorkerSchemaNullableWhenAndExportFilename(t *testing.T) {
 	projectDir := t.TempDir()
 	modelDir := filepath.Join(projectDir, "models", "demo_box")
+	utilsDir := filepath.Join(projectDir, "utils")
 	if err := os.MkdirAll(modelDir, 0o755); err != nil {
 		t.Fatalf("mkdir: %v", err)
+	}
+	if err := os.MkdirAll(utilsDir, 0o755); err != nil {
+		t.Fatalf("mkdir utils: %v", err)
+	}
+	// Utility scripts with create_* helpers must be skipped from model discovery
+	if err := os.WriteFile(filepath.Join(utilsDir, "helper.py"), []byte("def create_helper():\n    return None\n"), 0o644); err != nil {
+		t.Fatalf("write utils/helper.py: %v", err)
 	}
 
 	modelSrc := `from dataclasses import dataclass, field
@@ -121,8 +129,19 @@ from typing import Literal, Optional
 @dataclass
 class CoreParams:
     """Core shape settings."""
-    mode: Literal["round", "rect"] = "round"  # Shape mode
-    diameter: Optional[float] = field(default=None, metadata={"min": 10.0, "max": 200.0, "step": 1.0, "when": {"mode": "round"}})
+    mode: Literal["round", "rect"] = "round"  # Developer note that should NOT become UI desc
+    diameter: Optional[float] = field(
+        default=None,
+        metadata={
+            "label": "Outer Diameter",
+            "description": "Nominal diameter of round body",
+            "unit": "mm",
+            "min": 10.0,
+            "max": 200.0,
+            "step": 1.0,
+            "when": {"mode": "round"},
+        },
+    )
     width: float = field(default=50.0, metadata={"when": {"mode": "rect"}})
 
 @dataclass
@@ -191,14 +210,29 @@ def create_demo_box(params: DemoBoxParams):
 	if coreGroup.Description != "Core shape settings." {
 		t.Fatalf("expected nested docstring fallback, got %q", coreGroup.Description)
 	}
-	var diaField worker.ParamField
+	var modeField, diaField worker.ParamField
 	for _, c := range coreGroup.Children {
+		if c.Name == "mode" {
+			modeField = c
+		}
 		if c.Name == "diameter" {
 			diaField = c
 		}
 	}
+	if modeField.Description != "" {
+		t.Fatalf("expected inline comment not to leak into mode.description, got %q", modeField.Description)
+	}
 	if !diaField.Nullable {
 		t.Fatalf("expected diameter.nullable=true")
+	}
+	if diaField.Label != "Outer Diameter" {
+		t.Fatalf("expected diameter.label='Outer Diameter', got %q", diaField.Label)
+	}
+	if diaField.Description != "Nominal diameter of round body" {
+		t.Fatalf("expected diameter.description='Nominal diameter of round body', got %q", diaField.Description)
+	}
+	if diaField.Unit != "mm" {
+		t.Fatalf("expected diameter.unit='mm', got %q", diaField.Unit)
 	}
 	if diaField.When["mode"] != "round" {
 		t.Fatalf("expected diameter.when.mode='round', got %+v", diaField.When)

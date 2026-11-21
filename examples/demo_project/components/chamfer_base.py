@@ -1,13 +1,17 @@
 """Reusable chamfered base flange component."""
 
-from dataclasses import dataclass, field
+from dataclasses import dataclass
+
+from utils.params import param
 
 
 @dataclass
 class BaseFlangeParams:
-    flange_diameter: float = field(default=32.0, metadata={"min": 16.0, "max": 60.0, "step": 0.5})  # Outer flange diameter (mm)
-    flange_thickness: float = field(default=4.0, metadata={"min": 1.5, "max": 12.0, "step": 0.5})  # Flange thickness (mm)
-    chamfer_size: float = field(default=0.8, metadata={"min": 0.0, "max": 3.0, "step": 0.1})  # Edge chamfer (mm)
+    """Bottom mounting flange with chamfered perimeter."""
+
+    flange_diameter: float = param(32.0, min=16.0, max=60.0, step=0.5, unit="mm", desc="Outer flange diameter")
+    flange_thickness: float = param(4.0, min=1.5, max=12.0, step=0.5, unit="mm", desc="Flange axial thickness")
+    chamfer_size: float = param(0.8, min=0.0, max=3.0, step=0.1, unit="mm", desc="Perimeter edge chamfer")
 
 
 def create_base_flange(params: BaseFlangeParams):

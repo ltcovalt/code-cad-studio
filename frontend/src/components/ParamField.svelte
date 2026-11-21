@@ -234,7 +234,9 @@
   {:else if field.type === 'int' || field.type === 'float'}
     <div class="form-control w-full" title={field.description}>
       <div class="flex items-center justify-between gap-2 mb-1">
-        <label class="text-xs font-medium truncate" for="param-{field.path}">{field.label}</label>
+        <label class="text-xs font-medium truncate" for="param-{field.path}">
+          {field.label}{#if field.unit}<span class="font-normal opacity-55 ml-1">({field.unit})</span>{/if}
+        </label>
         <div class="flex items-center gap-1 shrink-0">
           {#if field.nullable && numValue !== null}
             <button

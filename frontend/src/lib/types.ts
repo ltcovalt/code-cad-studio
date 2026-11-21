@@ -65,6 +65,7 @@ export interface ParamField {
   type: ParamFieldType;
   default: unknown;
   description: string;
+  unit?: string;
   nullable?: boolean;
   when?: Record<string, unknown>;
   choices?: string[];

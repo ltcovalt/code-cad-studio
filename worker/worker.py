@@ -98,6 +98,7 @@ SKIP_DIRS = {
     "dist",
     "exports",
     "components",
+    "utils",
     "tests",
     "test",
 }
@@ -116,36 +117,6 @@ DEFAULT_COLORS = [
 
 def humanize_name(name: str) -> str:
     return name.replace("_", " ").strip().title()
-
-
-def _extract_dataclass_comments(source: str, class_name: str) -> dict[str, str]:
-    """Extract inline (# ...) or preceding line comments for dataclass fields."""
-    comments: dict[str, str] = {}
-    lines = source.splitlines()
-    try:
-        tree = ast.parse(source)
-    except SyntaxError:
-        return comments
-
-    for node in ast.walk(tree):
-        if isinstance(node, ast.ClassDef) and node.name == class_name:
-            for stmt in node.body:
-                if isinstance(stmt, ast.AnnAssign) and isinstance(stmt.target, ast.Name):
-                    field_name = stmt.target.id
-                    lineno = stmt.lineno - 1
-                    if 0 <= lineno < len(lines):
-                        line = lines[lineno]
-                        if "#" in line:
-                            comment = line.split("#", 1)[1].strip()
-                            if comment:
-                                comments[field_name] = comment
-                                continue
-                        # Check immediately preceding comment line
-                        if lineno > 0:
-                            prev = lines[lineno - 1].strip()
-                            if prev.startswith("#"):
-                                comments[field_name] = prev.lstrip("#").strip()
-    return comments
 
 
 def _discover_script_metadata(py_file: Path, project_root: Path) -> dict[str, Any] | None:
@@ -260,7 +231,6 @@ def _infer_numeric_bounds(name: str, default: float | int, is_int: bool) -> dict
 
 def _introspect_dataclass(
     cls: type,
-    source_path: Path | None = None,
     prefix: str = "",
 ) -> tuple[list[dict[str, Any]], dict[str, Any]]:
     """Introspect a @dataclass into UI schema fields and canonical default dict."""
@@ -268,20 +238,6 @@ def _introspect_dataclass(
         hints = get_type_hints(cls)
     except Exception:
         hints = {}
-
-    comments: dict[str, str] = {}
-    if source_path and source_path.exists():
-        try:
-            comments = _extract_dataclass_comments(source_path.read_text(encoding="utf-8"), cls.__name__)
-        except Exception:
-            pass
-    else:
-        try:
-            src_file = inspect.getsourcefile(cls)
-            if src_file:
-                comments = _extract_dataclass_comments(Path(src_file).read_text(encoding="utf-8"), cls.__name__)
-        except Exception:
-            pass
 
     instance = cls()
     fields_schema: list[dict[str, Any]] = []
@@ -299,13 +255,14 @@ def _introspect_dataclass(
 
         field_path = f"{prefix}.{f.name}" if prefix else f.name
         meta = dict(f.metadata) if f.metadata else {}
-        desc = meta.get("description") or comments.get(f.name, "")
-        label = meta.get("label") or humanize_name(f.name)
+        desc = str(meta.get("description") or "").strip()
+        label = str(meta.get("label") or "").strip() or humanize_name(f.name)
+        unit = str(meta.get("unit") or "").strip()
 
         # Nested dataclass -> explicit collapsible section (toggleable if it has `enabled: bool`)
         if dataclasses.is_dataclass(unwrapped) or dataclasses.is_dataclass(default_val):
             nested_cls = unwrapped if dataclasses.is_dataclass(unwrapped) else type(default_val)
-            nested_fields, nested_defaults = _introspect_dataclass(nested_cls, None, prefix=field_path)
+            nested_fields, nested_defaults = _introspect_dataclass(nested_cls, prefix=field_path)
             defaults[f.name] = nested_defaults
             if not desc:
                 nested_doc = inspect.getdoc(nested_cls) or ""
@@ -331,6 +288,8 @@ def _introspect_dataclass(
             "default": serialized_default,
             "description": desc,
         }
+        if unit:
+            field_info["unit"] = unit
         if is_nullable:
             field_info["nullable"] = True
         if "when" in meta and isinstance(meta["when"], dict):
@@ -1018,8 +977,11 @@ class WorkerState:
         roots: list[Path] = []
         if self.project_root is not None:
             roots.append(self.project_root)
-            if self.project_root.name == "models" and (self.project_root.parent / "components").is_dir():
-                roots.append(self.project_root.parent / "components")
+            if self.project_root.name == "models":
+                for sibling in ("components", "utils"):
+                    sibling_dir = self.project_root.parent / sibling
+                    if sibling_dir.is_dir():
+                        roots.append(sibling_dir)
 
         to_delete: list[str] = []
         for mod_name, mod in list(sys.modules.items()):
@@ -1073,8 +1035,10 @@ class WorkerState:
             if root_str not in sys.path:
                 sys.path.insert(0, root_str)
             # If user selected the models/ subdirectory directly, also add its parent
-            # to sys.path when a sibling components/ directory exists.
-            if root.name == "models" and (root.parent / "components").is_dir():
+            # to sys.path when a sibling components/ or utils/ directory exists.
+            if root.name == "models" and (
+                (root.parent / "components").is_dir() or (root.parent / "utils").is_dir()
+            ):
                 parent_str = str(root.parent)
                 if parent_str not in sys.path:
                     sys.path.insert(0, parent_str)
@@ -1170,7 +1134,7 @@ class WorkerState:
             params_cls, func = self._resolve_entrypoints(meta, module)
 
             if params_cls is not None:
-                fields, defaults = _introspect_dataclass(params_cls, Path(meta["path"]))
+                fields, defaults = _introspect_dataclass(params_cls)
             else:
                 fields, defaults = _introspect_function_signature(func)
 

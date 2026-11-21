@@ -1,31 +1,47 @@
 """Parametric press-fit spool rod cap with optional grip flutes."""
 
-from dataclasses import dataclass, field
+from dataclasses import dataclass
+from pathlib import Path
 from typing import Literal
+
+try:
+    from utils.params import group, param
+except ImportError:
+    import sys
+
+    for _p in Path(__file__).resolve().parents:
+        if (_p / "utils").is_dir():
+            sys.path.insert(0, str(_p))
+            break
+    from utils.params import group, param
 
 from components.chamfer_base import BaseFlangeParams, create_base_flange
 
 
 @dataclass
 class CoreParams:
-    shaft_diameter: float = field(default=10.0, metadata={"min": 4.0, "max": 30.0, "step": 0.2})  # Rod diameter (mm)
-    wall_thickness: float = field(default=2.4, metadata={"min": 1.2, "max": 6.0, "step": 0.2})  # Sleeve wall thickness (mm)
-    sleeve_height: float = field(default=18.0, metadata={"min": 8.0, "max": 45.0, "step": 1.0})  # Sleeve length (mm)
-    cap_style: Literal["flat", "dome", "chamfer"] = "chamfer"  # Top cap profile
+    """Shaft fit and sleeve dimensions."""
+
+    shaft_diameter: float = param(10.0, min=4.0, max=30.0, step=0.2, unit="mm", desc="Rod diameter")
+    wall_thickness: float = param(2.4, min=1.2, max=6.0, step=0.2, unit="mm", desc="Sleeve wall thickness")
+    sleeve_height: float = param(18.0, min=8.0, max=45.0, step=1.0, unit="mm", desc="Sleeve length")
+    cap_style: Literal["flat", "dome", "chamfer"] = param("chamfer", desc="Top cap profile")
 
 
 @dataclass
 class FlutesParams:
-    enabled: bool = True  # Add radial grip flutes
-    count: int = field(default=12, metadata={"min": 4, "max": 32, "step": 1})  # Number of grip flutes
-    depth: float = field(default=0.8, metadata={"min": 0.2, "max": 2.0, "step": 0.1})  # Flute cut depth (mm)
+    """Radial perimeter grip flutes."""
+
+    enabled: bool = param(True, desc="Add radial grip flutes")
+    count: int = param(12, min=4, max=32, step=1, desc="Number of grip flutes")
+    depth: float = param(0.8, min=0.2, max=2.0, step=0.1, unit="mm", desc="Flute cut depth")
 
 
 @dataclass
 class SpoolCapParams:
-    core: CoreParams = field(default_factory=CoreParams)
-    flutes: FlutesParams = field(default_factory=FlutesParams)
-    base: BaseFlangeParams = field(default_factory=BaseFlangeParams)
+    core: CoreParams = group(CoreParams)
+    flutes: FlutesParams = group(FlutesParams)
+    base: BaseFlangeParams = group(BaseFlangeParams)
 
 
 def create_spool_cap(params: SpoolCapParams):

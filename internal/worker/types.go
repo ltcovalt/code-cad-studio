@@ -35,6 +35,7 @@ type ParamField struct {
 	Type        string         `json:"type"` // bool, int, float, str, enum, group
 	Default     any            `json:"default"`
 	Description string         `json:"description"`
+	Unit        string         `json:"unit,omitempty"`
 	Nullable    bool           `json:"nullable,omitempty"`
 	When        map[string]any `json:"when,omitempty"`
 	Choices     []string       `json:"choices,omitempty"`
