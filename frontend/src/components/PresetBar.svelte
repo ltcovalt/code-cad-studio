@@ -34,10 +34,10 @@
 </script>
 
 <div class="space-y-2">
-  <div class="flex items-center gap-1.5">
+  <div class="flex items-center gap-1.5 min-w-0">
     <select
       aria-label="Preset"
-      class="select select-bordered select-xs flex-1"
+      class="select select-bordered select-xs flex-1 min-w-0"
       value={studio.selectedPresetKey}
       onchange={(e) => studio.selectPreset((e.currentTarget as HTMLSelectElement).value)}
     >
@@ -50,7 +50,7 @@
 
     <button
       type="button"
-      class="btn btn-ghost btn-xs"
+      class="btn btn-ghost btn-xs shrink-0"
       title="Reset all parameters to canonical dataclass defaults"
       onclick={() => {
         savedMessage = '';
@@ -62,7 +62,7 @@
 
     <button
       type="button"
-      class="btn btn-outline btn-xs"
+      class="btn btn-outline btn-xs shrink-0"
       title="Save current parameters as a preset"
       onclick={() => {
         drawerOpen = !drawerOpen;

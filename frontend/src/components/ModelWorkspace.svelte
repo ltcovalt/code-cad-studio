@@ -53,33 +53,68 @@
           <div class="min-w-0">
             <h2 class="font-semibold text-sm truncate">{studio.activeModel.name}</h2>
             {#if studio.modelDescription}
-              <p class="text-[11px] opacity-65 truncate">{studio.modelDescription}</p>
+              <p class="text-[11px] opacity-65 truncate" title={studio.modelDescription}>
+                {studio.modelDescription}
+              </p>
             {/if}
           </div>
-          {#if isBusy}
-            <span class="loading loading-spinner loading-xs text-primary shrink-0"></span>
-          {/if}
+          <div class="flex items-center gap-1 shrink-0">
+            {#if isBusy}
+              <span class="loading loading-spinner loading-xs text-primary"></span>
+            {/if}
+            <button
+              type="button"
+              class="btn btn-xs btn-square h-6 w-6 min-h-0 {studio.showDescriptions
+                ? 'btn-soft btn-primary'
+                : 'btn-ghost opacity-60 hover:opacity-100'}"
+              aria-pressed={studio.showDescriptions}
+              aria-label={studio.showDescriptions
+                ? 'Hide parameter descriptions'
+                : 'Show parameter descriptions'}
+              title={studio.showDescriptions
+                ? 'Parameter descriptions shown inline (click for hover tooltips)'
+                : 'Parameter descriptions in hover tooltips (click to show inline)'}
+              onclick={() => studio.toggleShowDescriptions()}
+            >
+              <svg
+                xmlns="http://www.w3.org/2000/svg"
+                class="h-3.5 w-3.5"
+                viewBox="0 0 24 24"
+                fill="none"
+                stroke="currentColor"
+                stroke-width="2"
+                stroke-linecap="round"
+                stroke-linejoin="round"
+                aria-hidden="true"
+              >
+                <circle cx="12" cy="12" r="10" />
+                <path d="M12 16v-4" />
+                <path d="M12 8h.01" />
+              </svg>
+            </button>
+          </div>
         </div>
         <PresetBar />
       </div>
 
       <!-- Scrollable Parameters Form -->
-      <div class="flex-1 overflow-y-auto p-3 space-y-3">
+      <div class="@container flex-1 overflow-y-auto overflow-x-hidden p-3 space-y-3">
         {#if split.coreFields.length > 0}
           <details
-            class="collapse collapse-arrow bg-base-200/60 border border-base-300 rounded-box"
+            class="collapse collapse-arrow bg-base-200/60 border border-base-300 rounded-box min-w-0"
             open
           >
-            <summary class="collapse-title text-xs font-semibold min-h-0 py-2 pl-3 pr-9">
+            <summary class="collapse-title text-xs font-semibold min-h-0 py-2 pl-3 pr-9 min-w-0">
               Core Parameters
             </summary>
-            <div class="collapse-content px-3 pb-3 pt-1">
-              <div class="space-y-2.5 pt-1.5 border-t border-base-300/70">
+            <div class="collapse-content px-3 pb-3 pt-1 min-w-0">
+              <div class="space-y-2.5 pt-2 border-t border-base-300/70 min-w-0">
                 {#each split.coreFields as field (field.path)}
                   <ParamField
                     {field}
                     rootParams={studio.params}
                     groupParams={studio.params}
+                    showDescriptions={studio.showDescriptions}
                     onUpdate={(path, val, immediate) => studio.updateParam(path, val, immediate)}
                   />
                 {/each}
@@ -93,6 +128,7 @@
             field={group}
             rootParams={studio.params}
             groupParams={studio.params}
+            showDescriptions={studio.showDescriptions}
             onUpdate={(path, val, immediate) => studio.updateParam(path, val, immediate)}
           />
         {/each}

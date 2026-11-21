@@ -12,7 +12,16 @@ import type {
 } from './types';
 
 const THEME_STORAGE_KEY = 'code-cad-theme';
+const DESCRIPTIONS_STORAGE_KEY = 'code-cad-show-descriptions';
 const RENDER_DEBOUNCE_MS = 80;
+
+function loadShowDescriptions(): boolean {
+  try {
+    return localStorage.getItem(DESCRIPTIONS_STORAGE_KEY) === 'true';
+  } catch {
+    return false;
+  }
+}
 
 class StudioState {
   // Config & environment
@@ -22,6 +31,7 @@ class StudioState {
   workerRunning = $state(false);
   workerError = $state('');
   theme = $state('dark');
+  showDescriptions = $state(loadShowDescriptions());
   settingsOpen = $state(false);
   reloadedVisible = $state(false);
 
@@ -137,6 +147,19 @@ class StudioState {
     this.applyThemeDom(themeName);
     this.config = { ...this.config, theme: themeName };
     api.saveTheme(themeName).catch(() => {});
+  }
+
+  setShowDescriptions(show: boolean): void {
+    this.showDescriptions = show;
+    try {
+      localStorage.setItem(DESCRIPTIONS_STORAGE_KEY, String(show));
+    } catch {
+      // ignore
+    }
+  }
+
+  toggleShowDescriptions(): void {
+    this.setShowDescriptions(!this.showDescriptions);
   }
 
   async loadConfig(): Promise<void> {

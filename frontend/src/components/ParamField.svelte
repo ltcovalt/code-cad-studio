@@ -1,4 +1,5 @@
 <script lang="ts">
+  import InfoTooltip from './InfoTooltip.svelte';
   import Self from './ParamField.svelte';
   import { evaluateWhen, getParamByPath, isPlainObject, stepNumber } from '../lib/params';
   import type { ParamField, ParamsRecord } from '../lib/types';
@@ -7,10 +8,11 @@
     field: ParamField;
     rootParams: ParamsRecord;
     groupParams: ParamsRecord;
+    showDescriptions: boolean;
     onUpdate: (path: string, value: unknown, immediate?: boolean) => void;
   }
 
-  let { field, rootParams, groupParams, onUpdate }: Props = $props();
+  let { field, rootParams, groupParams, showDescriptions, onUpdate }: Props = $props();
 
   let isVisible = $derived(evaluateWhen(field.when, rootParams, groupParams));
 
@@ -106,36 +108,39 @@
 {#if isVisible}
   {#if field.type === 'group'}
     <details
-      class="collapse collapse-arrow bg-base-200/60 border border-base-300 rounded-box"
+      class="collapse collapse-arrow bg-base-200/60 border border-base-300 rounded-box min-w-0"
       bind:open={detailsOpen}
     >
-      <summary
-        class="collapse-title text-xs font-semibold min-h-0 py-2 pl-3 pr-9 flex items-center justify-between gap-2"
-      >
-        <span class="truncate">
-          {field.label}
-          {#if field.description}
-            <span class="font-normal opacity-60 ml-1">— {field.description}</span>
+      <summary class="collapse-title min-h-0 py-2 pl-3 pr-9 min-w-0">
+        <!-- Inner flex wrapper because DaisyUI v5 sets display: block on details > summary -->
+        <div class="flex items-center justify-between gap-2 min-w-0">
+          <div class="min-w-0 flex-1">
+            <div class="text-xs font-semibold leading-tight break-words">{field.label}</div>
+            {#if field.description}
+              <div class="text-[11px] font-normal opacity-60 leading-snug mt-0.5 break-words">
+                {field.description}
+              </div>
+            {/if}
+          </div>
+          {#if toggleChild}
+            <!-- svelte-ignore a11y_click_events_have_key_events -->
+            <!-- svelte-ignore a11y_no_static_element_interactions -->
+            <span class="shrink-0 flex items-center" onclick={(e) => e.stopPropagation()}>
+              <input
+                type="checkbox"
+                class="toggle toggle-primary toggle-xs"
+                aria-label="Enable {field.label}"
+                checked={toggleChecked}
+                onchange={(e) => handleToggleGroupChange((e.currentTarget as HTMLInputElement).checked)}
+              />
+            </span>
           {/if}
-        </span>
-        {#if toggleChild}
-          <!-- svelte-ignore a11y_click_events_have_key_events -->
-          <!-- svelte-ignore a11y_no_static_element_interactions -->
-          <span class="shrink-0 flex items-center" onclick={(e) => e.stopPropagation()}>
-            <input
-              type="checkbox"
-              class="toggle toggle-primary toggle-xs"
-              aria-label="Enable {field.label}"
-              checked={toggleChecked}
-              onchange={(e) => handleToggleGroupChange((e.currentTarget as HTMLInputElement).checked)}
-            />
-          </span>
-        {/if}
+        </div>
       </summary>
       {#if bodyChildren.length > 0}
-        <div class="collapse-content px-3 pb-3 pt-1">
+        <div class="collapse-content px-3 pb-3 pt-1 min-w-0">
           <div
-            class="space-y-2.5 pt-1.5 border-t border-base-300/70 transition-opacity"
+            class="space-y-2.5 pt-2 border-t border-base-300/70 transition-opacity min-w-0"
             class:opacity-45={toggleChild !== null && !toggleChecked}
           >
             {#each bodyChildren as child (child.path)}
@@ -143,6 +148,7 @@
                 field={child}
                 {rootParams}
                 groupParams={childGroupParams}
+                {showDescriptions}
                 {onUpdate}
               />
             {/each}
@@ -151,69 +157,96 @@
       {/if}
     </details>
   {:else if field.type === 'bool' && field.nullable}
-    <div class="flex items-center justify-between py-0.5 gap-2" title={field.description}>
-      <span class="label-text text-xs flex flex-col min-w-0">
-        <span class="truncate">{field.label}</span>
-        {#if field.description}
-          <span class="text-[10px] opacity-60 leading-snug">{field.description}</span>
-        {/if}
-      </span>
-      <div class="join shrink-0" role="group" aria-label={field.label}>
-        <button
-          type="button"
-          class="btn btn-xs join-item px-2"
-          class:btn-primary={currentValue === null || currentValue === undefined}
-          class:btn-ghost={currentValue !== null && currentValue !== undefined}
-          class:border-base-300={currentValue !== null && currentValue !== undefined}
-          onclick={() => onUpdate(field.path, null, true)}
+    <div class="w-full min-w-0 py-0.5">
+      <div
+        class="flex flex-col @[240px]:flex-row @[240px]:items-center justify-between gap-1.5 @[240px]:gap-2 min-w-0"
+      >
+        <div class="flex items-center gap-1 min-w-0 flex-1">
+          <span class="text-xs font-medium leading-snug break-words min-w-0">{field.label}</span>
+          {#if field.description && !showDescriptions}
+            <InfoTooltip text={field.description} label={field.label} />
+          {/if}
+        </div>
+        <div
+          class="join shrink-0 self-end @[240px]:self-auto"
+          role="group"
+          aria-label={field.label}
         >
-          Auto
-        </button>
-        <button
-          type="button"
-          class="btn btn-xs join-item px-2"
-          class:btn-primary={currentValue === true}
-          class:btn-ghost={currentValue !== true}
-          class:border-base-300={currentValue !== true}
-          onclick={() => onUpdate(field.path, true, true)}
-        >
-          On
-        </button>
-        <button
-          type="button"
-          class="btn btn-xs join-item px-2"
-          class:btn-primary={currentValue === false}
-          class:btn-ghost={currentValue !== false}
-          class:border-base-300={currentValue !== false}
-          onclick={() => onUpdate(field.path, false, true)}
-        >
-          Off
-        </button>
+          <button
+            type="button"
+            class="btn btn-xs join-item px-1.5"
+            class:btn-primary={currentValue === null || currentValue === undefined}
+            class:btn-ghost={currentValue !== null && currentValue !== undefined}
+            class:border-base-300={currentValue !== null && currentValue !== undefined}
+            onclick={() => onUpdate(field.path, null, true)}
+          >
+            Auto
+          </button>
+          <button
+            type="button"
+            class="btn btn-xs join-item px-1.5"
+            class:btn-primary={currentValue === true}
+            class:btn-ghost={currentValue !== true}
+            class:border-base-300={currentValue !== true}
+            onclick={() => onUpdate(field.path, true, true)}
+          >
+            On
+          </button>
+          <button
+            type="button"
+            class="btn btn-xs join-item px-1.5"
+            class:btn-primary={currentValue === false}
+            class:btn-ghost={currentValue !== false}
+            class:border-base-300={currentValue !== false}
+            onclick={() => onUpdate(field.path, false, true)}
+          >
+            Off
+          </button>
+        </div>
       </div>
+      {#if field.description && showDescriptions}
+        <p class="text-[11px] opacity-60 leading-snug mt-0.5 break-words">{field.description}</p>
+      {/if}
     </div>
   {:else if field.type === 'bool'}
-    <label class="label cursor-pointer justify-between py-0.5 gap-2" title={field.description}>
-      <span class="label-text text-xs flex flex-col min-w-0">
-        <span>{field.label}</span>
-        {#if field.description}
-          <span class="text-[10px] opacity-60 leading-snug">{field.description}</span>
-        {/if}
-      </span>
-      <input
-        type="checkbox"
-        class="toggle toggle-primary toggle-xs shrink-0"
-        checked={Boolean(currentValue)}
-        onchange={(e) => onUpdate(field.path, (e.currentTarget as HTMLInputElement).checked, true)}
-      />
-    </label>
+    <div class="w-full min-w-0 py-0.5">
+      <div class="flex items-center justify-between gap-2 min-w-0">
+        <div class="flex items-center gap-1 min-w-0 flex-1">
+          <label
+            for="param-{field.path}"
+            class="text-xs font-medium leading-snug cursor-pointer break-words min-w-0"
+          >
+            {field.label}
+          </label>
+          {#if field.description && !showDescriptions}
+            <InfoTooltip text={field.description} label={field.label} />
+          {/if}
+        </div>
+        <input
+          id="param-{field.path}"
+          type="checkbox"
+          class="toggle toggle-primary toggle-xs shrink-0"
+          checked={Boolean(currentValue)}
+          onchange={(e) => onUpdate(field.path, (e.currentTarget as HTMLInputElement).checked, true)}
+        />
+      </div>
+      {#if field.description && showDescriptions}
+        <p class="text-[11px] opacity-60 leading-snug mt-0.5 break-words">{field.description}</p>
+      {/if}
+    </div>
   {:else if field.type === 'enum'}
-    <div class="form-control w-full" title={field.description}>
-      <label class="label py-0.5" for="param-{field.path}">
-        <span class="label-text text-xs">{field.label}</span>
-        {#if field.description}
-          <span class="label-text-alt text-[10px] opacity-60 truncate max-w-44">{field.description}</span>
+    <div class="w-full min-w-0">
+      <div class="flex items-center gap-1 mb-1 min-w-0">
+        <label
+          class="text-xs font-medium leading-snug break-words min-w-0"
+          for="param-{field.path}"
+        >
+          {field.label}
+        </label>
+        {#if field.description && !showDescriptions}
+          <InfoTooltip text={field.description} label={field.label} />
         {/if}
-      </label>
+      </div>
       <select
         id="param-{field.path}"
         class="select select-bordered select-xs w-full"
@@ -230,18 +263,31 @@
           <option value={choice}>{choice}</option>
         {/each}
       </select>
+      {#if field.description && showDescriptions}
+        <p class="text-[11px] opacity-60 leading-snug mt-1 break-words">{field.description}</p>
+      {/if}
     </div>
   {:else if field.type === 'int' || field.type === 'float'}
-    <div class="form-control w-full" title={field.description}>
-      <div class="flex items-center justify-between gap-2 mb-1">
-        <label class="text-xs font-medium truncate" for="param-{field.path}">
-          {field.label}{#if field.unit}<span class="font-normal opacity-55 ml-1">({field.unit})</span>{/if}
-        </label>
-        <div class="flex items-center gap-1 shrink-0">
+    <div class="w-full min-w-0">
+      <div
+        class="flex flex-col @[240px]:flex-row @[240px]:items-center justify-between gap-1 @[240px]:gap-2 min-w-0"
+      >
+        <div class="flex items-center gap-1 min-w-0 flex-1">
+          <label
+            class="text-xs font-medium leading-snug break-words min-w-0"
+            for="param-{field.path}"
+          >
+            {field.label}{#if field.unit}<span class="font-normal opacity-55 ml-1">({field.unit})</span>{/if}
+          </label>
+          {#if field.description && !showDescriptions}
+            <InfoTooltip text={field.description} label={field.label} />
+          {/if}
+        </div>
+        <div class="flex items-center gap-1 shrink-0 self-end @[240px]:self-auto">
           {#if field.nullable && numValue !== null}
             <button
               type="button"
-              class="btn btn-xs btn-ghost px-1 text-[11px] opacity-60 hover:opacity-100"
+              class="btn btn-xs btn-ghost h-7 w-5 min-h-0 px-0 text-xs opacity-60 hover:opacity-100"
               title="Reset to Auto"
               aria-label="Reset {field.label} to Auto"
               onclick={handleClearNullable}
@@ -252,7 +298,7 @@
           <div class="join items-center">
             <button
               type="button"
-              class="btn btn-sm btn-ghost border border-base-300 join-item px-2.5 font-mono text-sm leading-none"
+              class="btn btn-xs btn-ghost border border-base-300 join-item h-7 min-h-0 px-2 font-mono text-xs leading-none"
               aria-label="Decrease {field.label}"
               onclick={() => handleStep(-1)}
             >
@@ -266,12 +312,12 @@
               step={stepVal}
               min={field.min}
               max={field.max}
-              class="input input-bordered input-sm join-item w-20 text-center font-mono px-2 no-spinner"
+              class="input input-bordered input-xs join-item h-7 w-16 text-center font-mono text-xs px-1.5 no-spinner"
               oninput={(e) => handleNumberInput((e.currentTarget as HTMLInputElement).value)}
             />
             <button
               type="button"
-              class="btn btn-sm btn-ghost border border-base-300 join-item px-2.5 font-mono text-sm leading-none"
+              class="btn btn-xs btn-ghost border border-base-300 join-item h-7 min-h-0 px-2 font-mono text-xs leading-none"
               aria-label="Increase {field.label}"
               onclick={() => handleStep(1)}
             >
@@ -287,20 +333,28 @@
           max={field.max}
           step={stepVal}
           value={rangeValue}
-          class="range range-primary range-xs mt-0.5"
+          class="range range-primary range-xs w-full mt-1.5"
           class:opacity-40={field.nullable && numValue === null}
           oninput={(e) => handleRangeInput((e.currentTarget as HTMLInputElement).value)}
         />
       {/if}
-      {#if field.description}
-        <span class="text-[11px] opacity-60 mt-1 leading-snug">{field.description}</span>
+      {#if field.description && showDescriptions}
+        <p class="text-[11px] opacity-60 mt-1 leading-snug break-words">{field.description}</p>
       {/if}
     </div>
   {:else}
-    <div class="form-control w-full" title={field.description}>
-      <label class="label py-0.5" for="param-{field.path}">
-        <span class="label-text text-xs">{field.label}</span>
-      </label>
+    <div class="w-full min-w-0">
+      <div class="flex items-center gap-1 mb-1 min-w-0">
+        <label
+          class="text-xs font-medium leading-snug break-words min-w-0"
+          for="param-{field.path}"
+        >
+          {field.label}
+        </label>
+        {#if field.description && !showDescriptions}
+          <InfoTooltip text={field.description} label={field.label} />
+        {/if}
+      </div>
       <input
         id="param-{field.path}"
         type="text"
@@ -316,8 +370,8 @@
           onUpdate(field.path, field.nullable && v === '' ? null : v, false);
         }}
       />
-      {#if field.description}
-        <span class="text-[10px] opacity-55 mt-0.5 leading-tight">{field.description}</span>
+      {#if field.description && showDescriptions}
+        <p class="text-[11px] opacity-60 mt-1 leading-snug break-words">{field.description}</p>
       {/if}
     </div>
   {/if}
