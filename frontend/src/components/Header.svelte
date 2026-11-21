@@ -95,11 +95,11 @@
   ondblclick={handleTitlebarDblClick}
 >
   <div class="flex-1 flex items-center gap-3 min-w-0">
-    <div class="flex items-center gap-2 font-bold text-base tracking-tight">
+    <div class="flex items-center gap-2 font-bold text-base tracking-tight pointer-events-none">
       <span class="truncate">Code CAD Studio</span>
     </div>
     {#if studio.reloadedVisible}
-      <span class="badge badge-ghost badge-xs">Reloaded</span>
+      <span class="badge badge-ghost badge-xs pointer-events-none">Reloaded</span>
     {/if}
   </div>
 
