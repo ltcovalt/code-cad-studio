@@ -9,9 +9,21 @@ from utils.params import param
 class BaseFlangeParams:
     """Bottom mounting flange with chamfered perimeter."""
 
-    flange_diameter: float = param(32.0, min=16.0, max=60.0, step=0.5, unit="mm", desc="Outer flange diameter")
-    flange_thickness: float = param(4.0, min=1.5, max=12.0, step=0.5, unit="mm", desc="Flange axial thickness")
-    chamfer_size: float = param(0.8, min=0.0, max=3.0, step=0.1, unit="mm", desc="Perimeter edge chamfer")
+    flange_diameter: float = param(
+        32.0,
+        desc="Outer flange diameter",
+        unit="mm", min=16.0, max=60.0, step=0.5,
+    )
+    flange_thickness: float = param(
+        4.0,
+        desc="Flange axial thickness",
+        unit="mm", min=1.5, max=12.0, step=0.5,
+    )
+    chamfer_size: float = param(
+        0.8,
+        desc="Perimeter edge chamfer",
+        unit="mm", min=0.0, max=3.0, step=0.1,
+    )
 
 
 def create_base_flange(params: BaseFlangeParams):

@@ -22,19 +22,45 @@ from components.chamfer_base import BaseFlangeParams, create_base_flange
 class CoreParams:
     """Shaft fit and sleeve dimensions."""
 
-    shaft_diameter: float = param(10.0, min=4.0, max=30.0, step=0.2, unit="mm", desc="Rod diameter")
-    wall_thickness: float = param(2.4, min=1.2, max=6.0, step=0.2, unit="mm", desc="Sleeve wall thickness")
-    sleeve_height: float = param(18.0, min=8.0, max=45.0, step=1.0, unit="mm", desc="Sleeve length")
-    cap_style: Literal["flat", "dome", "chamfer"] = param("chamfer", desc="Top cap profile")
+    shaft_diameter: float = param(
+        10.0,
+        desc="Rod diameter",
+        unit="mm", min=4.0, max=30.0, step=0.2,
+    )
+    wall_thickness: float = param(
+        2.4,
+        desc="Sleeve wall thickness",
+        unit="mm", min=1.2, max=6.0, step=0.2,
+    )
+    sleeve_height: float = param(
+        18.0,
+        desc="Sleeve length",
+        unit="mm", min=8.0, max=45.0, step=1.0,
+    )
+    cap_style: Literal["flat", "dome", "chamfer"] = param(
+        "chamfer",
+        desc="Top cap profile",
+    )
 
 
 @dataclass
 class FlutesParams:
     """Radial perimeter grip flutes."""
 
-    enabled: bool = param(True, desc="Add radial grip flutes")
-    count: int = param(12, min=4, max=32, step=1, desc="Number of grip flutes")
-    depth: float = param(0.8, min=0.2, max=2.0, step=0.1, unit="mm", desc="Flute cut depth")
+    enabled: bool = param(
+        True,
+        desc="Add radial grip flutes",
+    )
+    count: int = param(
+        12,
+        desc="Number of grip flutes",
+        min=4, max=32, step=1,
+    )
+    depth: float = param(
+        0.8,
+        desc="Flute cut depth",
+        unit="mm", min=0.2, max=2.0, step=0.1,
+    )
 
 
 @dataclass
