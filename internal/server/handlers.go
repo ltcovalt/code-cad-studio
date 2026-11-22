@@ -292,7 +292,7 @@ func (s *Server) handleGetModel(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	presetList := presets.List(modelID, schema.Model.Dir, schema.Defaults)
+	presetList := presets.List(modelID, schema.Model.Dir, schema.Defaults, schemaDefaultPresetMeta(schema))
 	fields := schema.Fields
 	if fields == nil {
 		fields = []worker.ParamField{}
@@ -302,13 +302,20 @@ func (s *Server) handleGetModel(w http.ResponseWriter, r *http.Request) {
 		defaults = map[string]any{}
 	}
 
+	cfg := s.cfgStore.Get()
+	defaultPresetKey := ""
+	if cfg.DefaultPresets != nil {
+		defaultPresetKey = cfg.DefaultPresets[modelID]
+	}
+
 	writeJSON(w, http.StatusOK, map[string]any{
-		"ok":          true,
-		"model":       schema.Model,
-		"description": schema.Description,
-		"fields":      fields,
-		"defaults":    defaults,
-		"presets":     presetList,
+		"ok":                 true,
+		"model":              schema.Model,
+		"description":        schema.Description,
+		"fields":             fields,
+		"defaults":           defaults,
+		"presets":            presetList,
+		"default_preset_key": defaultPresetKey,
 	})
 }
 
@@ -332,6 +339,9 @@ func (s *Server) handleRenderModel(w http.ResponseWriter, r *http.Request) {
 
 	resp, err := s.worker.Render(r.Context(), modelID, req.Params)
 	if err != nil {
+		if r.Context().Err() != nil {
+			return
+		}
 		writeJSON(w, http.StatusOK, map[string]any{"ok": false, "error": err.Error()})
 		return
 	}
@@ -407,6 +417,16 @@ func (s *Server) handleExportModel(w http.ResponseWriter, r *http.Request) {
 	})
 }
 
+func schemaDefaultPresetMeta(schema *worker.SchemaResponse) *presets.DefaultMeta {
+	if schema == nil || schema.DefaultPreset == nil {
+		return nil
+	}
+	return &presets.DefaultMeta{
+		Label:       schema.DefaultPreset.Label,
+		Description: schema.DefaultPreset.Description,
+	}
+}
+
 func (s *Server) handleGetPresets(w http.ResponseWriter, r *http.Request) {
 	modelID := r.PathValue("id")
 	if err := s.ensureWorkerRunning(r.Context()); err != nil {
@@ -424,20 +444,27 @@ func (s *Server) handleGetPresets(w http.ResponseWriter, r *http.Request) {
 		writeJSON(w, http.StatusOK, map[string]any{"ok": false, "error": errMsg, "presets": []presets.Preset{}})
 		return
 	}
-	presetList := presets.List(modelID, schema.Model.Dir, schema.Defaults)
+	presetList := presets.List(modelID, schema.Model.Dir, schema.Defaults, schemaDefaultPresetMeta(schema))
+	cfg := s.cfgStore.Get()
+	defaultPresetKey := ""
+	if cfg.DefaultPresets != nil {
+		defaultPresetKey = cfg.DefaultPresets[modelID]
+	}
 	writeJSON(w, http.StatusOK, map[string]any{
-		"ok":      true,
-		"presets": presetList,
+		"ok":                 true,
+		"presets":            presetList,
+		"default_preset_key": defaultPresetKey,
 	})
 }
 
 func (s *Server) handleSavePreset(w http.ResponseWriter, r *http.Request) {
 	modelID := r.PathValue("id")
 	var req struct {
-		Label       string         `json:"label"`
-		Description string         `json:"description"`
-		Scope       string         `json:"scope"`
-		Params      map[string]any `json:"params"`
+		Label        string         `json:"label"`
+		Description  string         `json:"description"`
+		Scope        string         `json:"scope"`
+		FullSnapshot bool           `json:"full_snapshot"`
+		Params       map[string]any `json:"params"`
 	}
 	if err := decodeJSON(r, &req); err != nil {
 		writeJSON(w, http.StatusBadRequest, map[string]any{"ok": false, "error": "invalid JSON body"})
@@ -452,6 +479,11 @@ func (s *Server) handleSavePreset(w http.ResponseWriter, r *http.Request) {
 		req.Params = map[string]any{}
 	}
 
+	scope := strings.TrimSpace(req.Scope)
+	if scope != "project" {
+		scope = "user"
+	}
+
 	if err := s.ensureWorkerRunning(r.Context()); err != nil {
 		writeJSON(w, http.StatusInternalServerError, map[string]any{"ok": false, "error": err.Error()})
 		return
@@ -463,16 +495,204 @@ func (s *Server) handleSavePreset(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	key, err := presets.Save(modelID, schema.Model.Dir, label, strings.TrimSpace(req.Description), strings.TrimSpace(req.Scope), req.Params, schema.Defaults)
+	key, err := presets.Save(
+		modelID,
+		schema.Model.Dir,
+		label,
+		strings.TrimSpace(req.Description),
+		scope,
+		req.FullSnapshot,
+		req.Params,
+		schema.Defaults,
+	)
 	if err != nil {
 		writeJSON(w, http.StatusInternalServerError, map[string]any{"ok": false, "error": err.Error()})
 		return
 	}
 
-	presetList := presets.List(modelID, schema.Model.Dir, schema.Defaults)
-	writeJSON(w, http.StatusOK, map[string]any{
-		"ok":           true,
-		"selected_key": key,
-		"presets":      presetList,
+	_, _ = s.cfgStore.Update(func(c *config.Config) {
+		c.PresetSaveScope = scope
 	})
+
+	presetList := presets.List(modelID, schema.Model.Dir, schema.Defaults, schemaDefaultPresetMeta(schema))
+	writeJSON(w, http.StatusOK, map[string]any{
+		"ok":                true,
+		"selected_key":      key,
+		"presets":           presetList,
+		"preset_save_scope": scope,
+	})
+}
+
+func (s *Server) handleRenamePreset(w http.ResponseWriter, r *http.Request) {
+	modelID := r.PathValue("id")
+	oldKey := strings.TrimSpace(r.PathValue("key"))
+	var req struct {
+		Scope       string `json:"scope"`
+		Label       string `json:"label"`
+		Description string `json:"description"`
+	}
+	if err := decodeJSON(r, &req); err != nil {
+		writeJSON(w, http.StatusBadRequest, map[string]any{"ok": false, "error": "invalid JSON body"})
+		return
+	}
+	scope := strings.TrimSpace(req.Scope)
+	if scope != "project" {
+		scope = "user"
+	}
+
+	if err := s.ensureWorkerRunning(r.Context()); err != nil {
+		writeJSON(w, http.StatusInternalServerError, map[string]any{"ok": false, "error": err.Error()})
+		return
+	}
+	schema, err := s.worker.GetSchema(r.Context(), modelID)
+	if err != nil || !schema.OK {
+		writeJSON(w, http.StatusInternalServerError, map[string]any{"ok": false, "error": "failed to load model schema"})
+		return
+	}
+
+	newKey, err := presets.Rename(modelID, schema.Model.Dir, oldKey, scope, req.Label, req.Description)
+	if err != nil {
+		writeJSON(w, http.StatusBadRequest, map[string]any{"ok": false, "error": err.Error()})
+		return
+	}
+
+	defaultPresetKey := ""
+	cfg, _ := s.cfgStore.Update(func(c *config.Config) {
+		if c.DefaultPresets != nil && c.DefaultPresets[modelID] == oldKey {
+			c.DefaultPresets[modelID] = newKey
+		}
+	})
+	if cfg.DefaultPresets != nil {
+		defaultPresetKey = cfg.DefaultPresets[modelID]
+	}
+
+	presetList := presets.List(modelID, schema.Model.Dir, schema.Defaults, schemaDefaultPresetMeta(schema))
+	writeJSON(w, http.StatusOK, map[string]any{
+		"ok":                 true,
+		"key":                newKey,
+		"presets":            presetList,
+		"default_preset_key": defaultPresetKey,
+	})
+}
+
+func (s *Server) handleDeletePreset(w http.ResponseWriter, r *http.Request) {
+	modelID := r.PathValue("id")
+	key := strings.TrimSpace(r.PathValue("key"))
+	scope := strings.TrimSpace(r.URL.Query().Get("scope"))
+	if scope != "project" {
+		scope = "user"
+	}
+
+	if err := s.ensureWorkerRunning(r.Context()); err != nil {
+		writeJSON(w, http.StatusInternalServerError, map[string]any{"ok": false, "error": err.Error()})
+		return
+	}
+	schema, err := s.worker.GetSchema(r.Context(), modelID)
+	if err != nil || !schema.OK {
+		writeJSON(w, http.StatusInternalServerError, map[string]any{"ok": false, "error": "failed to load model schema"})
+		return
+	}
+
+	if err := presets.Delete(modelID, schema.Model.Dir, key, scope); err != nil {
+		writeJSON(w, http.StatusBadRequest, map[string]any{"ok": false, "error": err.Error()})
+		return
+	}
+
+	presetList := presets.List(modelID, schema.Model.Dir, schema.Defaults, schemaDefaultPresetMeta(schema))
+	stillExists := false
+	for _, p := range presetList {
+		if p.Key == key {
+			stillExists = true
+			break
+		}
+	}
+
+	defaultPresetKey := ""
+	cfg, _ := s.cfgStore.Update(func(c *config.Config) {
+		if c.DefaultPresets != nil && c.DefaultPresets[modelID] == key && !stillExists {
+			delete(c.DefaultPresets, modelID)
+		}
+	})
+	if cfg.DefaultPresets != nil {
+		defaultPresetKey = cfg.DefaultPresets[modelID]
+	}
+
+	writeJSON(w, http.StatusOK, map[string]any{
+		"ok":                 true,
+		"presets":            presetList,
+		"default_preset_key": defaultPresetKey,
+	})
+}
+
+func (s *Server) handleSetDefaultPreset(w http.ResponseWriter, r *http.Request) {
+	modelID := r.PathValue("id")
+	var req struct {
+		Key string `json:"key"`
+	}
+	if err := decodeJSON(r, &req); err != nil {
+		writeJSON(w, http.StatusBadRequest, map[string]any{"ok": false, "error": "invalid JSON body"})
+		return
+	}
+	key := strings.TrimSpace(req.Key)
+	if key == "default" {
+		key = ""
+	}
+
+	cfg, err := s.cfgStore.Update(func(c *config.Config) {
+		if c.DefaultPresets == nil {
+			c.DefaultPresets = map[string]string{}
+		}
+		if key == "" {
+			delete(c.DefaultPresets, modelID)
+		} else {
+			c.DefaultPresets[modelID] = key
+		}
+	})
+	if err != nil {
+		writeJSON(w, http.StatusInternalServerError, map[string]any{"ok": false, "error": err.Error()})
+		return
+	}
+
+	defaultPresetKey := ""
+	if cfg.DefaultPresets != nil {
+		defaultPresetKey = cfg.DefaultPresets[modelID]
+	}
+	writeJSON(w, http.StatusOK, map[string]any{
+		"ok":                 true,
+		"default_preset_key": defaultPresetKey,
+	})
+}
+
+func (s *Server) handleUpdateModelDefaults(w http.ResponseWriter, r *http.Request) {
+	modelID := r.PathValue("id")
+	var req struct {
+		Params         map[string]any `json:"params"`
+		DryRun         bool           `json:"dry_run"`
+		ExpectedSHA256 string         `json:"expected_sha256"`
+	}
+	if err := decodeJSON(r, &req); err != nil {
+		writeJSON(w, http.StatusBadRequest, map[string]any{"ok": false, "error": "invalid JSON body"})
+		return
+	}
+	if req.Params == nil {
+		req.Params = map[string]any{}
+	}
+
+	if err := s.ensureWorkerRunning(r.Context()); err != nil {
+		writeJSON(w, http.StatusInternalServerError, map[string]any{"ok": false, "error": err.Error()})
+		return
+	}
+
+	resp, err := s.worker.UpdateDefaults(r.Context(), modelID, req.Params, req.DryRun, strings.TrimSpace(req.ExpectedSHA256))
+	if err != nil {
+		writeJSON(w, http.StatusInternalServerError, map[string]any{"ok": false, "error": err.Error()})
+		return
+	}
+	if resp.Changes == nil {
+		resp.Changes = []worker.DefaultChange{}
+	}
+	if resp.Unsupported == nil {
+		resp.Unsupported = []worker.UnsupportedDefaultChange{}
+	}
+	writeJSON(w, http.StatusOK, resp)
 }

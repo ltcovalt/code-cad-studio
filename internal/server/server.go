@@ -133,6 +133,10 @@ func (s *Server) registerRoutes() {
 	s.mux.HandleFunc("POST /api/models/{id}/export", s.handleExportModel)
 	s.mux.HandleFunc("GET /api/models/{id}/presets", s.handleGetPresets)
 	s.mux.HandleFunc("POST /api/models/{id}/presets", s.handleSavePreset)
+	s.mux.HandleFunc("PATCH /api/models/{id}/presets/{key}", s.handleRenamePreset)
+	s.mux.HandleFunc("DELETE /api/models/{id}/presets/{key}", s.handleDeletePreset)
+	s.mux.HandleFunc("POST /api/models/{id}/presets/default", s.handleSetDefaultPreset)
+	s.mux.HandleFunc("POST /api/models/{id}/update-defaults", s.handleUpdateModelDefaults)
 
 	// SSE for hot-reload
 	s.mux.HandleFunc("GET /events", s.handleSSE)

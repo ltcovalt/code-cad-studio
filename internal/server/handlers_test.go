@@ -151,6 +151,7 @@ class ExtraParams:
 
 @dataclass
 class DemoBoxParams:
+    __default_preset__ = {"label": "Bench Demo Box", "description": "Standard benchtop enclosure"}
     core: CoreParams = field(default_factory=CoreParams)
     extra: ExtraParams = field(default_factory=ExtraParams)
 
@@ -199,12 +200,21 @@ def create_demo_box(params: DemoBoxParams):
 		OK       bool                `json:"ok"`
 		Fields   []worker.ParamField `json:"fields"`
 		Defaults map[string]any      `json:"defaults"`
+		Presets  []struct {
+			Key         string `json:"key"`
+			Label       string `json:"label"`
+			Description string `json:"description"`
+			Source      string `json:"source"`
+		} `json:"presets"`
 	}
 	if err := json.Unmarshal(rec.Body.Bytes(), &modelResp); err != nil {
 		t.Fatalf("decode model schema: %v", err)
 	}
 	if !modelResp.OK || len(modelResp.Fields) != 2 {
 		t.Fatalf("unexpected schema response: %+v", modelResp)
+	}
+	if len(modelResp.Presets) != 1 || modelResp.Presets[0].Key != "default" || modelResp.Presets[0].Label != "Bench Demo Box" || modelResp.Presets[0].Description != "Standard benchtop enclosure" {
+		t.Fatalf("expected custom default preset from __default_preset__, got %+v", modelResp.Presets)
 	}
 	coreGroup := modelResp.Fields[0]
 	if coreGroup.Description != "Core shape settings." {
@@ -342,5 +352,218 @@ def create_list_demo(params: ListDemoParams):
 	srv.Handler().ServeHTTP(rec, httptest.NewRequest(http.MethodPost, "/api/models/list_demo/export", bytes.NewBufferString(`{"format":"stl","params":{}}`)))
 	if dialogs.lastSave != "list_demo_reloaded.stl" {
 		t.Fatalf("expected warm reload to update module -> 'list_demo_reloaded.stl', got %q", dialogs.lastSave)
+	}
+}
+
+func TestPresetsPinDeleteAndSurgicalUpdateDefaults(t *testing.T) {
+	projectDir := t.TempDir()
+	modelDir := filepath.Join(projectDir, "models", "clip_demo")
+	if err := os.MkdirAll(modelDir, 0o755); err != nil {
+		t.Fatalf("mkdir: %v", err)
+	}
+
+	modelSrc := `from dataclasses import dataclass, field
+from typing import Optional
+
+BASE_GAP = 1.0
+
+def param(default, **kwargs):
+    return field(default=default, metadata=kwargs)
+
+@dataclass
+class CoreParams:
+    """Core dimensions — UTF-8 check (°)."""
+    thickness: float = param(
+        12.0,
+        desc="Thickness — keep this comment intact",
+        unit="mm",
+    )
+    angle: float = 95.0  # Opening angle in °
+    label_text: str = "spools"
+    enabled: bool = True
+    override: Optional[float] = None
+    computed_gap: float = BASE_GAP * 2.0
+
+@dataclass
+class ClipDemoParams:
+    core: CoreParams = field(default_factory=CoreParams)
+
+def create_clip_demo(params: ClipDemoParams):
+    return None
+`
+	modelFile := filepath.Join(modelDir, "clip_demo.py")
+	if err := os.WriteFile(modelFile, []byte(modelSrc), 0o644); err != nil {
+		t.Fatalf("write clip_demo.py: %v", err)
+	}
+
+	dialogs := &stubDialogs{}
+	srv := newTestServer(t, dialogs)
+	saveBody, _ := json.Marshal(map[string]string{
+		"project_root": projectDir,
+		"python_path":  "python3",
+	})
+	rec := httptest.NewRecorder()
+	srv.Handler().ServeHTTP(rec, httptest.NewRequest(http.MethodPost, "/api/config", bytes.NewReader(saveBody)))
+	if rec.Code != http.StatusOK {
+		t.Fatalf("POST /api/config status = %d", rec.Code)
+	}
+
+	// 1. Save a local preset, pin as startup default, promote to project, then delete
+	rec = httptest.NewRecorder()
+	savePresetReq := `{"label":"Thin Clip","description":"6mm","scope":"user","full_snapshot":false,"params":{"core":{"thickness":6.0,"angle":95.0}}}`
+	srv.Handler().ServeHTTP(rec, httptest.NewRequest(http.MethodPost, "/api/models/clip_demo/presets", bytes.NewBufferString(savePresetReq)))
+	if rec.Code != http.StatusOK {
+		t.Fatalf("POST presets status = %d, body = %s", rec.Code, rec.Body.String())
+	}
+
+	rec = httptest.NewRecorder()
+	srv.Handler().ServeHTTP(rec, httptest.NewRequest(http.MethodPost, "/api/models/clip_demo/presets/default", bytes.NewBufferString(`{"key":"thin_clip"}`)))
+	if rec.Code != http.StatusOK {
+		t.Fatalf("POST presets/default status = %d", rec.Code)
+	}
+
+	// GET /api/models/clip_demo should return pinned default_preset_key
+	rec = httptest.NewRecorder()
+	srv.Handler().ServeHTTP(rec, httptest.NewRequest(http.MethodGet, "/api/models/clip_demo", nil))
+	var detailResp struct {
+		OK               bool   `json:"ok"`
+		DefaultPresetKey string `json:"default_preset_key"`
+	}
+	if err := json.Unmarshal(rec.Body.Bytes(), &detailResp); err != nil || !detailResp.OK || detailResp.DefaultPresetKey != "thin_clip" {
+		t.Fatalf("expected default_preset_key='thin_clip', got %+v", detailResp)
+	}
+
+	// Save same preset to project scope (replaces/clears shadowed user copy)
+	rec = httptest.NewRecorder()
+	saveProjReq := `{"label":"Thin Clip","description":"6mm shared","scope":"project","full_snapshot":true,"params":{"core":{"thickness":6.0,"angle":95.0}}}`
+	srv.Handler().ServeHTTP(rec, httptest.NewRequest(http.MethodPost, "/api/models/clip_demo/presets", bytes.NewBufferString(saveProjReq)))
+	if rec.Code != http.StatusOK {
+		t.Fatalf("POST project preset status = %d, body = %s", rec.Code, rec.Body.String())
+	}
+
+	// Rename pinned project preset and verify startup default pin follows the new key
+	rec = httptest.NewRecorder()
+	renameReq := `{"scope":"project","label":"Slim Clip","description":"6mm renamed"}`
+	srv.Handler().ServeHTTP(rec, httptest.NewRequest(http.MethodPatch, "/api/models/clip_demo/presets/thin_clip", bytes.NewBufferString(renameReq)))
+	if rec.Code != http.StatusOK {
+		t.Fatalf("PATCH rename preset status = %d, body = %s", rec.Code, rec.Body.String())
+	}
+	var renameResp struct {
+		OK               bool   `json:"ok"`
+		Key              string `json:"key"`
+		DefaultPresetKey string `json:"default_preset_key"`
+	}
+	if err := json.Unmarshal(rec.Body.Bytes(), &renameResp); err != nil || !renameResp.OK || renameResp.Key != "slim_clip" || renameResp.DefaultPresetKey != "slim_clip" {
+		t.Fatalf("expected rename to migrate default pin to 'slim_clip', got %+v", renameResp)
+	}
+
+	// Delete project preset clears pinned default_preset_key
+	rec = httptest.NewRecorder()
+	srv.Handler().ServeHTTP(rec, httptest.NewRequest(http.MethodDelete, "/api/models/clip_demo/presets/slim_clip?scope=project", nil))
+	if rec.Code != http.StatusOK {
+		t.Fatalf("DELETE preset status = %d, body = %s", rec.Code, rec.Body.String())
+	}
+	var delResp struct {
+		OK               bool   `json:"ok"`
+		DefaultPresetKey string `json:"default_preset_key"`
+	}
+	if err := json.Unmarshal(rec.Body.Bytes(), &delResp); err != nil || !delResp.OK || delResp.DefaultPresetKey != "" {
+		t.Fatalf("expected cleared default_preset_key after delete, got %+v", delResp)
+	}
+
+	// 2. Fail-closed test: attempting to update computed_gap (non-literal expression) must report unsupported and not write file
+	rec = httptest.NewRecorder()
+	badApply := `{"dry_run":false,"params":{"core":{"thickness":8.0,"computed_gap":5.0}}}`
+	srv.Handler().ServeHTTP(rec, httptest.NewRequest(http.MethodPost, "/api/models/clip_demo/update-defaults", bytes.NewBufferString(badApply)))
+	var badResp worker.UpdateDefaultsResponse
+	if err := json.Unmarshal(rec.Body.Bytes(), &badResp); err != nil {
+		t.Fatalf("decode badResp: %v", err)
+	}
+	if badResp.OK || len(badResp.Unsupported) != 1 || badResp.Unsupported[0].Path != "core.computed_gap" {
+		t.Fatalf("expected fail-closed unsupported on core.computed_gap, got %+v", badResp)
+	}
+	afterBadBytes, _ := os.ReadFile(modelFile)
+	if string(afterBadBytes) != modelSrc {
+		t.Fatalf("file must remain untouched after failed update")
+	}
+
+	// 3. Dry-run preview on safe literal changes
+	rec = httptest.NewRecorder()
+	previewReq := `{"dry_run":true,"params":{"core":{"thickness":10.5,"angle":110.0,"label_text":"prusa","enabled":false,"override":4.2}}}`
+	srv.Handler().ServeHTTP(rec, httptest.NewRequest(http.MethodPost, "/api/models/clip_demo/update-defaults", bytes.NewBufferString(previewReq)))
+	var previewResp worker.UpdateDefaultsResponse
+	if err := json.Unmarshal(rec.Body.Bytes(), &previewResp); err != nil {
+		t.Fatalf("decode previewResp: %v", err)
+	}
+	if !previewResp.OK || len(previewResp.Changes) != 5 || len(previewResp.Unsupported) != 0 || previewResp.SHA256 == "" {
+		t.Fatalf("unexpected preview response: %+v", previewResp)
+	}
+
+	// 4. Stale SHA-256 must abort without modifying file
+	rec = httptest.NewRecorder()
+	staleReq := `{"dry_run":false,"expected_sha256":"deadbeef","params":{"core":{"thickness":10.5}}}`
+	srv.Handler().ServeHTTP(rec, httptest.NewRequest(http.MethodPost, "/api/models/clip_demo/update-defaults", bytes.NewBufferString(staleReq)))
+	var staleResp worker.UpdateDefaultsResponse
+	if err := json.Unmarshal(rec.Body.Bytes(), &staleResp); err != nil || staleResp.OK {
+		t.Fatalf("expected stale sha256 to fail, got %+v", staleResp)
+	}
+
+	// 5. Apply with matching SHA-256 and verify surgical edits + preserved comments + reloaded defaults
+	applyPayload, _ := json.Marshal(map[string]any{
+		"dry_run":         false,
+		"expected_sha256": previewResp.SHA256,
+		"params": map[string]any{
+			"core": map[string]any{
+				"thickness":  10.5,
+				"angle":      110.0,
+				"label_text": "prusa",
+				"enabled":    false,
+				"override":   4.2,
+			},
+		},
+	})
+	rec = httptest.NewRecorder()
+	srv.Handler().ServeHTTP(rec, httptest.NewRequest(http.MethodPost, "/api/models/clip_demo/update-defaults", bytes.NewReader(applyPayload)))
+	var applyResp worker.UpdateDefaultsResponse
+	if err := json.Unmarshal(rec.Body.Bytes(), &applyResp); err != nil {
+		t.Fatalf("decode applyResp: %v", err)
+	}
+	if !applyResp.OK || applyResp.Updated != 5 {
+		t.Fatalf("expected 5 updated defaults, got %+v", applyResp)
+	}
+
+	updatedBytes, err := os.ReadFile(modelFile)
+	if err != nil {
+		t.Fatalf("read updated model: %v", err)
+	}
+	updatedStr := string(updatedBytes)
+	for _, mustContain := range []string{
+		`desc="Thickness — keep this comment intact"`,
+		`# Opening angle in °`,
+		`10.5,`,
+		`angle: float = 110.0  # Opening angle in °`,
+		`label_text: str = "prusa"`,
+		`enabled: bool = False`,
+		`override: Optional[float] = 4.2`,
+		`computed_gap: float = BASE_GAP * 2.0`,
+	} {
+		if !bytes.Contains(updatedBytes, []byte(mustContain)) {
+			t.Fatalf("updated file missing expected snippet %q\n--- file ---\n%s", mustContain, updatedStr)
+		}
+	}
+
+	// Subsequent GET /api/models/clip_demo must reflect new canonical defaults immediately
+	rec = httptest.NewRecorder()
+	srv.Handler().ServeHTTP(rec, httptest.NewRequest(http.MethodGet, "/api/models/clip_demo", nil))
+	var refreshed struct {
+		OK       bool           `json:"ok"`
+		Defaults map[string]any `json:"defaults"`
+	}
+	if err := json.Unmarshal(rec.Body.Bytes(), &refreshed); err != nil || !refreshed.OK {
+		t.Fatalf("failed to fetch refreshed schema: %s", rec.Body.String())
+	}
+	coreDefaults := refreshed.Defaults["core"].(map[string]any)
+	if coreDefaults["thickness"] != 10.5 || coreDefaults["angle"] != 110.0 || coreDefaults["label_text"] != "prusa" || coreDefaults["enabled"] != false || coreDefaults["override"] != 4.2 {
+		t.Fatalf("refreshed defaults did not match updated values: %#v", coreDefaults)
 	}
 }

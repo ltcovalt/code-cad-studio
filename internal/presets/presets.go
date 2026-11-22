@@ -2,6 +2,7 @@ package presets
 
 import (
 	"encoding/json"
+	"errors"
 	"os"
 	"path/filepath"
 	"reflect"
@@ -17,6 +18,12 @@ type PresetEntry struct {
 	Label       string         `json:"label"`
 	Description string         `json:"description,omitempty"`
 	Params      map[string]any `json:"params"`
+}
+
+// DefaultMeta carries optional display metadata for the synthesized canonical default preset.
+type DefaultMeta struct {
+	Label       string
+	Description string
 }
 
 // Preset is the resolved preset returned to the UI.
@@ -166,13 +173,16 @@ func deepCopyMap(src map[string]any) map[string]any {
 	return dst
 }
 
-// List returns the synthesized "Default" preset followed by project and user presets.
-func List(modelID, modelDir string, defaults map[string]any) []Preset {
+// List returns the synthesized default preset followed by project and user presets.
+func List(modelID, modelDir string, defaults map[string]any, defaultMeta *DefaultMeta) []Preset {
 	byKey := make(map[string]Preset)
 
 	if modelDir != "" {
 		projEntries := readPresetFile(filepath.Join(modelDir, "presets.json"))
 		for key, entry := range projEntries {
+			if key == "default" {
+				continue
+			}
 			label := entry.Label
 			if label == "" {
 				label = key
@@ -190,6 +200,9 @@ func List(modelID, modelDir string, defaults map[string]any) []Preset {
 	if upath, err := userPresetPath(modelID); err == nil {
 		userEntries := readPresetFile(upath)
 		for key, entry := range userEntries {
+			if key == "default" {
+				continue
+			}
 			label := entry.Label
 			if label == "" {
 				label = key
@@ -212,11 +225,22 @@ func List(modelID, modelDir string, defaults map[string]any) []Preset {
 		return strings.ToLower(byKey[keys[i]].Label) < strings.ToLower(byKey[keys[j]].Label)
 	})
 
+	defaultLabel := "Base"
+	defaultDesc := "Base parameters defined by the model"
+	if defaultMeta != nil {
+		if l := strings.TrimSpace(defaultMeta.Label); l != "" {
+			defaultLabel = l
+		}
+		if d := strings.TrimSpace(defaultMeta.Description); d != "" {
+			defaultDesc = d
+		}
+	}
+
 	result := make([]Preset, 0, len(keys)+1)
 	result = append(result, Preset{
 		Key:         "default",
-		Label:       "Default",
-		Description: "Canonical defaults from Params dataclass",
+		Label:       defaultLabel,
+		Description: defaultDesc,
 		Source:      "default",
 		Params:      map[string]any{},
 	})
@@ -226,11 +250,114 @@ func List(modelID, modelDir string, defaults map[string]any) []Preset {
 	return result
 }
 
-// Save writes a sparse preset diff to either "project" (<modelDir>/presets.json) or "user" (~/.config/...).
-func Save(modelID, modelDir, label, description, scope string, currentParams, defaults map[string]any) (string, error) {
+func writePresetFile(path string, entries map[string]PresetEntry) error {
+	if len(entries) == 0 {
+		if err := os.Remove(path); err != nil && !os.IsNotExist(err) {
+			return err
+		}
+		return nil
+	}
+	data, err := json.MarshalIndent(entries, "", "  ")
+	if err != nil {
+		return err
+	}
+	return os.WriteFile(path, append(data, '\n'), 0o644)
+}
+
+// Save writes a preset (sparse diff or full snapshot) to either "project" (<modelDir>/presets.json)
+// or "user" (~/.config/...). Saving to "project" also removes any identically keyed user preset
+// so a stale local copy cannot silently shadow the shared project preset.
+func Save(modelID, modelDir, label, description, scope string, fullSnapshot bool, currentParams, defaults map[string]any) (string, error) {
 	key := Slugify(label)
 	var targetPath string
-	if scope == "project" && modelDir != "" {
+	isProject := scope == "project" && modelDir != ""
+	if isProject {
+		targetPath = filepath.Join(modelDir, "presets.json")
+	} else {
+		p, err := userPresetPath(modelID)
+		if err != nil {
+			return "", err
+		}
+		targetPath = p
+	}
+
+	var storedParams map[string]any
+	if fullSnapshot {
+		storedParams = FilterParams(currentParams, defaults)
+	} else {
+		storedParams = SparseDiff(currentParams, defaults)
+	}
+
+	existing := readPresetFile(targetPath)
+	existing[key] = PresetEntry{
+		Label:       strings.TrimSpace(label),
+		Description: strings.TrimSpace(description),
+		Params:      storedParams,
+	}
+
+	if err := writePresetFile(targetPath, existing); err != nil {
+		return "", err
+	}
+
+	if isProject {
+		if upath, err := userPresetPath(modelID); err == nil {
+			userEntries := readPresetFile(upath)
+			if _, shadowed := userEntries[key]; shadowed {
+				delete(userEntries, key)
+				_ = writePresetFile(upath, userEntries)
+			}
+		}
+	}
+
+	return key, nil
+}
+
+// Delete removes a preset key from either "project" or "user" storage.
+func Delete(modelID, modelDir, key, scope string) error {
+	key = strings.TrimSpace(key)
+	if key == "" || key == "default" {
+		return errors.New("cannot delete canonical default preset")
+	}
+
+	var targetPath string
+	if scope == "project" {
+		if modelDir == "" {
+			return errors.New("project model directory is unavailable")
+		}
+		targetPath = filepath.Join(modelDir, "presets.json")
+	} else {
+		p, err := userPresetPath(modelID)
+		if err != nil {
+			return err
+		}
+		targetPath = p
+	}
+
+	existing := readPresetFile(targetPath)
+	if _, ok := existing[key]; !ok {
+		return errors.New("preset not found in target scope")
+	}
+	delete(existing, key)
+	return writePresetFile(targetPath, existing)
+}
+
+// Rename updates a preset's label (and optional description) within its scope,
+// migrating its JSON key to the slugified new label while preserving its params.
+func Rename(modelID, modelDir, oldKey, scope, newLabel, newDescription string) (string, error) {
+	oldKey = strings.TrimSpace(oldKey)
+	if oldKey == "" || oldKey == "default" {
+		return "", errors.New("cannot rename canonical default preset")
+	}
+	trimmedLabel := strings.TrimSpace(newLabel)
+	if trimmedLabel == "" {
+		return "", errors.New("preset name is required")
+	}
+
+	var targetPath string
+	if scope == "project" {
+		if modelDir == "" {
+			return "", errors.New("project model directory is unavailable")
+		}
 		targetPath = filepath.Join(modelDir, "presets.json")
 	} else {
 		p, err := userPresetPath(modelID)
@@ -241,18 +368,25 @@ func Save(modelID, modelDir, label, description, scope string, currentParams, de
 	}
 
 	existing := readPresetFile(targetPath)
-	existing[key] = PresetEntry{
-		Label:       strings.TrimSpace(label),
-		Description: strings.TrimSpace(description),
-		Params:      SparseDiff(currentParams, defaults),
+	entry, ok := existing[oldKey]
+	if !ok {
+		return "", errors.New("preset not found in target scope")
 	}
 
-	data, err := json.MarshalIndent(existing, "", "  ")
-	if err != nil {
+	newKey := Slugify(trimmedLabel)
+	if newKey != oldKey {
+		if _, collision := existing[newKey]; collision {
+			return "", errors.New("a preset with that name already exists")
+		}
+		delete(existing, oldKey)
+	}
+
+	entry.Label = trimmedLabel
+	entry.Description = strings.TrimSpace(newDescription)
+	existing[newKey] = entry
+
+	if err := writePresetFile(targetPath, existing); err != nil {
 		return "", err
 	}
-	if err := os.WriteFile(targetPath, append(data, '\n'), 0o644); err != nil {
-		return "", err
-	}
-	return key, nil
+	return newKey, nil
 }

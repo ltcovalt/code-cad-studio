@@ -408,6 +408,20 @@ func (m *Manager) ExportName(ctx context.Context, modelID string, params map[str
 	return out.ExportFilename, nil
 }
 
+func (m *Manager) UpdateDefaults(ctx context.Context, modelID string, params map[string]any, dryRun bool, expectedSHA256 string) (*UpdateDefaultsResponse, error) {
+	var out UpdateDefaultsResponse
+	p := "/models/" + url.PathEscape(modelID) + "/update-defaults"
+	err := m.doJSON(ctx, http.MethodPost, p, map[string]any{
+		"params":          params,
+		"dry_run":         dryRun,
+		"expected_sha256": expectedSHA256,
+	}, &out)
+	if err != nil {
+		return nil, err
+	}
+	return &out, nil
+}
+
 func (m *Manager) ExportToPath(ctx context.Context, modelID string, params map[string]any, format, outputPath string) (*ExportResponse, error) {
 	var out ExportResponse
 	p := "/models/" + url.PathEscape(modelID) + "/export"

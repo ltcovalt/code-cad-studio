@@ -12,9 +12,11 @@ const AppDirName = "code-cad-studio"
 
 // Config holds persisted user settings for Code CAD Studio.
 type Config struct {
-	ProjectRoot string `json:"project_root"`
-	PythonPath  string `json:"python_path"`
-	Theme       string `json:"theme"`
+	ProjectRoot     string            `json:"project_root"`
+	PythonPath      string            `json:"python_path"`
+	Theme           string            `json:"theme"`
+	PresetSaveScope string            `json:"preset_save_scope,omitempty"` // "user" or "project"
+	DefaultPresets  map[string]string `json:"default_presets,omitempty"`   // modelID -> presetKey
 }
 
 // Store manages thread-safe loading and saving of Config.
@@ -65,7 +67,15 @@ func NewStore() (*Store, error) {
 func (s *Store) Get() Config {
 	s.mu.RLock()
 	defer s.mu.RUnlock()
-	return s.cfg
+	cfg := s.cfg
+	if s.cfg.DefaultPresets != nil {
+		cp := make(map[string]string, len(s.cfg.DefaultPresets))
+		for k, v := range s.cfg.DefaultPresets {
+			cp[k] = v
+		}
+		cfg.DefaultPresets = cp
+	}
+	return cfg
 }
 
 // Update atomically updates and persists configuration.

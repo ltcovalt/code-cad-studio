@@ -22,6 +22,8 @@ import base64
 from collections import OrderedDict
 import dataclasses
 import enum
+import hashlib
+import importlib
 import importlib.util
 import inspect
 import json
@@ -485,6 +487,229 @@ def _instantiate_dataclass(cls: type, overrides: dict[str, Any]) -> Any:
             kwargs[name] = _coerce_value(overrides[name], target_type, default_val)
 
     return cls(**kwargs)
+
+
+def _values_equal(a: Any, b: Any) -> bool:
+    if isinstance(a, bool) or isinstance(b, bool):
+        return type(a) is type(b) and a == b
+    if isinstance(a, (int, float)) and isinstance(b, (int, float)):
+        return float(a) == float(b)
+    if isinstance(a, (list, tuple)) and isinstance(b, (list, tuple)):
+        return len(a) == len(b) and all(_values_equal(x, y) for x, y in zip(a, b))
+    return a == b
+
+
+def _is_safe_literal_expr(node: ast.AST) -> bool:
+    """Allow only simple literals (constants, signed numbers, flat literal lists/tuples)."""
+    if isinstance(node, ast.Constant):
+        return node.value is None or isinstance(node.value, (bool, int, float, str))
+    if isinstance(node, ast.UnaryOp) and isinstance(node.op, (ast.UAdd, ast.USub)):
+        return (
+            isinstance(node.operand, ast.Constant)
+            and isinstance(node.operand.value, (int, float))
+            and not isinstance(node.operand.value, bool)
+        )
+    if isinstance(node, (ast.List, ast.Tuple)):
+        return all(_is_safe_literal_expr(el) for el in node.elts)
+    return False
+
+
+def _format_python_literal(val: Any) -> str:
+    if val is None:
+        return "None"
+    if isinstance(val, bool):
+        return "True" if val else "False"
+    if isinstance(val, int):
+        return str(val)
+    if isinstance(val, float):
+        if not math.isfinite(val):
+            raise ValueError(f"non-finite float cannot be written as literal: {val}")
+        rounded = round(val, 10)
+        if rounded == 0.0:
+            rounded = 0.0
+        return repr(float(rounded))
+    if isinstance(val, str):
+        return json.dumps(val, ensure_ascii=False)
+    if isinstance(val, (list, tuple)):
+        return "[" + ", ".join(_format_python_literal(v) for v in val) + "]"
+    raise ValueError(f"unsupported literal type: {type(val).__name__}")
+
+
+def _locate_default_expr(stmt: ast.AnnAssign) -> tuple[ast.AST | None, str | None]:
+    val = stmt.value
+    if val is None:
+        return None, "field has no inline default value"
+    if isinstance(val, ast.Call):
+        callee = ""
+        if isinstance(val.func, ast.Name):
+            callee = val.func.id
+        elif isinstance(val.func, ast.Attribute):
+            callee = val.func.attr
+        if callee == "param":
+            for kw in val.keywords:
+                if kw.arg == "default":
+                    return kw.value, None
+            if len(val.args) >= 1:
+                return val.args[0], None
+            return None, "param() call has no default argument"
+        if callee == "field":
+            for kw in val.keywords:
+                if kw.arg == "default":
+                    return kw.value, None
+            return None, "field() uses default_factory or has no default= argument"
+        return None, f"uses non-standard call ({callee or 'call'})"
+    return val, None
+
+
+def _collect_default_changes(
+    cls: type,
+    overrides: dict[str, Any],
+    prefix: str = "",
+) -> list[dict[str, Any]]:
+    """Return leaf parameter changes comparing overrides against canonical dataclass defaults."""
+    try:
+        hints = get_type_hints(cls)
+    except Exception:
+        hints = {}
+
+    default_instance = cls()
+    changes: list[dict[str, Any]] = []
+
+    for f in dataclasses.fields(cls):
+        if f.name not in overrides:
+            continue
+        field_path = f"{prefix}.{f.name}" if prefix else f.name
+        target_type = hints.get(f.name, f.type)
+        unwrapped, _ = _unwrap_optional(target_type)
+        default_val = getattr(default_instance, f.name)
+        raw_override = overrides[f.name]
+
+        if dataclasses.is_dataclass(unwrapped) or dataclasses.is_dataclass(default_val):
+            nested_cls = unwrapped if dataclasses.is_dataclass(unwrapped) else type(default_val)
+            if isinstance(raw_override, dict):
+                changes.extend(_collect_default_changes(nested_cls, raw_override, prefix=field_path))
+            continue
+
+        coerced = _coerce_value(raw_override, target_type, default_val)
+        if not _values_equal(coerced, default_val):
+            changes.append(
+                {
+                    "path": field_path,
+                    "owner_cls": cls,
+                    "field_name": f.name,
+                    "old_value": _serialize_default(default_val),
+                    "new_value": _serialize_default(coerced),
+                    "typed_value": coerced,
+                }
+            )
+
+    return changes
+
+
+def _plan_dataclass_default_updates(
+    py_path: Path,
+    params_cls: type,
+    overrides: dict[str, Any],
+) -> tuple[bytes, str, list[dict[str, Any]], list[dict[str, Any]], list[tuple[int, int, bytes]]]:
+    """Plan surgical UTF-8 byte-span replacements for changed dataclass default literals."""
+    raw_bytes = py_path.read_bytes()
+    file_sha256 = hashlib.sha256(raw_bytes).hexdigest()
+    source = raw_bytes.decode("utf-8")
+    tree = ast.parse(source, filename=str(py_path))
+
+    line_starts = [0]
+    for line_b in raw_bytes.splitlines(keepends=True):
+        line_starts.append(line_starts[-1] + len(line_b))
+
+    class_defs: dict[str, list[ast.ClassDef]] = {}
+    for node in tree.body:
+        if isinstance(node, ast.ClassDef):
+            class_defs.setdefault(node.name, []).append(node)
+
+    resolved_py = py_path.resolve()
+    raw_changes = _collect_default_changes(params_cls, overrides)
+    changes_out: list[dict[str, Any]] = []
+    unsupported_out: list[dict[str, Any]] = []
+    spans: list[tuple[int, int, bytes]] = []
+
+    for ch in raw_changes:
+        path = ch["path"]
+        owner_cls = ch["owner_cls"]
+        field_name = ch["field_name"]
+        typed_val = ch["typed_value"]
+
+        if isinstance(typed_val, enum.Enum):
+            unsupported_out.append({"path": path, "reason": "Enum defaults cannot be updated automatically"})
+            continue
+
+        try:
+            cls_file = inspect.getsourcefile(owner_cls)
+        except Exception:
+            cls_file = None
+        if not cls_file or Path(cls_file).resolve() != resolved_py:
+            unsupported_out.append({"path": path, "reason": "dataclass is defined outside this model file"})
+            continue
+
+        matches = class_defs.get(owner_cls.__name__, [])
+        if len(matches) != 1:
+            unsupported_out.append({"path": path, "reason": f"class {owner_cls.__name__} not uniquely located"})
+            continue
+
+        ann_matches = [
+            stmt
+            for stmt in matches[0].body
+            if isinstance(stmt, ast.AnnAssign)
+            and isinstance(stmt.target, ast.Name)
+            and stmt.target.id == field_name
+        ]
+        if len(ann_matches) != 1:
+            unsupported_out.append({"path": path, "reason": f"field {field_name} not uniquely located"})
+            continue
+
+        expr, err_reason = _locate_default_expr(ann_matches[0])
+        if expr is None or err_reason is not None:
+            unsupported_out.append({"path": path, "reason": err_reason or "default expression not found"})
+            continue
+
+        if not _is_safe_literal_expr(expr):
+            unsupported_out.append({"path": path, "reason": "uses a non-literal expression"})
+            continue
+
+        if (
+            expr.lineno is None
+            or expr.col_offset is None
+            or expr.end_lineno is None
+            or expr.end_col_offset is None
+        ):
+            unsupported_out.append({"path": path, "reason": "source span unavailable"})
+            continue
+
+        try:
+            replacement_str = _format_python_literal(typed_val)
+        except Exception as exc:
+            unsupported_out.append({"path": path, "reason": str(exc)})
+            continue
+
+        start_b = line_starts[expr.lineno - 1] + expr.col_offset
+        end_b = line_starts[expr.end_lineno - 1] + expr.end_col_offset
+        if start_b < 0 or end_b <= start_b or end_b > len(raw_bytes):
+            unsupported_out.append({"path": path, "reason": "invalid source byte span"})
+            continue
+
+        old_src = raw_bytes[start_b:end_b].decode("utf-8")
+        spans.append((start_b, end_b, replacement_str.encode("utf-8")))
+        changes_out.append(
+            {
+                "path": path,
+                "line": expr.lineno,
+                "old_value": ch["old_value"],
+                "new_value": ch["new_value"],
+                "old_literal": old_src,
+                "new_literal": replacement_str,
+            }
+        )
+
+    return raw_bytes, file_sha256, changes_out, unsupported_out, spans
 
 
 def _sanitize_filename_stem(raw: str, fallback: str) -> str:
@@ -1009,6 +1234,7 @@ class WorkerState:
         self.loaded_modules.clear()
         self.last_build.clear()
         self._render_cache.clear()
+        importlib.invalidate_caches()
 
     def reload_project(self) -> list[dict[str, Any]]:
         """Warm-reload project scripts without restarting Python or re-importing build123d."""
@@ -1138,13 +1364,142 @@ class WorkerState:
             else:
                 fields, defaults = _introspect_function_signature(func)
 
+            default_preset: dict[str, str] | None = None
+            if params_cls is not None:
+                raw_dp = getattr(params_cls, "__default_preset__", None)
+                if isinstance(raw_dp, dict):
+                    dp_label = str(raw_dp.get("label") or "").strip()
+                    dp_desc = str(raw_dp.get("description") or "").strip()
+                    if dp_label or dp_desc:
+                        default_preset = {}
+                        if dp_label:
+                            default_preset["label"] = dp_label
+                        if dp_desc:
+                            default_preset["description"] = dp_desc
+
             doc = inspect.getdoc(func) or inspect.getdoc(module) or meta.get("description", "")
-            return {
+            resp: dict[str, Any] = {
                 "ok": True,
                 "model": meta,
                 "description": doc.splitlines()[0] if doc else "",
                 "fields": fields,
                 "defaults": defaults,
+            }
+            if default_preset is not None:
+                resp["default_preset"] = default_preset
+            return resp
+
+    def update_defaults(
+        self,
+        model_id: str,
+        params_dict: dict[str, Any],
+        dry_run: bool = True,
+        expected_sha256: str = "",
+    ) -> dict[str, Any]:
+        with self.lock:
+            meta, module = self._load_model_module(model_id)
+            params_cls, _func = self._resolve_entrypoints(meta, module)
+            if params_cls is None:
+                return {
+                    "ok": False,
+                    "error": "Model does not define a Params @dataclass; defaults cannot be updated automatically.",
+                }
+
+            py_path = Path(meta["path"])
+            raw_bytes, file_sha256, changes, unsupported, spans = _plan_dataclass_default_updates(
+                py_path, params_cls, params_dict if isinstance(params_dict, dict) else {}
+            )
+
+            base_resp: dict[str, Any] = {
+                "ok": True,
+                "file": str(py_path),
+                "rel_path": meta.get("rel_path", py_path.name),
+                "sha256": file_sha256,
+                "changes": changes,
+                "unsupported": unsupported,
+            }
+            if dry_run:
+                return base_resp
+
+            if expected_sha256 and expected_sha256 != file_sha256:
+                return {
+                    **base_resp,
+                    "ok": False,
+                    "error": "File changed on disk since preview; please preview again before applying.",
+                }
+            if unsupported:
+                return {
+                    **base_resp,
+                    "ok": False,
+                    "error": "One or more changed fields cannot be updated safely; no changes were written.",
+                }
+            if not spans:
+                return {**base_resp, "updated": 0}
+
+            # Verify non-overlapping spans and splice in descending byte order
+            sorted_spans = sorted(spans, key=lambda s: s[0], reverse=True)
+            for i in range(len(sorted_spans) - 1):
+                if sorted_spans[i][0] < sorted_spans[i + 1][1]:
+                    return {
+                        **base_resp,
+                        "ok": False,
+                        "error": "Overlapping source spans detected; aborted without modifying file.",
+                    }
+
+            patched = bytearray(raw_bytes)
+            for start_b, end_b, repl_b in sorted_spans:
+                patched[start_b:end_b] = repl_b
+            new_bytes = bytes(patched)
+
+            # Fail-closed syntax validation in memory before touching disk
+            try:
+                new_source = new_bytes.decode("utf-8")
+                ast.parse(new_source, filename=str(py_path))
+            except Exception as exc:
+                return {
+                    **base_resp,
+                    "ok": False,
+                    "error": f"Generated Python failed syntax validation ({exc}); aborted without modifying file.",
+                }
+
+            # Atomic replace preserving original file mode
+            st_mode = py_path.stat().st_mode
+            tmp_path: Path | None = None
+            try:
+                fd, tmp_name = tempfile.mkstemp(dir=str(py_path.parent), prefix=f".{py_path.name}.", suffix=".tmp")
+                tmp_path = Path(tmp_name)
+                try:
+                    os.write(fd, new_bytes)
+                finally:
+                    os.close(fd)
+                os.chmod(tmp_path, st_mode)
+                os.replace(tmp_path, py_path)
+            except Exception as exc:
+                if tmp_path is not None:
+                    try:
+                        tmp_path.unlink(missing_ok=True)
+                    except OSError:
+                        pass
+                return {
+                    **base_resp,
+                    "ok": False,
+                    "error": f"Failed to write updated file: {exc}",
+                }
+
+            # Remove any stale .pyc bytecode so same-second / same-length edits reload cleanly
+            try:
+                Path(importlib.util.cache_from_source(str(py_path))).unlink(missing_ok=True)
+            except Exception:
+                pass
+
+            # Clear module/render caches so subsequent schema/renders immediately reflect new defaults
+            self._evict_project_modules()
+            self.discover_models()
+            new_sha256 = hashlib.sha256(new_bytes).hexdigest()
+            return {
+                **base_resp,
+                "sha256": new_sha256,
+                "updated": len(changes),
             }
 
     def _resolve_export_filename(
@@ -1229,7 +1584,12 @@ class WorkerState:
                 self._render_cache.move_to_end(cache_key)
                 return {**cached, "cached": True, "build_time_ms": 0.0, "tessellate_time_ms": 0.0}
 
-            meta, result, build_ms, export_stem = self._build_shape(model_id, params_dict)
+            try:
+                meta, result, build_ms, export_stem = self._build_shape(model_id, params_dict)
+            except Exception:
+                if my_seq != self._latest_render_seq():
+                    return {"ok": False, "superseded": True, "model_id": model_id}
+                raise
             if my_seq != self._latest_render_seq():
                 return {"ok": False, "superseded": True, "model_id": model_id}
 
@@ -1284,11 +1644,15 @@ def make_handler(state: WorkerState) -> type[BaseHTTPRequestHandler]:
 
         def _send_json(self, payload: dict[str, Any], status: int = 200) -> None:
             body = json.dumps(payload, separators=(",", ":")).encode("utf-8")
-            self.send_response(status)
-            self.send_header("Content-Type", "application/json")
-            self.send_header("Content-Length", str(len(body)))
-            self.end_headers()
-            self.wfile.write(body)
+            try:
+                self.send_response(status)
+                self.send_header("Content-Type", "application/json")
+                self.send_header("Content-Length", str(len(body)))
+                self.end_headers()
+                self.wfile.write(body)
+            except (BrokenPipeError, ConnectionResetError):
+                # Client aborted an in-flight superseded request; ignore silently.
+                pass
 
         def _read_json(self) -> dict[str, Any]:
             length = int(self.headers.get("Content-Length", "0"))
@@ -1368,6 +1732,22 @@ def make_handler(state: WorkerState) -> type[BaseHTTPRequestHandler]:
                     self._send_json(state.get_export_filename(model_id, params))
                     return
 
+                m_update_defaults = re.match(r"^/models/([^/]+)/update-defaults$", path)
+                if m_update_defaults:
+                    model_id = unquote(m_update_defaults.group(1))
+                    params = body.get("params", {})
+                    dry_run = bool(body.get("dry_run", True))
+                    expected_sha256 = str(body.get("expected_sha256", "") or "")
+                    self._send_json(
+                        state.update_defaults(
+                            model_id,
+                            params,
+                            dry_run=dry_run,
+                            expected_sha256=expected_sha256,
+                        )
+                    )
+                    return
+
                 m_export = re.match(r"^/models/([^/]+)/export$", path)
                 if m_export:
                     model_id = unquote(m_export.group(1))
@@ -1401,6 +1781,7 @@ def make_handler(state: WorkerState) -> type[BaseHTTPRequestHandler]:
 
 
 def main() -> None:
+    sys.dont_write_bytecode = True
     parser = argparse.ArgumentParser(description="Code CAD Studio Python worker")
     parser.add_argument("--project-root", default="", help="Path to build123d project root")
     parser.add_argument("--port", type=int, default=0, help="Port to bind (0 for ephemeral)")

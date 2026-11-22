@@ -45,14 +45,20 @@ type ParamField struct {
 	Children    []ParamField   `json:"children,omitempty"`
 }
 
+type DefaultPresetMeta struct {
+	Label       string `json:"label,omitempty"`
+	Description string `json:"description,omitempty"`
+}
+
 type SchemaResponse struct {
-	OK          bool           `json:"ok"`
-	Model       ModelInfo      `json:"model"`
-	Description string         `json:"description"`
-	Fields      []ParamField   `json:"fields"`
-	Defaults    map[string]any `json:"defaults"`
-	Error       string         `json:"error,omitempty"`
-	Traceback   string         `json:"traceback,omitempty"`
+	OK            bool               `json:"ok"`
+	Model         ModelInfo          `json:"model"`
+	Description   string             `json:"description"`
+	Fields        []ParamField       `json:"fields"`
+	Defaults      map[string]any     `json:"defaults"`
+	DefaultPreset *DefaultPresetMeta `json:"default_preset,omitempty"`
+	Error         string             `json:"error,omitempty"`
+	Traceback     string             `json:"traceback,omitempty"`
 }
 
 type BBox struct {
@@ -93,4 +99,30 @@ type ExportResponse struct {
 	Size      int64  `json:"size,omitempty"`
 	Error     string `json:"error,omitempty"`
 	Traceback string `json:"traceback,omitempty"`
+}
+
+type DefaultChange struct {
+	Path       string `json:"path"`
+	Line       int    `json:"line"`
+	OldValue   any    `json:"old_value"`
+	NewValue   any    `json:"new_value"`
+	OldLiteral string `json:"old_literal"`
+	NewLiteral string `json:"new_literal"`
+}
+
+type UnsupportedDefaultChange struct {
+	Path   string `json:"path"`
+	Reason string `json:"reason"`
+}
+
+type UpdateDefaultsResponse struct {
+	OK          bool                       `json:"ok"`
+	File        string                     `json:"file,omitempty"`
+	RelPath     string                     `json:"rel_path,omitempty"`
+	SHA256      string                     `json:"sha256,omitempty"`
+	Updated     int                        `json:"updated,omitempty"`
+	Changes     []DefaultChange            `json:"changes"`
+	Unsupported []UnsupportedDefaultChange `json:"unsupported"`
+	Error       string                     `json:"error,omitempty"`
+	Traceback   string                     `json:"traceback,omitempty"`
 }
