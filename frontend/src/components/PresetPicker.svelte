@@ -243,7 +243,7 @@
     {#if selectedPreset && (selectedPreset.source === 'user' || isStartupDefault(selectedPreset))}
       <span class="hidden @[150px]:inline-flex items-center gap-1 shrink-0">
         {#if selectedPreset.source === 'user'}
-          <span class="badge badge-xs badge-ghost h-4 px-1 text-[10px] opacity-70">User</span>
+          <span class="badge badge-xs badge-soft h-4 px-1 text-[10px]">User</span>
         {/if}
         {#if isStartupDefault(selectedPreset)}
           <span class="badge badge-xs badge-primary badge-soft h-4 px-1 text-[10px]">Default</span>
@@ -328,7 +328,7 @@
               {preset.label}
             </span>
             {#if preset.source === 'user'}
-              <span class="badge badge-xs badge-ghost h-4 px-1 text-[10px] opacity-70 shrink-0">
+              <span class="badge badge-xs badge-soft h-4 px-1 text-[10px] shrink-0">
                 User
               </span>
             {/if}

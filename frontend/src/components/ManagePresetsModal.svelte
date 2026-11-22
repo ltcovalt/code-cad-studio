@@ -246,7 +246,7 @@
               <div class="min-w-0">
                 <div class="flex items-center gap-1.5 min-w-0">
                   <span class="text-xs font-medium truncate">{canonicalDefault.label}</span>
-                  <span class="badge badge-xs badge-ghost shrink-0">Base</span>
+                  <span class="badge badge-xs badge-secondary badge-soft shrink-0">Model</span>
                   {#if isDefaultActive}
                     <span class="badge badge-xs badge-primary badge-soft shrink-0">Default</span>
                   {/if}
@@ -342,7 +342,7 @@
                       <div class="min-w-0">
                         <div class="flex items-center gap-1.5 min-w-0">
                           <span class="text-xs font-medium truncate">{preset.label}</span>
-                          <span class="badge badge-xs badge-ghost shrink-0">
+                          <span class="badge badge-xs badge-soft shrink-0">
                             {preset.source === 'project' ? 'Project' : 'User'}
                           </span>
                           {#if isPinned}
