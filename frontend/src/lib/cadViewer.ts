@@ -21,15 +21,13 @@ export class CadViewportController {
   private hasRendered = false;
   private lastModelId: string | null = null;
   private theme: Theme = 'dark';
-  private daisyTheme = 'dark';
   private treeWidth = 220;
   private resizeObserver: ResizeObserver | null = null;
   private rafId: number | null = null;
 
   constructor(container: HTMLElement, initialDaisyTheme = 'dark') {
     this.container = container;
-    this.daisyTheme = initialDaisyTheme || 'dark';
-    this.theme = LIGHT_THEMES.has(this.daisyTheme) ? 'light' : 'dark';
+    this.theme = LIGHT_THEMES.has(initialDaisyTheme || 'dark') ? 'light' : 'dark';
     this.container.setAttribute('data-theme', this.theme);
     this.initResizeObserver();
   }
@@ -82,10 +80,20 @@ export class CadViewportController {
     };
 
     this.display = new Display(this.container, displayOptions);
+    // three-cad-viewer's Display.setTheme() writes data-theme="light"|"dark" to
+    // document.body (including on every viewer.render()), which shadows the active
+    // daisyUI theme on <html>. Keep #cad-viewer-root on light|dark and clear the
+    // body override so <html> remains the single source of truth for the app theme.
+    const originalSetTheme = this.display.setTheme.bind(this.display);
+    this.display.setTheme = (theme) => {
+      try {
+        return originalSetTheme(theme);
+      } finally {
+        document.body.removeAttribute('data-theme');
+      }
+    };
     this.viewer = new Viewer(this.display, displayOptions, null);
-    // three-cad-viewer overwrites document.body[data-theme] with "light"|"dark";
-    // restore the active daisyUI theme on <body> while keeping #cad-viewer-root on light|dark.
-    document.body.setAttribute('data-theme', this.daisyTheme);
+    document.body.removeAttribute('data-theme');
   }
 
   private initResizeObserver(): void {
@@ -101,8 +109,7 @@ export class CadViewportController {
   }
 
   setTheme(daisyTheme: string): void {
-    this.daisyTheme = daisyTheme || 'dark';
-    const mode: Theme = LIGHT_THEMES.has(this.daisyTheme) ? 'light' : 'dark';
+    const mode: Theme = LIGHT_THEMES.has(daisyTheme || 'dark') ? 'light' : 'dark';
     this.theme = mode;
     if (this.viewer && this.hasRendered) {
       try {
@@ -112,8 +119,7 @@ export class CadViewportController {
       }
     }
     this.container.setAttribute('data-theme', mode);
-    // Restore daisyUI theme on <body> after three-cad-viewer mutates it
-    document.body.setAttribute('data-theme', this.daisyTheme);
+    document.body.removeAttribute('data-theme');
   }
 
   renderShapes(modelId: string, shapes: unknown, resetCamera = false): void {
@@ -163,6 +169,14 @@ export class CadViewportController {
     this.viewer.render(shapes as Shapes, renderOptions, viewerOptions);
     this.hasRendered = true;
     this.lastModelId = modelId;
+    if (this.container.getAttribute('data-theme') !== this.theme) {
+      try {
+        this.viewer.setTheme(this.theme);
+      } catch (err) {
+        console.warn('setTheme warning:', err);
+      }
+    }
+    document.body.removeAttribute('data-theme');
     requestAnimationFrame(() => this.syncSize());
 
     if (savedCam && savedCam.position && savedCam.quaternion && savedCam.target) {
