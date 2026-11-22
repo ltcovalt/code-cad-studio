@@ -7,6 +7,7 @@
     getPresetVerification,
     getVerificationMeta,
   } from '../lib/verification';
+  import Alert from './Alert.svelte';
   import VerificationIcon from './VerificationIcon.svelte';
 
   type ManageTab = 'presets' | 'source';
@@ -705,15 +706,11 @@
           {/if}
 
           {#if manageError}
-            <div class="alert alert-error alert-soft text-xs py-2">
-              <span>{manageError}</span>
-            </div>
+            <Alert variant="error">{manageError}</Alert>
           {/if}
 
           {#if manageSuccess}
-            <div class="alert alert-success alert-soft text-xs py-2">
-              <span>{manageSuccess}</span>
-            </div>
+            <Alert variant="success">{manageSuccess}</Alert>
           {/if}
 
           <div class="flex justify-end pt-2">
@@ -723,14 +720,13 @@
       {:else}
         <!-- Update Source File Tab -->
         <div class="space-y-3">
-          <div class="alert alert-warning alert-soft text-xs py-2.5 block space-y-1">
-            <div class="font-semibold">Advanced: modifies source script</div>
-            <p class="opacity-90">
+          <Alert variant="warning" title="Advanced: modifies source script">
+            <p>
               Overwrites the default values in
               <code class="font-mono text-[11px]">{studio.activeModel.rel_path}</code>
               using your current parameters.
             </p>
-          </div>
+          </Alert>
 
           {#if previewLoading}
             <div class="flex items-center gap-2 text-xs opacity-70 py-4 justify-center">
@@ -739,10 +735,7 @@
             </div>
           {:else if previewData}
             {#if previewData.unsupported.length > 0}
-              <div class="alert alert-warning alert-soft text-xs py-2.5 block space-y-1">
-                <div class="font-semibold">
-                  Some changed parameters can't be updated automatically
-                </div>
+              <Alert variant="warning" title="Some changed parameters can't be updated automatically">
                 <ul class="list-disc pl-4 space-y-0.5 text-[11px]">
                   {#each previewData.unsupported as item (item.path)}
                     <li>
@@ -750,17 +743,15 @@
                     </li>
                   {/each}
                 </ul>
-              </div>
+              </Alert>
             {/if}
 
             {#if previewData.changes.length > 0}
               {#if canonicalDefaultVer.status !== 'unverified'}
-                <div class="alert alert-info alert-soft text-xs py-2">
-                  <span>
-                    Applying these changes will reset the base preset's verification status to
-                    <strong>Unverified</strong> (any print note will be preserved).
-                  </span>
-                </div>
+                <Alert variant="info">
+                  Applying these changes will reset the base preset's verification status to
+                  <strong>Unverified</strong> (any print note will be preserved).
+                </Alert>
               {/if}
               <div class="rounded-box border border-base-300 overflow-hidden">
                 <table class="table table-xs w-full">
@@ -795,15 +786,11 @@
           {/if}
 
           {#if previewError}
-            <div class="alert alert-error alert-soft text-xs py-2">
-              <span>{previewError}</span>
-            </div>
+            <Alert variant="error">{previewError}</Alert>
           {/if}
 
           {#if defaultsSuccess}
-            <div class="alert alert-success alert-soft text-xs py-2">
-              <span>{defaultsSuccess}</span>
-            </div>
+            <Alert variant="success">{defaultsSuccess}</Alert>
           {/if}
 
           <div class="flex justify-end gap-2 pt-2">

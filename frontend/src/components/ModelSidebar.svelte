@@ -1,5 +1,6 @@
 <script lang="ts">
   import { studio } from '../lib/studioState.svelte';
+  import Alert from './Alert.svelte';
 
   interface Props {
     style?: string;
@@ -71,9 +72,7 @@
         </div>
       </div>
     {:else if studio.modelsError}
-      <div class="alert alert-error alert-soft text-xs p-2">
-        <span>{studio.modelsError}</span>
-      </div>
+      <Alert variant="error" compact>{studio.modelsError}</Alert>
     {:else if studio.modelsLoading && studio.models.length === 0}
       <div class="text-xs opacity-60 py-2">Loading models...</div>
     {:else if studio.filteredModels.length === 0}

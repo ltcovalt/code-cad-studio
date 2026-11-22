@@ -8,6 +8,7 @@
     getPresetVerification,
     getVerificationMeta,
   } from '../lib/verification';
+  import Alert from './Alert.svelte';
   import VerificationIcon from './VerificationIcon.svelte';
 
   const POPOVER_ID = 'preset-verification-popover';
@@ -287,9 +288,7 @@
       </div>
 
       {#if formError}
-        <div class="alert alert-error alert-soft text-[11px] py-1.5 px-2">
-          <span>{formError}</span>
-        </div>
+        <Alert variant="error" compact>{formError}</Alert>
       {/if}
 
       <div class="flex items-center justify-between gap-2 pt-0.5">

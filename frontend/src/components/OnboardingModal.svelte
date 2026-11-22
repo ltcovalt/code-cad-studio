@@ -8,6 +8,7 @@
     SetupDefaultsResponse,
     SetupProbeResponse,
   } from '../lib/types';
+  import Alert from './Alert.svelte';
 
   type Step = 1 | 2;
   type ProjectMode = 'download' | 'existing';
@@ -581,9 +582,7 @@
     </ol>
 
     {#if busyNotice}
-      <div class="alert alert-warning alert-soft text-xs py-2">
-        <span>{busyNotice}</span>
-      </div>
+      <Alert variant="warning">{busyNotice}</Alert>
     {/if}
 
     {#if step === 1}
@@ -740,52 +739,34 @@
                 {:else if dirInfo?.exists && !dirInfo.is_dir}
                   <span class="text-error">Path exists and is a file, not a folder.</span>
                 {:else if dirInfo?.exists && !dirInfo.is_empty}
-                  <div class="alert alert-warning alert-soft text-xs py-2.5 px-3 mt-1 items-start">
-                    <svg
-                      xmlns="http://www.w3.org/2000/svg"
-                      class="h-4 w-4 shrink-0 mt-0.5"
-                      fill="none"
-                      viewBox="0 0 24 24"
-                      stroke="currentColor"
-                      stroke-width="2"
-                      aria-hidden="true"
-                    >
-                      <path
-                        stroke-linecap="round"
-                        stroke-linejoin="round"
-                        d="M12 9v3.75m-9.303 3.376c-.866 1.5.217 3.374 1.948 3.374h14.71c1.73 0 2.813-1.874 1.948-3.374L13.949 3.378c-.866-1.5-3.032-1.5-3.898 0L2.697 16.126ZM12 15.75h.007v.008H12v-.008Z"
+                  <Alert variant="warning" title="Existing files will be overwritten" class="mt-1">
+                    <p>
+                      {#if dirInfo.has_models}
+                        This folder already contains {dirInfo.model_count} model{dirInfo.model_count === 1 ? '' : 's'}.
+                      {:else}
+                        This folder is not empty.
+                      {/if}
+                      Downloading here will overwrite matching files in <code>models/</code> and <code>utils/</code>.
+                      {#if dirInfo.has_models}
+                        <button
+                          type="button"
+                          class="link font-semibold ml-1"
+                          onclick={() => switchProjectMode('existing')}
+                        >
+                          Use existing folder instead
+                        </button>
+                      {/if}
+                    </p>
+                    <label class="flex items-start gap-2 cursor-pointer pt-0.5 text-xs">
+                      <input
+                        type="checkbox"
+                        class="checkbox checkbox-xs checkbox-warning mt-0.5"
+                        disabled={busy}
+                        bind:checked={allowOverwriteExisting}
                       />
-                    </svg>
-                    <div class="space-y-2 flex-1 min-w-0">
-                      <div class="leading-snug">
-                        <strong>Existing files will be overwritten.</strong>
-                        {#if dirInfo.has_models}
-                          This folder already contains {dirInfo.model_count} model{dirInfo.model_count === 1 ? '' : 's'}.
-                        {:else}
-                          This folder is not empty.
-                        {/if}
-                        Downloading here will overwrite matching files in <code>models/</code> and <code>utils/</code>.
-                        {#if dirInfo.has_models}
-                          <button
-                            type="button"
-                            class="link font-semibold ml-1"
-                            onclick={() => switchProjectMode('existing')}
-                          >
-                            Use existing folder instead
-                          </button>
-                        {/if}
-                      </div>
-                      <label class="flex items-start gap-2 cursor-pointer">
-                        <input
-                          type="checkbox"
-                          class="checkbox checkbox-xs checkbox-warning mt-0.5"
-                          disabled={busy}
-                          bind:checked={allowOverwriteExisting}
-                        />
-                        <span>I understand — download and overwrite matching files in this folder</span>
-                      </label>
-                    </div>
-                  </div>
+                      <span>I understand — download and overwrite matching files in this folder</span>
+                    </label>
+                  </Alert>
                 {:else if projectDir.trim()}
                   <span class="text-success/90">
                     ✓ Ready — Studio will download <code>code-cad</code> into this folder.
@@ -895,9 +876,7 @@
           {/if}
 
           {#if downloadError}
-            <div class="alert alert-error alert-soft text-xs py-2">
-              <span>{downloadError}</span>
-            </div>
+            <Alert variant="error">{downloadError}</Alert>
           {/if}
         {/if}
       </div>
@@ -1138,11 +1117,9 @@
 
         <!-- Ready Banner -->
         {#if envReady && !installing}
-          <div class="alert alert-success alert-soft text-xs py-2.5">
-            <span>
-              Everything is ready! Click <strong>Finish &amp; Launch Studio</strong> to load your models.
-            </span>
-          </div>
+          <Alert variant="success">
+            Everything is ready! Click <strong>Finish &amp; Launch Studio</strong> to load your models.
+          </Alert>
         {/if}
 
         <!-- One-click Venv Installer -->
@@ -1247,21 +1224,15 @@
         {/if}
 
         {#if probeError}
-          <div class="alert alert-error alert-soft text-xs py-2">
-            <span>{probeError}</span>
-          </div>
+          <Alert variant="error">{probeError}</Alert>
         {/if}
 
         {#if installError}
-          <div class="alert alert-error alert-soft text-xs py-2">
-            <span>{installError}</span>
-          </div>
+          <Alert variant="error">{installError}</Alert>
         {/if}
 
         {#if completeError}
-          <div class="alert alert-error alert-soft text-xs py-2">
-            <span>{completeError}</span>
-          </div>
+          <Alert variant="error">{completeError}</Alert>
         {/if}
       </div>
 

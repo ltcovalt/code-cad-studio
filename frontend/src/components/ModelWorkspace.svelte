@@ -1,6 +1,7 @@
 <script lang="ts">
   import { splitFields } from '../lib/params';
   import { studio } from '../lib/studioState.svelte';
+  import Alert from './Alert.svelte';
   import ParamField from './ParamField.svelte';
   import PresetBar from './PresetBar.svelte';
   import StatusBar from './StatusBar.svelte';
@@ -17,10 +18,9 @@
     </div>
   {:else if studio.modelLoadError}
     <div class="p-3 space-y-2 overflow-y-auto">
-      <div class="alert alert-error alert-soft text-xs p-2.5 flex flex-col items-start gap-1">
-        <span class="font-semibold">Failed to load model</span>
-        <span class="font-mono break-all">{studio.modelLoadError}</span>
-      </div>
+      <Alert variant="error" title="Failed to load model">
+        <p class="font-mono break-all">{studio.modelLoadError}</p>
+      </Alert>
       {#if studio.modelLoadTraceback}
         <details class="collapse collapse-arrow bg-base-200 border border-base-300 rounded-box">
           <summary class="collapse-title text-xs py-1.5 px-3 min-h-0">Python Traceback</summary>

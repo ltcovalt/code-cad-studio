@@ -2,6 +2,7 @@
   import * as api from '../lib/api';
   import { studio } from '../lib/studioState.svelte';
   import type { HealthResponse } from '../lib/types';
+  import Alert from './Alert.svelte';
 
   let projectRoot = $state('');
   let pythonPath = $state('');
@@ -305,15 +306,11 @@
         </div>
 
         {#if formError}
-          <div class="alert alert-error alert-soft text-xs py-2">
-            <span>{formError}</span>
-          </div>
+          <Alert variant="error">{formError}</Alert>
         {/if}
 
         {#if savedBanner}
-          <div class="alert alert-success alert-soft text-xs py-2">
-            <span>Settings saved and worker reloaded.</span>
-          </div>
+          <Alert variant="success">Settings saved and worker reloaded.</Alert>
         {/if}
 
         <div class="flex items-center justify-between gap-2 pt-2">

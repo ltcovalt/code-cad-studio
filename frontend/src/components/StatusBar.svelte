@@ -1,5 +1,6 @@
 <script lang="ts">
   import type { StatusState } from '../lib/types';
+  import Alert from './Alert.svelte';
 
   interface Props {
     status: StatusState;
@@ -30,9 +31,8 @@
 
 <div class="text-xs">
   {#if status.kind === 'error'}
-    <div class="alert alert-error alert-soft text-xs p-2.5 flex flex-col items-start gap-1.5 select-text">
-      <div class="flex items-center justify-between w-full gap-2">
-        <span class="font-semibold">Build Error</span>
+    <Alert variant="error" title="Build Error" class="select-text">
+      {#snippet action()}
         <button
           type="button"
           class="btn btn-ghost btn-xs text-[10px] h-5 min-h-0 px-1.5"
@@ -40,17 +40,17 @@
         >
           {copied ? 'Copied!' : 'Copy'}
         </button>
-      </div>
-      <span class="font-mono text-[11px] break-all select-text">{status.error}</span>
+      {/snippet}
+      <p class="font-mono break-all select-text">{status.error}</p>
       {#if status.traceback}
-        <details class="w-full mt-0.5">
+        <details class="w-full">
           <summary class="cursor-pointer opacity-75 text-[10px] select-none">Show traceback</summary>
           <pre
             class="text-[10px] mt-1 p-2 bg-base-300/60 rounded overflow-x-auto max-h-44 font-mono whitespace-pre-wrap select-text"
           >{status.traceback}</pre>
         </details>
       {/if}
-    </div>
+    </Alert>
   {:else if status.kind === 'message'}
     <div class="text-xs text-success font-medium select-text">{status.message}</div>
   {:else if status.kind === 'ok'}
