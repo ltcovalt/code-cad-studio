@@ -620,3 +620,130 @@ def create_clip_demo(params: ClipDemoParams):
 		t.Fatalf("refreshed defaults did not match updated values: %#v", coreDefaults)
 	}
 }
+
+func TestWorkerStructuredAndScalarListSchema(t *testing.T) {
+	projectDir := t.TempDir()
+	modelDir := filepath.Join(projectDir, "models", "cutout_demo")
+	if err := os.MkdirAll(modelDir, 0o755); err != nil {
+		t.Fatalf("mkdir: %v", err)
+	}
+
+	modelSrc := `from dataclasses import dataclass, field
+from typing import List, Literal, Optional
+
+@dataclass
+class CutoutItem:
+    """Single notch definition."""
+    leg: Literal["x", "y"] = field(default="x", metadata={"description": "Target leg"})
+    length: float = field(default=40.0, metadata={"unit": "mm", "min": 1.0, "max": 200.0, "step": 1.0})
+    depth: Optional[float] = field(default=None, metadata={"unit": "mm"})
+
+@dataclass
+class CutoutsParams:
+    """Cutouts section."""
+    enabled: bool = False
+    items: List[CutoutItem] = field(
+        default_factory=lambda: [CutoutItem(leg="x", length=42.0)],
+        metadata={"description": "Configured cutouts", "item_label": "Cutout"},
+    )
+    offsets: Optional[List[float]] = field(
+        default=None,
+        metadata={"description": "Optional Z offsets", "item_label": "Offset", "unit": "mm", "step": 0.5},
+    )
+
+@dataclass
+class CutoutDemoParams:
+    cutouts: CutoutsParams = field(default_factory=CutoutsParams)
+
+def export_filename(params: CutoutDemoParams) -> str:
+    legs = "_".join(f"{c.leg}{int(c.length)}" for c in params.cutouts.items)
+    return f"cutout_demo_{len(params.cutouts.items)}_{legs or 'none'}"
+
+def create_cutout_demo(params: CutoutDemoParams):
+    return None
+`
+	if err := os.WriteFile(filepath.Join(modelDir, "cutout_demo.py"), []byte(modelSrc), 0o644); err != nil {
+		t.Fatalf("write cutout_demo.py: %v", err)
+	}
+
+	dialogs := &stubDialogs{}
+	srv := newTestServer(t, dialogs)
+	saveBody, _ := json.Marshal(map[string]string{
+		"project_root": projectDir,
+		"python_path":  "python3",
+	})
+	rec := httptest.NewRecorder()
+	srv.Handler().ServeHTTP(rec, httptest.NewRequest(http.MethodPost, "/api/config", bytes.NewReader(saveBody)))
+	if rec.Code != http.StatusOK {
+		t.Fatalf("POST /api/config status = %d", rec.Code)
+	}
+
+	// GET /api/models/cutout_demo -> verify list schema introspection
+	rec = httptest.NewRecorder()
+	srv.Handler().ServeHTTP(rec, httptest.NewRequest(http.MethodGet, "/api/models/cutout_demo", nil))
+	var modelResp struct {
+		OK       bool                `json:"ok"`
+		Fields   []worker.ParamField `json:"fields"`
+		Defaults map[string]any      `json:"defaults"`
+	}
+	if err := json.Unmarshal(rec.Body.Bytes(), &modelResp); err != nil {
+		t.Fatalf("decode schema: %v", err)
+	}
+	if !modelResp.OK || len(modelResp.Fields) != 1 {
+		t.Fatalf("unexpected schema response: %+v", modelResp)
+	}
+
+	var itemsField, offsetsField worker.ParamField
+	for _, c := range modelResp.Fields[0].Children {
+		if c.Name == "items" {
+			itemsField = c
+		}
+		if c.Name == "offsets" {
+			offsetsField = c
+		}
+	}
+
+	if itemsField.Type != "list" || itemsField.Item == nil {
+		t.Fatalf("expected items field type='list' with item schema, got %+v", itemsField)
+	}
+	if itemsField.Item.Type != "group" || itemsField.Item.Label != "Cutout" {
+		t.Fatalf("expected structured item group labeled 'Cutout', got %+v", itemsField.Item)
+	}
+	if len(itemsField.Item.Children) != 3 {
+		t.Fatalf("expected 3 item children, got %+v", itemsField.Item.Children)
+	}
+	if itemsField.Item.Children[0].Type != "enum" || len(itemsField.Item.Children[0].Choices) != 2 {
+		t.Fatalf("expected leg enum child, got %+v", itemsField.Item.Children[0])
+	}
+	if itemsField.Item.Children[1].Unit != "mm" || itemsField.Item.Children[2].Nullable != true {
+		t.Fatalf("unexpected item child metadata: %+v", itemsField.Item.Children)
+	}
+
+	if offsetsField.Type != "list" || !offsetsField.Nullable || offsetsField.Item == nil {
+		t.Fatalf("expected nullable scalar list for offsets, got %+v", offsetsField)
+	}
+	if offsetsField.Item.Type != "float" || offsetsField.Item.Label != "Offset" || offsetsField.Item.Unit != "mm" {
+		t.Fatalf("unexpected scalar item schema: %+v", offsetsField.Item)
+	}
+
+	// Verify structured list payload coercion (multiple items + empty list)
+	rec = httptest.NewRecorder()
+	srv.Handler().ServeHTTP(rec, httptest.NewRequest(
+		http.MethodPost,
+		"/api/models/cutout_demo/export",
+		bytes.NewBufferString(`{"format":"stl","params":{"cutouts":{"enabled":true,"items":[{"leg":"x","length":20},{"leg":"y","length":55,"depth":5}]}}}`),
+	))
+	if dialogs.lastSave != "cutout_demo_2_x20_y55.stl" {
+		t.Fatalf("expected structured list coercion -> 'cutout_demo_2_x20_y55.stl', got %q", dialogs.lastSave)
+	}
+
+	rec = httptest.NewRecorder()
+	srv.Handler().ServeHTTP(rec, httptest.NewRequest(
+		http.MethodPost,
+		"/api/models/cutout_demo/export",
+		bytes.NewBufferString(`{"format":"stl","params":{"cutouts":{"enabled":true,"items":[]}}}`),
+	))
+	if dialogs.lastSave != "cutout_demo_0_none.stl" {
+		t.Fatalf("expected empty list coercion -> 'cutout_demo_0_none.stl', got %q", dialogs.lastSave)
+	}
+}

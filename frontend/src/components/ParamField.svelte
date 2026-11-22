@@ -1,5 +1,6 @@
 <script lang="ts">
   import InfoTooltip from './InfoTooltip.svelte';
+  import ParamListField from './ParamListField.svelte';
   import Self from './ParamField.svelte';
   import {
     deepClone,
@@ -47,8 +48,12 @@
       : []
   );
 
-  let currentValue = $derived(getParamByPath(rootParams, field.path));
-  let presetDefaultValue = $derived(getParamByPath(presetDefaults, field.path));
+  let rawCurrentValue = $derived(getParamByPath(rootParams, field.path));
+  let currentValue = $derived(rawCurrentValue !== undefined ? rawCurrentValue : field.default);
+  let rawPresetDefaultValue = $derived(getParamByPath(presetDefaults, field.path));
+  let presetDefaultValue = $derived(
+    rawPresetDefaultValue !== undefined ? rawPresetDefaultValue : field.default
+  );
   let isModified = $derived(
     field.type !== 'group' && !paramsEqual(currentValue, presetDefaultValue)
   );
@@ -67,6 +72,9 @@
 
   function formatValueForLabel(value: unknown, targetField: ParamField): string {
     if (value === null || value === undefined) return 'Auto';
+    if (targetField.type === 'list' && Array.isArray(value)) {
+      return `${value.length} ${value.length === 1 ? 'item' : 'items'}`;
+    }
     if (targetField.type === 'bool') return value ? 'On' : 'Off';
     if (targetField.type === 'int' || targetField.type === 'float') {
       return targetField.unit ? `${value} ${targetField.unit}` : String(value);
@@ -306,6 +314,16 @@
         </div>
       {/if}
     </details>
+  {:else if field.type === 'list' && field.item}
+    <ParamListField
+      {field}
+      {rootParams}
+      {groupParams}
+      {presetDefaults}
+      {showDescriptions}
+      {onUpdate}
+      {onPreviewCommit}
+    />
   {:else if field.type === 'bool' && field.nullable}
     <div class="w-full min-w-0 py-0.5">
       <div
@@ -393,36 +411,38 @@
     </div>
   {:else if field.type === 'enum'}
     <div class="w-full min-w-0">
-      <div class="flex items-center gap-1 mb-1 min-w-0">
-        <label
-          class="text-xs font-medium leading-snug break-words min-w-0"
-          for="param-{field.path}"
+      <div class="flex flex-wrap items-center justify-between gap-x-2 gap-y-1 min-w-0">
+        <div class="flex items-center gap-1 min-w-0 max-w-full flex-auto">
+          <label
+            class="text-xs font-medium leading-snug break-words min-w-0"
+            for="param-{field.path}"
+          >
+            {field.label}
+          </label>
+          {#if field.description && !showDescriptions}
+            <InfoTooltip text={field.description} label={field.label} />
+          {/if}
+          {#if isModified}
+            {@render resetIconButton(resetActionLabel, handleResetField)}
+          {/if}
+        </div>
+        <select
+          id="param-{field.path}"
+          class="select select-bordered select-xs param-select"
+          value={currentValue === null || currentValue === undefined ? '' : String(currentValue)}
+          onchange={(e) => {
+            const v = (e.currentTarget as HTMLSelectElement).value;
+            onUpdate(field.path, field.nullable && v === '' ? null : v, 'immediate');
+          }}
         >
-          {field.label}
-        </label>
-        {#if field.description && !showDescriptions}
-          <InfoTooltip text={field.description} label={field.label} />
-        {/if}
-        {#if isModified}
-          {@render resetIconButton(resetActionLabel, handleResetField)}
-        {/if}
+          {#if field.nullable}
+            <option value="">Auto</option>
+          {/if}
+          {#each field.choices ?? [] as choice (choice)}
+            <option value={choice}>{choice}</option>
+          {/each}
+        </select>
       </div>
-      <select
-        id="param-{field.path}"
-        class="select select-bordered select-xs w-full"
-        value={currentValue === null || currentValue === undefined ? '' : String(currentValue)}
-        onchange={(e) => {
-          const v = (e.currentTarget as HTMLSelectElement).value;
-          onUpdate(field.path, field.nullable && v === '' ? null : v, 'immediate');
-        }}
-      >
-        {#if field.nullable}
-          <option value="">Auto</option>
-        {/if}
-        {#each field.choices ?? [] as choice (choice)}
-          <option value={choice}>{choice}</option>
-        {/each}
-      </select>
       {#if field.description && showDescriptions}
         <p class="text-[11px] opacity-60 leading-snug mt-1 break-words">{field.description}</p>
       {/if}
@@ -458,10 +478,10 @@
               ×
             </button>
           {/if}
-          <div class="join items-center">
+          <div class="join items-center w-28">
             <button
               type="button"
-              class="btn btn-xs btn-ghost border border-base-300 join-item h-7 min-h-0 px-2 font-mono text-xs leading-none"
+              class="btn btn-xs btn-ghost border border-base-300 join-item h-7 w-6 min-h-0 px-0 shrink-0 font-mono text-xs leading-none"
               aria-label="Decrease {field.label}"
               onclick={() => handleStep(-1)}
             >
@@ -475,12 +495,12 @@
               step={stepVal}
               min={field.min}
               max={field.max}
-              class="input input-bordered input-xs join-item h-7 w-16 text-center font-mono text-xs px-1.5 no-spinner"
+              class="input input-bordered input-xs join-item h-7 flex-1 min-w-0 text-center font-mono text-xs px-1.5 no-spinner"
               oninput={(e) => handleNumberInput((e.currentTarget as HTMLInputElement).value)}
             />
             <button
               type="button"
-              class="btn btn-xs btn-ghost border border-base-300 join-item h-7 min-h-0 px-2 font-mono text-xs leading-none"
+              class="btn btn-xs btn-ghost border border-base-300 join-item h-7 w-6 min-h-0 px-0 shrink-0 font-mono text-xs leading-none"
               aria-label="Increase {field.label}"
               onclick={() => handleStep(1)}
             >

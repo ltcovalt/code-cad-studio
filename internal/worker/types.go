@@ -32,7 +32,7 @@ type ParamField struct {
 	Name        string         `json:"name"`
 	Path        string         `json:"path"`
 	Label       string         `json:"label"`
-	Type        string         `json:"type"` // bool, int, float, str, enum, group
+	Type        string         `json:"type"` // bool, int, float, str, enum, group, list
 	Default     any            `json:"default"`
 	Description string         `json:"description"`
 	Unit        string         `json:"unit,omitempty"`
@@ -43,6 +43,7 @@ type ParamField struct {
 	Max         *float64       `json:"max,omitempty"`
 	Step        *float64       `json:"step,omitempty"`
 	Children    []ParamField   `json:"children,omitempty"`
+	Item        *ParamField    `json:"item,omitempty"`
 }
 
 type DefaultPresetMeta struct {

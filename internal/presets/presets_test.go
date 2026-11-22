@@ -190,3 +190,56 @@ func TestSaveSparseVsFullAndDelete(t *testing.T) {
 		t.Fatalf("expected 1 preset (default) remaining after delete, got %#v", list)
 	}
 }
+
+func TestSparseDiffWithListItems(t *testing.T) {
+	defaults := map[string]any{
+		"cutouts": map[string]any{
+			"enabled": false,
+			"items": []any{
+				map[string]any{"leg": "x", "length": 42.0, "height": 16.0},
+			},
+		},
+	}
+
+	// Identical values with int vs float64 must NOT appear in sparse diff
+	same := map[string]any{
+		"cutouts": map[string]any{
+			"enabled": false,
+			"items": []any{
+				map[string]any{"leg": "x", "length": 42, "height": 16},
+			},
+		},
+	}
+	if diff := SparseDiff(same, defaults); len(diff) != 0 {
+		t.Fatalf("expected empty sparse diff for equivalent list items, got %#v", diff)
+	}
+
+	// Modified list items MUST appear in sparse diff
+	changed := map[string]any{
+		"cutouts": map[string]any{
+			"enabled": true,
+			"items": []any{
+				map[string]any{"leg": "x", "length": 42.0, "height": 16.0},
+				map[string]any{"leg": "y", "length": 25.0, "height": 10.0},
+			},
+		},
+	}
+	diff := SparseDiff(changed, defaults)
+	cutoutsDiff, ok := diff["cutouts"].(map[string]any)
+	if !ok {
+		t.Fatalf("expected cutouts diff map, got %#v", diff)
+	}
+	itemsDiff, ok := cutoutsDiff["items"].([]any)
+	if !ok || len(itemsDiff) != 2 {
+		t.Fatalf("expected 2 items in cutouts diff, got %#v", cutoutsDiff["items"])
+	}
+
+	// MergeWithDefaults must deep-copy slices so mutating merged does not mutate defaults
+	merged := MergeWithDefaults(defaults, map[string]any{})
+	mergedItems := merged["cutouts"].(map[string]any)["items"].([]any)
+	mergedItems[0].(map[string]any)["leg"] = "y"
+	origLeg := defaults["cutouts"].(map[string]any)["items"].([]any)[0].(map[string]any)["leg"]
+	if origLeg != "x" {
+		t.Fatalf("MergeWithDefaults mutated original defaults slice: got leg=%v", origLeg)
+	}
+}

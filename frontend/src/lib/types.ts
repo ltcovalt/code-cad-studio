@@ -60,7 +60,7 @@ export interface ModelsResponse {
   error?: string;
 }
 
-export type ParamFieldType = 'bool' | 'int' | 'float' | 'str' | 'enum' | 'group';
+export type ParamFieldType = 'bool' | 'int' | 'float' | 'str' | 'enum' | 'group' | 'list';
 
 export interface ParamField {
   name: string;
@@ -77,6 +77,7 @@ export interface ParamField {
   max?: number;
   step?: number;
   children?: ParamField[];
+  item?: ParamField;
 }
 
 export type ParamsRecord = Record<string, unknown>;

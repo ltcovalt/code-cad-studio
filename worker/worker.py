@@ -121,6 +121,13 @@ def humanize_name(name: str) -> str:
     return name.replace("_", " ").strip().title()
 
 
+def humanize_class_name(name: str) -> str:
+    spaced = re.sub(r"(?<=[a-z0-9])(?=[A-Z])|(?<=[A-Z])(?=[A-Z][a-z])", " ", name).strip()
+    if spaced.endswith(" Params") and len(spaced) > len(" Params"):
+        spaced = spaced[: -len(" Params")].strip()
+    return spaced or "Item"
+
+
 def _discover_script_metadata(py_file: Path, project_root: Path) -> dict[str, Any] | None:
     """Statically inspect a .py file via AST to see if it looks like a CAD model."""
     try:
@@ -231,6 +238,95 @@ def _infer_numeric_bounds(name: str, default: float | int, is_int: bool) -> dict
     return {"step": step}
 
 
+def _introspect_list_item(
+    elem_type: Any,
+    sample_val: Any,
+    meta: dict[str, Any],
+) -> dict[str, Any] | None:
+    """Build a ParamField schema describing a single element of a list parameter."""
+    elem_unwrapped, elem_nullable = _unwrap_optional(elem_type)
+    if (elem_unwrapped is Any or elem_unwrapped is None) and sample_val is not None:
+        elem_unwrapped = type(sample_val)
+
+    explicit_item_label = str(meta.get("item_label") or "").strip()
+
+    if dataclasses.is_dataclass(elem_unwrapped):
+        item_fields, item_defaults = _introspect_dataclass(elem_unwrapped, prefix="")
+        item_doc = inspect.getdoc(elem_unwrapped) or ""
+        item_desc = item_doc.splitlines()[0].strip() if item_doc else ""
+        item_label = explicit_item_label or humanize_class_name(elem_unwrapped.__name__)
+        item_schema: dict[str, Any] = {
+            "name": "item",
+            "path": "",
+            "label": item_label,
+            "type": "group",
+            "default": item_defaults,
+            "description": item_desc,
+            "children": item_fields,
+        }
+        if elem_nullable:
+            item_schema["nullable"] = True
+        return item_schema
+
+    item_label = explicit_item_label or "Item"
+    unit = str(meta.get("unit") or "").strip()
+    origin = get_origin(elem_unwrapped)
+
+    item_info: dict[str, Any] = {
+        "name": "item",
+        "path": "",
+        "label": item_label,
+        "description": "",
+    }
+    if unit:
+        item_info["unit"] = unit
+    if elem_nullable:
+        item_info["nullable"] = True
+
+    if origin is Literal:
+        choices = [str(c) for c in get_args(elem_unwrapped)]
+        item_info["type"] = "enum"
+        item_info["choices"] = choices
+        item_info["default"] = None if elem_nullable else (choices[0] if choices else "")
+        return item_info
+    if inspect.isclass(elem_unwrapped) and issubclass(elem_unwrapped, enum.Enum):
+        choices = [str(m.value) for m in elem_unwrapped]
+        item_info["type"] = "enum"
+        item_info["choices"] = choices
+        item_info["default"] = None if elem_nullable else (choices[0] if choices else "")
+        return item_info
+    if elem_unwrapped is bool:
+        item_info["type"] = "bool"
+        item_info["default"] = None if elem_nullable else False
+        return item_info
+    if elem_unwrapped is int:
+        item_info["type"] = "int"
+        default_int = int(meta["min"]) if "min" in meta else 0
+        item_info["default"] = None if elem_nullable else default_int
+        item_info["step"] = meta.get("step", 1)
+        if "min" in meta:
+            item_info["min"] = meta["min"]
+        if "max" in meta:
+            item_info["max"] = meta["max"]
+        return item_info
+    if elem_unwrapped is float:
+        item_info["type"] = "float"
+        default_float = float(meta["min"]) if "min" in meta else 0.0
+        item_info["default"] = None if elem_nullable else default_float
+        item_info["step"] = meta.get("step", 0.5)
+        if "min" in meta:
+            item_info["min"] = meta["min"]
+        if "max" in meta:
+            item_info["max"] = meta["max"]
+        return item_info
+    if elem_unwrapped is str:
+        item_info["type"] = "str"
+        item_info["default"] = None if elem_nullable else ""
+        return item_info
+
+    return None
+
+
 def _introspect_dataclass(
     cls: type,
     prefix: str = "",
@@ -296,6 +392,20 @@ def _introspect_dataclass(
             field_info["nullable"] = True
         if "when" in meta and isinstance(meta["when"], dict):
             field_info["when"] = meta["when"]
+
+        if origin is list or unwrapped is list:
+            elem_args = get_args(unwrapped)
+            elem_type = elem_args[0] if elem_args else Any
+            sample_val = default_val[0] if isinstance(default_val, list) and len(default_val) > 0 else None
+            item_schema = _introspect_list_item(elem_type, sample_val, meta)
+            if item_schema is not None:
+                field_info["type"] = "list"
+                field_info["item"] = item_schema
+                field_info["default"] = None if (is_nullable and serialized_default is None) else (
+                    serialized_default if isinstance(serialized_default, list) else []
+                )
+                fields_schema.append(field_info)
+                continue
 
         if origin is Literal:
             choices = list(get_args(unwrapped))
@@ -405,7 +515,7 @@ def _coerce_value(val: Any, target_type: Any, default_val: Any) -> Any:
         cls = unwrapped if dataclasses.is_dataclass(unwrapped) else type(default_val)
         if isinstance(val, dict):
             return _instantiate_dataclass(cls, val)
-        return default_val
+        return default_val if default_val is not None else cls()
 
     if inspect.isclass(unwrapped) and issubclass(unwrapped, enum.Enum):
         for member in unwrapped:
@@ -552,6 +662,8 @@ def _locate_default_expr(stmt: ast.AnnAssign) -> tuple[ast.AST | None, str | Non
             if len(val.args) >= 1:
                 return val.args[0], None
             return None, "param() call has no default argument"
+        if callee == "param_list":
+            return None, "param_list() uses default_factory and cannot be updated automatically"
         if callee == "field":
             for kw in val.keywords:
                 if kw.arg == "default":

@@ -66,6 +66,19 @@ input.no-spinner {
   appearance: textfield;
 }
 
+/* Fluid select: matches numeric stepper size (7rem × 1.75rem) by default,
+   grows to fit longer choices, and wraps below the label when the row is too narrow */
+.param-select {
+  field-sizing: content;
+  width: auto;
+  min-inline-size: 7rem;
+  max-inline-size: 100%;
+  block-size: 1.75rem;
+  font-size: 0.75rem;
+  flex: 0 1 auto;
+  align-self: center;
+}
+
 /* Frameless window draggable titlebar regions (Wails v3 + WebView2 native non-client regions) */
 .titlebar-drag {
   --wails-draggable: drag;

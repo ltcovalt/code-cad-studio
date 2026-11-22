@@ -55,12 +55,25 @@ export function mergeWithDefaults(defaults: ParamsRecord, overrides: ParamsRecor
   return merged;
 }
 
+function parseArrayIndex(part: string): number | null {
+  if (!/^\d+$/.test(part)) return null;
+  const idx = Number(part);
+  return Number.isSafeInteger(idx) ? idx : null;
+}
+
 export function getParamByPath(root: ParamsRecord, path: string): unknown {
   const parts = path.split('.');
   let curr: unknown = root;
   for (const part of parts) {
-    if (!isPlainObject(curr)) return undefined;
-    curr = curr[part];
+    if (Array.isArray(curr)) {
+      const idx = parseArrayIndex(part);
+      if (idx === null || idx < 0 || idx >= curr.length) return undefined;
+      curr = curr[idx];
+    } else if (isPlainObject(curr)) {
+      curr = curr[part];
+    } else {
+      return undefined;
+    }
   }
   return curr;
 }
@@ -68,16 +81,93 @@ export function getParamByPath(root: ParamsRecord, path: string): unknown {
 export function setParamByPath(root: ParamsRecord, path: string, value: unknown): ParamsRecord {
   const parts = path.split('.');
   const next: ParamsRecord = { ...root };
-  let curr: ParamsRecord = next;
+  let curr: ParamsRecord | unknown[] = next;
   for (let i = 0; i < parts.length - 1; i++) {
     const part = parts[i];
-    const existing = curr[part];
-    const clonedChild: ParamsRecord = isPlainObject(existing) ? { ...existing } : {};
-    curr[part] = clonedChild;
-    curr = clonedChild;
+    const nextIsIndex = parseArrayIndex(parts[i + 1]) !== null;
+
+    if (Array.isArray(curr)) {
+      const idx = parseArrayIndex(part);
+      if (idx === null) return next;
+      const existing: unknown = curr[idx];
+      const clonedChild: ParamsRecord | unknown[] = nextIsIndex
+        ? Array.isArray(existing)
+          ? [...existing]
+          : []
+        : isPlainObject(existing)
+          ? { ...existing }
+          : {};
+      curr[idx] = clonedChild;
+      curr = clonedChild;
+    } else {
+      const existing: unknown = curr[part];
+      const clonedChild: ParamsRecord | unknown[] = nextIsIndex
+        ? Array.isArray(existing)
+          ? [...existing]
+          : []
+        : isPlainObject(existing)
+          ? { ...existing }
+          : {};
+      curr[part] = clonedChild;
+      curr = clonedChild;
+    }
   }
-  curr[parts[parts.length - 1]] = value;
+  const lastPart = parts[parts.length - 1];
+  if (Array.isArray(curr)) {
+    const idx = parseArrayIndex(lastPart);
+    if (idx !== null) {
+      curr[idx] = value;
+    }
+  } else {
+    curr[lastPart] = value;
+  }
   return next;
+}
+
+/**
+ * Prefix a relative ParamField schema (e.g. a list item's child field) with an
+ * item-scoped path such as "cutouts.items.0". Nested list `item` templates remain
+ * relative so deeper lists prefix themselves when rendered.
+ */
+export function prefixFieldPaths(field: ParamField, prefix: string): ParamField {
+  const nextPath = field.path ? `${prefix}.${field.path}` : prefix;
+  return {
+    ...field,
+    path: nextPath,
+    children: field.children?.map((child) => prefixFieldPaths(child, prefix)),
+  };
+}
+
+/**
+ * Fill missing keys inside list-of-dataclass items using each list field's
+ * canonical item default so sparse presets always render complete item forms.
+ */
+export function normalizeParamsWithFields(
+  params: ParamsRecord,
+  fields: ParamField[]
+): ParamsRecord {
+  const out: ParamsRecord = { ...params };
+  for (const f of fields) {
+    const val = out[f.name];
+    if (f.type === 'group' && f.children && isPlainObject(val)) {
+      out[f.name] = normalizeParamsWithFields(val, f.children);
+    } else if (
+      f.type === 'list' &&
+      f.item?.type === 'group' &&
+      isPlainObject(f.item.default) &&
+      Array.isArray(val)
+    ) {
+      const itemDefaults = f.item.default;
+      const itemChildren = f.item.children ?? [];
+      out[f.name] = val.map((el) => {
+        const merged = isPlainObject(el)
+          ? mergeWithDefaults(itemDefaults, el)
+          : deepClone(itemDefaults);
+        return normalizeParamsWithFields(merged, itemChildren);
+      });
+    }
+  }
+  return out;
 }
 
 /**

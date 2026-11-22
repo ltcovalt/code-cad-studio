@@ -1,6 +1,6 @@
 import * as api from './api';
 import type { CadViewportController } from './cadViewer';
-import { deepClone, mergeWithDefaults, setParamByPath } from './params';
+import { deepClone, mergeWithDefaults, normalizeParamsWithFields, setParamByPath } from './params';
 import type {
   Config,
   ExportFormat,
@@ -78,7 +78,8 @@ class StudioState {
 
   presetDefaults = $derived.by<ParamsRecord>(() => {
     const found = this.selectedPreset;
-    return found ? mergeWithDefaults(this.defaults, found.params) : deepClone(this.defaults);
+    const merged = found ? mergeWithDefaults(this.defaults, found.params) : deepClone(this.defaults);
+    return normalizeParamsWithFields(merged, this.fields);
   });
 
   // Render & status
@@ -283,10 +284,13 @@ class StudioState {
         : undefined;
       if (pinned) {
         this.selectedPresetKey = pinned.key;
-        this.params = mergeWithDefaults(this.defaults, pinned.params);
+        this.params = normalizeParamsWithFields(
+          mergeWithDefaults(this.defaults, pinned.params),
+          this.fields
+        );
       } else {
         this.selectedPresetKey = 'default';
-        this.params = deepClone(this.defaults);
+        this.params = normalizeParamsWithFields(deepClone(this.defaults), this.fields);
       }
 
       this.exportFilename = modelId;
@@ -307,9 +311,10 @@ class StudioState {
   selectPreset(presetKey: string): void {
     const found = this.presets.find((p) => p.key === presetKey);
     this.selectedPresetKey = found ? found.key : 'default';
-    this.params = found
+    const next = found
       ? mergeWithDefaults(this.defaults, found.params)
       : deepClone(this.defaults);
+    this.params = normalizeParamsWithFields(next, this.fields);
     void this.triggerRender(false);
   }
 
@@ -491,10 +496,13 @@ class StudioState {
     if (this.selectedPresetKey === key) {
       const stillPresent = this.presets.find((p) => p.key === key);
       if (stillPresent) {
-        this.params = mergeWithDefaults(this.defaults, stillPresent.params);
+        this.params = normalizeParamsWithFields(
+          mergeWithDefaults(this.defaults, stillPresent.params),
+          this.fields
+        );
       } else {
         this.selectedPresetKey = 'default';
-        this.params = deepClone(this.defaults);
+        this.params = normalizeParamsWithFields(deepClone(this.defaults), this.fields);
       }
       void this.triggerRender(false);
     }
@@ -653,7 +661,10 @@ class StudioState {
       this.modelDescription = resp.description ?? '';
       this.fields = resp.fields ?? [];
       this.defaults = deepClone(resp.defaults ?? {});
-      this.params = mergeWithDefaults(this.defaults, previousParams);
+      this.params = normalizeParamsWithFields(
+        mergeWithDefaults(this.defaults, previousParams),
+        this.fields
+      );
       this.presets = resp.presets ?? [];
       this.modelLoadError = '';
       this.modelLoadTraceback = '';

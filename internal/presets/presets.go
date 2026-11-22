@@ -106,7 +106,7 @@ func MergeWithDefaults(defaults map[string]any, overrides map[string]any) map[st
 		if defIsMap && valIsMap {
 			merged[k] = MergeWithDefaults(defMap, valMap)
 		} else {
-			merged[k] = v
+			merged[k] = deepCopyValue(v)
 		}
 	}
 	return merged
@@ -143,6 +143,33 @@ func valuesEqual(a, b any) bool {
 	if aok && bok {
 		return af == bf
 	}
+	am, amok := a.(map[string]any)
+	bm, bmok := b.(map[string]any)
+	if amok && bmok {
+		if len(am) != len(bm) {
+			return false
+		}
+		for k, av := range am {
+			bv, exists := bm[k]
+			if !exists || !valuesEqual(av, bv) {
+				return false
+			}
+		}
+		return true
+	}
+	as, asok := a.([]any)
+	bs, bsok := b.([]any)
+	if asok && bsok {
+		if len(as) != len(bs) {
+			return false
+		}
+		for i := range as {
+			if !valuesEqual(as[i], bs[i]) {
+				return false
+			}
+		}
+		return true
+	}
 	return reflect.DeepEqual(a, b)
 }
 
@@ -161,14 +188,25 @@ func toFloat(v any) (float64, bool) {
 	}
 }
 
+func deepCopyValue(v any) any {
+	switch val := v.(type) {
+	case map[string]any:
+		return deepCopyMap(val)
+	case []any:
+		out := make([]any, len(val))
+		for i, item := range val {
+			out[i] = deepCopyValue(item)
+		}
+		return out
+	default:
+		return v
+	}
+}
+
 func deepCopyMap(src map[string]any) map[string]any {
 	dst := make(map[string]any, len(src))
 	for k, v := range src {
-		if m, ok := v.(map[string]any); ok {
-			dst[k] = deepCopyMap(m)
-		} else {
-			dst[k] = v
-		}
+		dst[k] = deepCopyValue(v)
 	}
 	return dst
 }
@@ -226,7 +264,7 @@ func List(modelID, modelDir string, defaults map[string]any, defaultMeta *Defaul
 	})
 
 	defaultLabel := "Base"
-	defaultDesc := "Base parameters defined by the model"
+	defaultDesc := "Parameters defined in the model script"
 	if defaultMeta != nil {
 		if l := strings.TrimSpace(defaultMeta.Label); l != "" {
 			defaultLabel = l
