@@ -71,6 +71,15 @@ class StudioState {
   defaultPresetKey = $state('');
   exportFilename = $state('');
 
+  selectedPreset = $derived(
+    this.presets.find((p) => p.key === this.selectedPresetKey) ?? null
+  );
+
+  presetDefaults = $derived.by<ParamsRecord>(() => {
+    const found = this.selectedPreset;
+    return found ? mergeWithDefaults(this.defaults, found.params) : deepClone(this.defaults);
+  });
+
   // Render & status
   rendering = $state(false);
   exporting = $state(false);

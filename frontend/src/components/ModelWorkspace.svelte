@@ -114,6 +114,7 @@
                     {field}
                     rootParams={studio.params}
                     groupParams={studio.params}
+                    presetDefaults={studio.presetDefaults}
                     showDescriptions={studio.showDescriptions}
                     onUpdate={(path, val, mode) => studio.updateParam(path, val, mode)}
                     onPreviewCommit={() => studio.commitPreviewIfStale()}
@@ -129,6 +130,7 @@
             field={group}
             rootParams={studio.params}
             groupParams={studio.params}
+            presetDefaults={studio.presetDefaults}
             showDescriptions={studio.showDescriptions}
             onUpdate={(path, val, mode) => studio.updateParam(path, val, mode)}
             onPreviewCommit={() => studio.commitPreviewIfStale()}

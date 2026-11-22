@@ -4,6 +4,25 @@ export function isPlainObject(value: unknown): value is ParamsRecord {
   return typeof value === 'object' && value !== null && !Array.isArray(value);
 }
 
+export function paramsEqual(a: unknown, b: unknown): boolean {
+  if (a === b) return true;
+  if ((a === null || a === undefined) && (b === null || b === undefined)) return true;
+  if (typeof a === 'number' && typeof b === 'number' && Number.isNaN(a) && Number.isNaN(b)) {
+    return true;
+  }
+  if (Array.isArray(a) && Array.isArray(b)) {
+    if (a.length !== b.length) return false;
+    return a.every((item, i) => paramsEqual(item, b[i]));
+  }
+  if (isPlainObject(a) && isPlainObject(b)) {
+    const keysA = Object.keys(a);
+    const keysB = Object.keys(b);
+    if (keysA.length !== keysB.length) return false;
+    return keysA.every((k) => k in b && paramsEqual(a[k], b[k]));
+  }
+  return false;
+}
+
 export function deepClone<T>(value: T): T {
   if (Array.isArray(value)) {
     return value.map((item) => deepClone(item)) as unknown as T;

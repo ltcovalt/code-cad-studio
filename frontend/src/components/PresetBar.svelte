@@ -1,55 +1,17 @@
 <script lang="ts">
   import { studio } from '../lib/studioState.svelte';
+  import PresetPicker from './PresetPicker.svelte';
 
-  const selectedPreset = $derived(
-    studio.presets.find((p) => p.key === studio.selectedPresetKey) ?? null
-  );
-
-  function formatPresetOption(preset: { key: string; label: string; source: string }): string {
-    const isStartupDefault =
-      studio.defaultPresetKey !== ''
-        ? preset.key === studio.defaultPresetKey
-        : preset.key === 'default';
-    const tags: string[] = [];
-    if (preset.source === 'user') tags.push('user');
-    if (isStartupDefault) tags.push('default');
-    return tags.length > 0 ? `${preset.label} (${tags.join(', ')})` : preset.label;
-  }
+  const selectedPreset = $derived(studio.selectedPreset);
 </script>
 
 <div class="flex items-center gap-1 min-w-0">
-  <div class="relative flex-1 min-w-0">
-    <select
-      aria-label="Preset"
-      title={selectedPreset?.description || selectedPreset?.label || undefined}
-      class="select select-bordered select-xs h-7 min-h-7 w-full min-w-0 pl-2 pr-8 truncate !bg-none"
-      value={studio.selectedPresetKey}
-      onchange={(e) => studio.selectPreset((e.currentTarget as HTMLSelectElement).value)}
-    >
-      {#each studio.presets as preset (preset.key)}
-        <option value={preset.key} title={preset.description || undefined}>
-          {formatPresetOption(preset)}
-        </option>
-      {/each}
-    </select>
-    <span
-      class="pointer-events-none absolute inset-y-[3px] right-[3px] flex items-center pl-2.5 pr-1.5 bg-gradient-to-l from-base-100 via-base-100 via-70% to-transparent text-base-content/75"
-      aria-hidden="true"
-    >
-      <svg
-        xmlns="http://www.w3.org/2000/svg"
-        class="h-3 w-3"
-        viewBox="0 0 24 24"
-        fill="none"
-        stroke="currentColor"
-        stroke-width="2.25"
-        stroke-linecap="round"
-        stroke-linejoin="round"
-      >
-        <path d="m6 9 6 6 6-6" />
-      </svg>
-    </span>
-  </div>
+  <PresetPicker
+    presets={studio.presets}
+    selectedKey={studio.selectedPresetKey}
+    defaultKey={studio.defaultPresetKey}
+    onSelect={(key) => studio.selectPreset(key)}
+  />
 
   <button
     type="button"

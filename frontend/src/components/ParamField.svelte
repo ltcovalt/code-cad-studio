@@ -1,20 +1,35 @@
 <script lang="ts">
   import InfoTooltip from './InfoTooltip.svelte';
   import Self from './ParamField.svelte';
-  import { evaluateWhen, getParamByPath, isPlainObject, stepNumber } from '../lib/params';
+  import {
+    deepClone,
+    evaluateWhen,
+    getParamByPath,
+    isPlainObject,
+    paramsEqual,
+    stepNumber,
+  } from '../lib/params';
   import type { ParamField, ParamsRecord, ParamUpdateMode } from '../lib/types';
 
   interface Props {
     field: ParamField;
     rootParams: ParamsRecord;
     groupParams: ParamsRecord;
+    presetDefaults: ParamsRecord;
     showDescriptions: boolean;
     onUpdate: (path: string, value: unknown, mode?: ParamUpdateMode) => void;
     onPreviewCommit?: () => void;
   }
 
-  let { field, rootParams, groupParams, showDescriptions, onUpdate, onPreviewCommit }: Props =
-    $props();
+  let {
+    field,
+    rootParams,
+    groupParams,
+    presetDefaults,
+    showDescriptions,
+    onUpdate,
+    onPreviewCommit,
+  }: Props = $props();
 
   let isVisible = $derived(evaluateWhen(field.when, rootParams, groupParams));
 
@@ -33,6 +48,10 @@
   );
 
   let currentValue = $derived(getParamByPath(rootParams, field.path));
+  let presetDefaultValue = $derived(getParamByPath(presetDefaults, field.path));
+  let isModified = $derived(
+    field.type !== 'group' && !paramsEqual(currentValue, presetDefaultValue)
+  );
 
   let childGroupParams = $derived<ParamsRecord>(
     isPlainObject(currentValue) ? currentValue : {}
@@ -40,6 +59,32 @@
 
   let toggleChecked = $derived(
     toggleChild ? Boolean(getParamByPath(rootParams, toggleChild.path)) : true
+  );
+  let toggleDefaultValue = $derived(
+    toggleChild ? Boolean(getParamByPath(presetDefaults, toggleChild.path)) : true
+  );
+  let isToggleModified = $derived(toggleChild !== null && toggleChecked !== toggleDefaultValue);
+
+  function formatValueForLabel(value: unknown, targetField: ParamField): string {
+    if (value === null || value === undefined) return 'Auto';
+    if (targetField.type === 'bool') return value ? 'On' : 'Off';
+    if (targetField.type === 'int' || targetField.type === 'float') {
+      return targetField.unit ? `${value} ${targetField.unit}` : String(value);
+    }
+    if (typeof value === 'string') {
+      return value === '' ? 'empty' : `"${value}"`;
+    }
+    if (typeof value === 'object') {
+      return JSON.stringify(value);
+    }
+    return String(value);
+  }
+
+  let resetActionLabel = $derived(
+    `Reset ${field.label} to ${formatValueForLabel(presetDefaultValue, field)}`
+  );
+  let toggleResetActionLabel = $derived(
+    `Reset Enable ${field.label} to ${toggleDefaultValue ? 'On' : 'Off'}`
   );
 
   let detailsOpen = $state(true);
@@ -168,7 +213,42 @@
     lastToggleState = checked;
     onUpdate(toggleChild.path, checked, 'immediate');
   }
+
+  function handleResetField() {
+    onUpdate(field.path, deepClone(presetDefaultValue), 'immediate');
+  }
+
+  function handleResetToggle(e: MouseEvent) {
+    e.preventDefault();
+    e.stopPropagation();
+    handleToggleGroupChange(toggleDefaultValue);
+  }
 </script>
+
+{#snippet resetIconButton(actionLabel: string, onReset: (e: MouseEvent) => void)}
+  <button
+    type="button"
+    class="inline-flex items-center justify-center shrink-0 rounded-full p-0.5 text-primary hover:bg-primary/15 focus-visible:outline-2 focus-visible:outline-offset-1 focus-visible:outline-primary transition-colors cursor-pointer"
+    title={actionLabel}
+    aria-label={actionLabel}
+    onclick={onReset}
+  >
+    <svg
+      xmlns="http://www.w3.org/2000/svg"
+      class="h-3 w-3"
+      viewBox="0 0 24 24"
+      fill="none"
+      stroke="currentColor"
+      stroke-width="2.2"
+      stroke-linecap="round"
+      stroke-linejoin="round"
+      aria-hidden="true"
+    >
+      <path d="M3 12a9 9 0 1 0 9-9 9.75 9.75 0 0 0-6.74 2.74L3 8" />
+      <path d="M3 3v5h5" />
+    </svg>
+  </button>
+{/snippet}
 
 {#if isVisible}
   {#if field.type === 'group'}
@@ -190,7 +270,10 @@
           {#if toggleChild}
             <!-- svelte-ignore a11y_click_events_have_key_events -->
             <!-- svelte-ignore a11y_no_static_element_interactions -->
-            <span class="shrink-0 flex items-center" onclick={(e) => e.stopPropagation()}>
+            <span class="shrink-0 flex items-center gap-1.5" onclick={(e) => e.stopPropagation()}>
+              {#if isToggleModified}
+                {@render resetIconButton(toggleResetActionLabel, handleResetToggle)}
+              {/if}
               <input
                 type="checkbox"
                 class="toggle toggle-primary toggle-xs"
@@ -213,6 +296,7 @@
                 field={child}
                 {rootParams}
                 groupParams={childGroupParams}
+                {presetDefaults}
                 {showDescriptions}
                 {onUpdate}
                 {onPreviewCommit}
@@ -231,6 +315,9 @@
           <span class="text-xs font-medium leading-snug break-words min-w-0">{field.label}</span>
           {#if field.description && !showDescriptions}
             <InfoTooltip text={field.description} label={field.label} />
+          {/if}
+          {#if isModified}
+            {@render resetIconButton(resetActionLabel, handleResetField)}
           {/if}
         </div>
         <div
@@ -287,6 +374,9 @@
           {#if field.description && !showDescriptions}
             <InfoTooltip text={field.description} label={field.label} />
           {/if}
+          {#if isModified}
+            {@render resetIconButton(resetActionLabel, handleResetField)}
+          {/if}
         </div>
         <input
           id="param-{field.path}"
@@ -312,6 +402,9 @@
         </label>
         {#if field.description && !showDescriptions}
           <InfoTooltip text={field.description} label={field.label} />
+        {/if}
+        {#if isModified}
+          {@render resetIconButton(resetActionLabel, handleResetField)}
         {/if}
       </div>
       <select
@@ -348,6 +441,9 @@
           </label>
           {#if field.description && !showDescriptions}
             <InfoTooltip text={field.description} label={field.label} />
+          {/if}
+          {#if isModified}
+            {@render resetIconButton(resetActionLabel, handleResetField)}
           {/if}
         </div>
         <div class="flex items-center gap-1 shrink-0 self-end @[240px]:self-auto">
@@ -426,6 +522,9 @@
         </label>
         {#if field.description && !showDescriptions}
           <InfoTooltip text={field.description} label={field.label} />
+        {/if}
+        {#if isModified}
+          {@render resetIconButton(resetActionLabel, handleResetField)}
         {/if}
       </div>
       <input
