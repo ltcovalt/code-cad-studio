@@ -13,4 +13,4 @@
 - **Validation**: Before finishing changes in `code-cad-studio`, run from the `code-cad-studio` root:
   - `npm --prefix frontend run check` and `npm --prefix frontend run build`
   - `go test ./...`
-- **Git & Commit Protocol**: Never commit or push without presenting a summary and receiving explicit user approval.
+- **Git & Commit Protocol**: Local commits do not require prior approval once validation passes. Never push to a remote without presenting a summary and receiving explicit user approval (invoking `/ship` counts as approval).
