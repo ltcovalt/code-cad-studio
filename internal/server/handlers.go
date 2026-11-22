@@ -4,6 +4,7 @@ import (
 	"fmt"
 	"io"
 	"net/http"
+	"os"
 	"strings"
 
 	"github.com/ltcovalt/code-cad-studio/internal/config"
@@ -12,14 +13,15 @@ import (
 )
 
 type configResponse struct {
-	Config         config.Config          `json:"config"`
-	ResolvedPython string                 `json:"resolved_python"`
-	HasDesktop     bool                   `json:"has_desktop"`
-	WorkerRunning  bool                   `json:"worker_running"`
-	WorkerStarting bool                   `json:"worker_starting"`
-	WorkerError    string                 `json:"worker_error"`
-	Health         *worker.HealthResponse `json:"health,omitempty"`
-	HealthError    string                 `json:"health_error,omitempty"`
+	Config            config.Config          `json:"config"`
+	ResolvedPython    string                 `json:"resolved_python"`
+	ResolvedExportDir string                 `json:"resolved_export_dir"`
+	HasDesktop        bool                   `json:"has_desktop"`
+	WorkerRunning     bool                   `json:"worker_running"`
+	WorkerStarting    bool                   `json:"worker_starting"`
+	WorkerError       string                 `json:"worker_error"`
+	Health            *worker.HealthResponse `json:"health,omitempty"`
+	HealthError       string                 `json:"health_error,omitempty"`
 }
 
 func (s *Server) handleGetConfig(w http.ResponseWriter, r *http.Request) {
@@ -29,12 +31,13 @@ func (s *Server) handleGetConfig(w http.ResponseWriter, r *http.Request) {
 	}
 	running, lastErr := s.worker.Status()
 	writeJSON(w, http.StatusOK, configResponse{
-		Config:         cfg,
-		ResolvedPython: cfg.ResolvePython(),
-		HasDesktop:     s.dialogs != nil,
-		WorkerRunning:  running,
-		WorkerStarting: s.worker.Starting(),
-		WorkerError:    lastErr,
+		Config:            cfg,
+		ResolvedPython:    cfg.ResolvePython(),
+		ResolvedExportDir: cfg.ResolveExportDir(),
+		HasDesktop:        s.dialogs != nil,
+		WorkerRunning:     running,
+		WorkerStarting:    s.worker.Starting(),
+		WorkerError:       lastErr,
 	})
 }
 
@@ -42,6 +45,7 @@ func (s *Server) handleSaveConfig(w http.ResponseWriter, r *http.Request) {
 	var req struct {
 		ProjectRoot string `json:"project_root"`
 		PythonPath  string `json:"python_path"`
+		ExportDir   string `json:"export_dir"`
 	}
 	if err := decodeJSON(r, &req); err != nil {
 		writeJSON(w, http.StatusBadRequest, map[string]any{"ok": false, "error": "invalid JSON body"})
@@ -50,10 +54,12 @@ func (s *Server) handleSaveConfig(w http.ResponseWriter, r *http.Request) {
 
 	projectRoot := strings.TrimSpace(req.ProjectRoot)
 	pythonPath := strings.TrimSpace(req.PythonPath)
+	exportDir := strings.TrimSpace(req.ExportDir)
 
 	cfg, err := s.cfgStore.Update(func(c *config.Config) {
 		c.ProjectRoot = projectRoot
 		c.PythonPath = pythonPath
+		c.ExportDir = exportDir
 	})
 	if err != nil {
 		writeJSON(w, http.StatusInternalServerError, map[string]any{"ok": false, "error": err.Error()})
@@ -78,14 +84,15 @@ func (s *Server) handleSaveConfig(w http.ResponseWriter, r *http.Request) {
 	}
 
 	writeJSON(w, http.StatusOK, configResponse{
-		Config:         cfg,
-		ResolvedPython: cfg.ResolvePython(),
-		HasDesktop:     s.dialogs != nil,
-		WorkerRunning:  running,
-		WorkerStarting: s.worker.Starting(),
-		WorkerError:    lastErr,
-		Health:         health,
-		HealthError:    healthErrStr,
+		Config:            cfg,
+		ResolvedPython:    cfg.ResolvePython(),
+		ResolvedExportDir: cfg.ResolveExportDir(),
+		HasDesktop:        s.dialogs != nil,
+		WorkerRunning:     running,
+		WorkerStarting:    s.worker.Starting(),
+		WorkerError:       lastErr,
+		Health:            health,
+		HealthError:       healthErrStr,
 	})
 }
 
@@ -186,6 +193,39 @@ func (s *Server) handleDialogPython(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusOK, map[string]any{
 		"path":      p,
 		"cancelled": p == "",
+	})
+}
+
+func (s *Server) handleDialogExportDir(w http.ResponseWriter, r *http.Request) {
+	if s.dialogs == nil {
+		writeJSON(w, http.StatusBadRequest, map[string]any{"error": "native dialogs unavailable"})
+		return
+	}
+	var req struct {
+		Current string `json:"current"`
+	}
+	if err := decodeJSON(r, &req); err != nil && err != io.EOF {
+		writeJSON(w, http.StatusBadRequest, map[string]any{"error": "invalid JSON body"})
+		return
+	}
+	cfg := s.cfgStore.Get()
+	startDir := strings.TrimSpace(req.Current)
+	if startDir == "" {
+		startDir = cfg.ResolveExportDir()
+	}
+	if startDir != "" {
+		if info, err := os.Stat(startDir); err != nil || !info.IsDir() {
+			startDir = cfg.ProjectRoot
+		}
+	}
+	dir, err := s.dialogs.ChooseDirectory("Select Default Export Folder", startDir)
+	if err != nil {
+		writeJSON(w, http.StatusInternalServerError, map[string]any{"error": err.Error()})
+		return
+	}
+	writeJSON(w, http.StatusOK, map[string]any{
+		"path":      dir,
+		"cancelled": dir == "",
 	})
 }
 
@@ -392,7 +432,12 @@ func (s *Server) handleExportModel(w http.ResponseWriter, r *http.Request) {
 	filterName := strings.ToUpper(fmtName) + " Files"
 	filterPattern := "*." + fmtName
 
-	outPath, err := s.dialogs.SaveFile("Export "+strings.ToUpper(fmtName), defaultFile, filterName, filterPattern)
+	exportDir := s.cfgStore.Get().ResolveExportDir()
+	if exportDir != "" {
+		_ = os.MkdirAll(exportDir, 0o755)
+	}
+
+	outPath, err := s.dialogs.SaveFile("Export "+strings.ToUpper(fmtName), exportDir, defaultFile, filterName, filterPattern)
 	if err != nil {
 		writeJSON(w, http.StatusOK, map[string]any{"ok": false, "error": err.Error()})
 		return

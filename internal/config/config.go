@@ -5,6 +5,7 @@ import (
 	"os"
 	"path/filepath"
 	"runtime"
+	"strings"
 	"sync"
 )
 
@@ -14,6 +15,7 @@ const AppDirName = "code-cad-studio"
 type Config struct {
 	ProjectRoot     string            `json:"project_root"`
 	PythonPath      string            `json:"python_path"`
+	ExportDir       string            `json:"export_dir,omitempty"`
 	Theme           string            `json:"theme"`
 	PresetSaveScope string            `json:"preset_save_scope,omitempty"` // "user" or "project"
 	DefaultPresets  map[string]string `json:"default_presets,omitempty"`   // modelID -> presetKey
@@ -124,4 +126,18 @@ func (c Config) ResolvePython() string {
 		return "python"
 	}
 	return "python3"
+}
+
+// ResolveExportDir determines the default directory for model exports:
+// 1. Explicit ExportDir if set
+// 2. <ProjectRoot>/exports if ProjectRoot is set
+// 3. Empty string otherwise
+func (c Config) ResolveExportDir() string {
+	if dir := strings.TrimSpace(c.ExportDir); dir != "" {
+		return dir
+	}
+	if root := strings.TrimSpace(c.ProjectRoot); root != "" {
+		return filepath.Join(root, "exports")
+	}
+	return ""
 }

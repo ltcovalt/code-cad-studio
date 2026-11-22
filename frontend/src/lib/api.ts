@@ -51,10 +51,18 @@ export function getConfig(): Promise<ConfigResponse> {
   return fetchJSON<ConfigResponse>('/api/config');
 }
 
-export function saveConfig(projectRoot: string, pythonPath: string): Promise<ConfigResponse> {
+export function saveConfig(
+  projectRoot: string,
+  pythonPath: string,
+  exportDir: string
+): Promise<ConfigResponse> {
   return fetchJSON<ConfigResponse>('/api/config', {
     method: 'POST',
-    body: JSON.stringify({ project_root: projectRoot, python_path: pythonPath }),
+    body: JSON.stringify({
+      project_root: projectRoot,
+      python_path: pythonPath,
+      export_dir: exportDir,
+    }),
   });
 }
 
@@ -79,6 +87,13 @@ export function browseProject(current?: string): Promise<DialogResponse> {
 
 export function browsePython(current?: string): Promise<DialogResponse> {
   return fetchJSON<DialogResponse>('/api/dialogs/python', {
+    method: 'POST',
+    body: JSON.stringify({ current: current ?? '' }),
+  });
+}
+
+export function browseExportDir(current?: string): Promise<DialogResponse> {
+  return fetchJSON<DialogResponse>('/api/dialogs/export-dir', {
     method: 'POST',
     body: JSON.stringify({ current: current ?? '' }),
   });

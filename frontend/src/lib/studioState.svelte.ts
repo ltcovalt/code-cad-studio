@@ -27,8 +27,9 @@ function loadShowDescriptions(): boolean {
 
 class StudioState {
   // Config & environment
-  config = $state<Config>({ project_root: '', python_path: '', theme: 'dark' });
+  config = $state<Config>({ project_root: '', python_path: '', export_dir: '', theme: 'dark' });
   resolvedPython = $state('');
+  resolvedExportDir = $state('');
   hasDesktop = $state(false);
   workerRunning = $state(false);
   workerError = $state('');
@@ -180,6 +181,7 @@ class StudioState {
       const resp = await api.getConfig();
       this.config = resp.config;
       this.resolvedPython = resp.resolved_python;
+      this.resolvedExportDir = resp.resolved_export_dir;
       this.hasDesktop = resp.has_desktop;
       this.workerRunning = resp.worker_running;
       this.workerError = resp.worker_error;
@@ -194,6 +196,7 @@ class StudioState {
   async applySavedConfig(resp: {
     config: Config;
     resolved_python: string;
+    resolved_export_dir: string;
     has_desktop: boolean;
     worker_running: boolean;
     worker_error: string;
@@ -201,6 +204,7 @@ class StudioState {
     const projectChanged = resp.config.project_root !== this.config.project_root;
     this.config = resp.config;
     this.resolvedPython = resp.resolved_python;
+    this.resolvedExportDir = resp.resolved_export_dir;
     this.hasDesktop = resp.has_desktop;
     this.workerRunning = resp.worker_running;
     this.workerError = resp.worker_error;

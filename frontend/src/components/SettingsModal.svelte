@@ -5,7 +5,9 @@
 
   let projectRoot = $state('');
   let pythonPath = $state('');
+  let exportDir = $state('');
   let resolvedPython = $state('');
+  let resolvedExportDir = $state('');
   let workerRunning = $state(false);
   let workerStarting = $state(false);
   let workerError = $state('');
@@ -29,7 +31,9 @@
     if (studio.settingsOpen) {
       projectRoot = studio.config.project_root;
       pythonPath = studio.config.python_path;
+      exportDir = studio.config.export_dir ?? '';
       resolvedPython = studio.resolvedPython;
+      resolvedExportDir = studio.resolvedExportDir;
       workerRunning = studio.workerRunning;
       workerError = studio.workerError;
       savedBanner = false;
@@ -84,16 +88,29 @@
     }
   }
 
+  async function handleBrowseExportDir() {
+    try {
+      const resp = await api.browseExportDir(exportDir || resolvedExportDir || projectRoot);
+      if (!resp.cancelled && resp.path) {
+        exportDir = resp.path;
+      }
+    } catch (err) {
+      formError = err instanceof Error ? err.message : String(err);
+    }
+  }
+
   async function handleSubmit(e: SubmitEvent) {
     e.preventDefault();
     saving = true;
     savedBanner = false;
     formError = '';
     try {
-      const resp = await api.saveConfig(projectRoot, pythonPath);
+      const resp = await api.saveConfig(projectRoot, pythonPath, exportDir);
       projectRoot = resp.config.project_root;
       pythonPath = resp.config.python_path;
+      exportDir = resp.config.export_dir ?? '';
       resolvedPython = resp.resolved_python;
+      resolvedExportDir = resp.resolved_export_dir;
       workerRunning = resp.worker_running;
       workerStarting = Boolean(resp.worker_starting);
       workerError = resp.worker_error;
@@ -139,7 +156,7 @@
       onclick={(e) => e.stopPropagation()}
     >
       <div class="flex items-center justify-between">
-        <h3 id="settings-modal-title" class="font-bold text-base">Project &amp; Python Settings</h3>
+        <h3 id="settings-modal-title" class="font-bold text-base">Workspace Settings</h3>
         <button
           type="button"
           class="btn btn-sm btn-circle btn-ghost"
@@ -176,6 +193,36 @@
           <span class="text-[11px] opacity-60 mt-1">
             Folder containing <code>models/</code>, <code>components/</code>, or standalone
             <code>.py</code> scripts.
+          </span>
+        </div>
+
+        <div class="form-control">
+          <label class="label py-1" for="settings-export-dir">
+            <span class="label-text text-xs font-semibold">Default Export Folder (optional)</span>
+          </label>
+          <div class="join w-full">
+            <input
+              id="settings-export-dir"
+              type="text"
+              bind:value={exportDir}
+              class="input input-bordered input-sm join-item w-full font-mono text-xs"
+              placeholder="Default (&lt;project_root&gt;/exports)"
+            />
+            {#if studio.hasDesktop}
+              <button
+                type="button"
+                class="btn btn-sm btn-neutral join-item"
+                onclick={handleBrowseExportDir}
+              >
+                Browse
+              </button>
+            {/if}
+          </div>
+          <span class="text-[11px] opacity-60 mt-1">
+            Initial directory opened by the Save dialog.
+            {#if resolvedExportDir}
+              Resolved: <code class="font-mono break-all">{resolvedExportDir}</code>
+            {/if}
           </span>
         </div>
 

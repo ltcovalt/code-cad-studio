@@ -19,7 +19,7 @@ import (
 type DesktopDialogs interface {
 	ChooseDirectory(title, startDir string) (string, error)
 	ChooseFile(title, startDir string) (string, error)
-	SaveFile(title, defaultFilename, filterName, filterPattern string) (string, error)
+	SaveFile(title, defaultDir, defaultFilename, filterName, filterPattern string) (string, error)
 }
 
 // DesktopWindow abstracts native frameless window controls so internal/server
@@ -119,6 +119,7 @@ func (s *Server) registerRoutes() {
 	// Native OS Dialogs
 	s.mux.HandleFunc("POST /api/dialogs/project", s.handleDialogProject)
 	s.mux.HandleFunc("POST /api/dialogs/python", s.handleDialogPython)
+	s.mux.HandleFunc("POST /api/dialogs/export-dir", s.handleDialogExportDir)
 
 	// Native Frameless Window Controls
 	s.mux.HandleFunc("POST /api/window/minimize", s.handleWindowMinimize)

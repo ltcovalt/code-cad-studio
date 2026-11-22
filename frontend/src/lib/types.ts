@@ -1,6 +1,7 @@
 export interface Config {
   project_root: string;
   python_path: string;
+  export_dir?: string;
   theme: string;
   preset_save_scope?: 'user' | 'project' | string;
   default_presets?: Record<string, string>;
@@ -18,6 +19,7 @@ export interface HealthResponse {
 export interface ConfigResponse {
   config: Config;
   resolved_python: string;
+  resolved_export_dir: string;
   has_desktop: boolean;
   worker_running: boolean;
   worker_starting?: boolean;

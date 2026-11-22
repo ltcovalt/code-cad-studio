@@ -43,10 +43,13 @@ func (d *wailsDialogs) ChooseFile(title, startDir string) (string, error) {
 	return dlg.PromptForSingleSelection()
 }
 
-func (d *wailsDialogs) SaveFile(title, defaultFilename, filterName, filterPattern string) (string, error) {
+func (d *wailsDialogs) SaveFile(title, defaultDir, defaultFilename, filterName, filterPattern string) (string, error) {
 	dlg := d.app.Dialog.SaveFile().
 		SetFilename(defaultFilename).
 		AddFilter(filterName, filterPattern)
+	if defaultDir != "" {
+		dlg.SetDirectory(defaultDir)
+	}
 	if title != "" {
 		dlg.SetMessage(title)
 	}

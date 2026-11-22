@@ -14,10 +14,11 @@ import (
 )
 
 type stubDialogs struct {
-	dirPath  string
-	filePath string
-	savePath string
-	lastSave string
+	dirPath     string
+	filePath    string
+	savePath    string
+	lastSaveDir string
+	lastSave    string
 }
 
 func (d *stubDialogs) ChooseDirectory(title, startDir string) (string, error) {
@@ -28,7 +29,8 @@ func (d *stubDialogs) ChooseFile(title, startDir string) (string, error) {
 	return d.filePath, nil
 }
 
-func (d *stubDialogs) SaveFile(title, defaultFilename, filterName, filterPattern string) (string, error) {
+func (d *stubDialogs) SaveFile(title, defaultDir, defaultFilename, filterName, filterPattern string) (string, error) {
+	d.lastSaveDir = defaultDir
 	d.lastSave = defaultFilename
 	return d.savePath, nil
 }
@@ -105,6 +107,20 @@ func TestConfigAndThemeHandlers(t *testing.T) {
 	}
 	if dlgResp.Path != "/tmp/example-project" || dlgResp.Cancelled {
 		t.Fatalf("unexpected dialog resp: %+v", dlgResp)
+	}
+
+	// POST /api/dialogs/export-dir
+	rec = httptest.NewRecorder()
+	req = httptest.NewRequest(http.MethodPost, "/api/dialogs/export-dir", bytes.NewBufferString(`{}`))
+	srv.Handler().ServeHTTP(rec, req)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("POST /api/dialogs/export-dir status = %d", rec.Code)
+	}
+	if err := json.Unmarshal(rec.Body.Bytes(), &dlgResp); err != nil {
+		t.Fatalf("decode export-dir dialog resp: %v", err)
+	}
+	if dlgResp.Path != "/tmp/example-project" || dlgResp.Cancelled {
+		t.Fatalf("unexpected export-dir dialog resp: %+v", dlgResp)
 	}
 }
 
@@ -256,7 +272,7 @@ def create_demo_box(params: DemoBoxParams):
 		t.Fatalf("expected extra.enabled nullable=true, got %+v", extraGroup.Children)
 	}
 
-	// Verify export_filename resolution via SaveFile default filename
+	// Verify export_filename & default export dir (<project_root>/exports) via SaveFile
 	rec = httptest.NewRecorder()
 	exportBody := bytes.NewBufferString(`{"format":"stl","params":{"core":{"mode":"rect"}}}`)
 	srv.Handler().ServeHTTP(rec, httptest.NewRequest(http.MethodPost, "/api/models/demo_box/export", exportBody))
@@ -265,6 +281,43 @@ def create_demo_box(params: DemoBoxParams):
 	}
 	if dialogs.lastSave != "demo_box_rect.stl" {
 		t.Fatalf("expected SaveFile default filename 'demo_box_rect.stl', got %q", dialogs.lastSave)
+	}
+	wantDefaultExportDir := filepath.Join(projectDir, "exports")
+	if dialogs.lastSaveDir != wantDefaultExportDir {
+		t.Fatalf("expected SaveFile defaultDir %q, got %q", wantDefaultExportDir, dialogs.lastSaveDir)
+	}
+
+	// Configure a custom export_dir and verify SaveFile uses it
+	customExportDir := filepath.Join(t.TempDir(), "custom-exports")
+	saveBody, _ = json.Marshal(map[string]string{
+		"project_root": projectDir,
+		"python_path":  "python3",
+		"export_dir":   customExportDir,
+	})
+	rec = httptest.NewRecorder()
+	srv.Handler().ServeHTTP(rec, httptest.NewRequest(http.MethodPost, "/api/config", bytes.NewReader(saveBody)))
+	if rec.Code != http.StatusOK {
+		t.Fatalf("POST /api/config with export_dir status = %d", rec.Code)
+	}
+	var customCfgResp configResponse
+	if err := json.Unmarshal(rec.Body.Bytes(), &customCfgResp); err != nil {
+		t.Fatalf("decode config response: %v", err)
+	}
+	if customCfgResp.Config.ExportDir != customExportDir || customCfgResp.ResolvedExportDir != customExportDir {
+		t.Fatalf("unexpected export_dir config response: %+v", customCfgResp)
+	}
+
+	rec = httptest.NewRecorder()
+	exportBody = bytes.NewBufferString(`{"format":"step","params":{"core":{"mode":"round"}}}`)
+	srv.Handler().ServeHTTP(rec, httptest.NewRequest(http.MethodPost, "/api/models/demo_box/export", exportBody))
+	if rec.Code != http.StatusOK {
+		t.Fatalf("POST /api/models/demo_box/export (custom dir) status = %d", rec.Code)
+	}
+	if dialogs.lastSaveDir != customExportDir {
+		t.Fatalf("expected SaveFile custom defaultDir %q, got %q", customExportDir, dialogs.lastSaveDir)
+	}
+	if dialogs.lastSave != "demo_box_round.step" {
+		t.Fatalf("expected SaveFile filename 'demo_box_round.step', got %q", dialogs.lastSave)
 	}
 }
 
