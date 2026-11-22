@@ -318,3 +318,131 @@ func TestVerificationLifecycleAndDefaultMetadata(t *testing.T) {
 		t.Fatalf("expected invalid status to fail parsing")
 	}
 }
+
+func TestSaveOverwritesHandKeyedAndCrossScopePresetsWithoutDuplicates(t *testing.T) {
+	t.Setenv("XDG_CONFIG_HOME", t.TempDir())
+	dir := t.TempDir()
+	defaults := map[string]any{
+		"diameter": 150.0,
+		"height":   10.0,
+	}
+
+	// Seed a hand-authored project preset whose key does NOT equal Slugify(label)
+	initial := `{
+  "anchor_round_6_cup": {
+    "label": "Anchor Hocking Round 6-Cup (1.5 qt)",
+    "description": "Original note",
+    "params": {
+      "diameter": 187.3
+    }
+  }
+}
+`
+	if err := os.WriteFile(filepath.Join(dir, "presets.json"), []byte(initial), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	// 1. Saving with the exact same name in project scope must overwrite anchor_round_6_cup in-place
+	key, err := Save(
+		"lid",
+		dir,
+		"Anchor Hocking Round 6-Cup (1.5 qt)",
+		"Updated fit",
+		"project",
+		false,
+		map[string]any{"diameter": 186.5, "height": 10.0},
+		defaults,
+		&Verification{Status: StatusVerified, Note: "Snug fit"},
+	)
+	if err != nil {
+		t.Fatalf("Save overwrite failed: %v", err)
+	}
+	if key != "anchor_round_6_cup" {
+		t.Fatalf("expected existing key 'anchor_round_6_cup' to be preserved, got %q", key)
+	}
+	list := List("lid", dir, defaults, nil)
+	if len(list) != 2 {
+		t.Fatalf("expected 2 presets (no duplicate), got %d: %#v", len(list), list)
+	}
+	if list[1].Key != "anchor_round_6_cup" || list[1].Description != "Updated fit" || list[1].Params["diameter"] != 186.5 {
+		t.Fatalf("unexpected overwritten project preset: %#v", list[1])
+	}
+
+	// 2. Case-insensitive / whitespace-trimmed label match also overwrites in-place
+	key2, err := Save(
+		"lid",
+		dir,
+		"  anchor hocking round 6-cup (1.5 qt)  ",
+		"Trimmed case update",
+		"project",
+		false,
+		map[string]any{"diameter": 186.0, "height": 10.0},
+		defaults,
+		nil,
+	)
+	if err != nil || key2 != "anchor_round_6_cup" {
+		t.Fatalf("case-insensitive overwrite failed: key=%q err=%v", key2, err)
+	}
+	list = List("lid", dir, defaults, nil)
+	if len(list) != 2 || list[1].Params["diameter"] != 186.0 {
+		t.Fatalf("expected single updated preset after case-insensitive save, got %#v", list)
+	}
+
+	// 3. Saving the same name to user scope creates a local override under the same key (no duplicate)
+	userKey, err := Save(
+		"lid",
+		dir,
+		"Anchor Hocking Round 6-Cup (1.5 qt)",
+		"Local override",
+		"user",
+		false,
+		map[string]any{"diameter": 185.0, "height": 10.0},
+		defaults,
+		nil,
+	)
+	if err != nil || userKey != "anchor_round_6_cup" {
+		t.Fatalf("user override save failed: key=%q err=%v", userKey, err)
+	}
+	list = List("lid", dir, defaults, nil)
+	if len(list) != 2 || list[1].Source != "user" || list[1].Params["diameter"] != 185.0 {
+		t.Fatalf("expected single user-shadowed preset, got %#v", list)
+	}
+
+	// Deleting the user override restores the underlying project preset cleanly
+	if err := Delete("lid", dir, "anchor_round_6_cup", "user"); err != nil {
+		t.Fatalf("delete user override failed: %v", err)
+	}
+	list = List("lid", dir, defaults, nil)
+	if len(list) != 2 || list[1].Source != "project" || list[1].Params["diameter"] != 186.0 {
+		t.Fatalf("expected underlying project preset restored, got %#v", list)
+	}
+
+	// 4. Saving with a different name creates a new preset while preserving the existing one
+	newKey, err := Save(
+		"lid",
+		dir,
+		"Anchor Hocking Round 6-Cup (Tight)",
+		"Tighter variant",
+		"project",
+		false,
+		map[string]any{"diameter": 184.5, "height": 10.0},
+		defaults,
+		nil,
+	)
+	if err != nil || newKey != "anchor_hocking_round_6_cup_tight" {
+		t.Fatalf("new preset save failed: key=%q err=%v", newKey, err)
+	}
+	list = List("lid", dir, defaults, nil)
+	if len(list) != 3 {
+		t.Fatalf("expected 3 presets (default + original + new), got %d: %#v", len(list), list)
+	}
+
+	// 5. Rename preserves hand-crafted key when only description/casing changes and blocks label collisions
+	keptKey, err := Rename("lid", dir, "anchor_round_6_cup", "project", "Anchor Hocking Round 6-Cup (1.5 qt)", "Edited description")
+	if err != nil || keptKey != "anchor_round_6_cup" {
+		t.Fatalf("expected Rename with unchanged label to keep key 'anchor_round_6_cup', got key=%q err=%v", keptKey, err)
+	}
+	if _, err := Rename("lid", dir, "anchor_hocking_round_6_cup_tight", "project", "Anchor Hocking Round 6-Cup (1.5 qt)", ""); err == nil {
+		t.Fatalf("expected Rename to duplicate existing label to fail")
+	}
+}

@@ -1,21 +1,28 @@
 <script lang="ts">
+  import { untrack } from 'svelte';
   import { mergeWithDefaults, normalizeParamsWithFields, paramsEqual } from '../lib/params';
   import { studio } from '../lib/studioState.svelte';
-  import type { VerificationStatus } from '../lib/types';
-  import { VERIFICATION_STATUSES, getPresetVerification } from '../lib/verification';
-  import VerificationIcon from './VerificationIcon.svelte';
+  import type { Preset, PresetVerification } from '../lib/types';
+  import { getPresetVerification } from '../lib/verification';
+  import Alert from './Alert.svelte';
+
+  let dialogEl: HTMLDialogElement | undefined = $state();
+  let nameInputEl: HTMLInputElement | undefined = $state();
 
   let label = $state('');
   let description = $state('');
   let scope = $state<'user' | 'project'>('user');
   let sparseOnly = $state(true);
   let setAsDefault = $state(false);
-  let verificationStatus = $state<VerificationStatus>('unverified');
-  let verificationNote = $state('');
-  let verificationTouched = $state(false);
 
   let saving = $state(false);
   let formError = $state('');
+
+  let pressedOutside = false;
+
+  function normalizePresetLabel(raw: string): string {
+    return raw.trim().toLowerCase();
+  }
 
   function slugifyLabel(raw: string): string {
     const s = raw
@@ -26,12 +33,45 @@
     return s === '' || s === 'default' ? 'custom_preset' : s;
   }
 
-  const matchingExisting = $derived.by(() => {
+  const savedPresets = $derived(
+    studio.presets.filter(
+      (p) => p.key !== 'default' && (p.source === 'user' || p.source === 'project')
+    )
+  );
+
+  const matchingExisting = $derived.by<Preset | null>(() => {
     const trimmed = label.trim();
     if (!trimmed) return null;
+    const norm = normalizePresetLabel(trimmed);
     const slug = slugifyLabel(trimmed);
-    return studio.presets.find((p) => p.key === slug && p.source === scope) ?? null;
+
+    const sameScope = savedPresets.filter((p) => p.source === scope);
+    const otherScope = savedPresets.filter((p) => p.source !== scope);
+
+    return (
+      sameScope.find((p) => normalizePresetLabel(p.label) === norm) ??
+      sameScope.find((p) => p.key === slug) ??
+      otherScope.find((p) => normalizePresetLabel(p.label) === norm) ??
+      otherScope.find((p) => p.key === slug) ??
+      null
+    );
   });
+
+  type MatchKind = 'overwrite' | 'override-local' | 'replace-project' | null;
+
+  const matchKind = $derived.by<MatchKind>(() => {
+    if (!matchingExisting) return null;
+    if (matchingExisting.source === scope) return 'overwrite';
+    if (matchingExisting.source === 'project' && scope === 'user') return 'override-local';
+    return 'replace-project';
+  });
+
+  const matchedByKeyOnly = $derived(
+    Boolean(
+      matchingExisting &&
+        normalizePresetLabel(matchingExisting.label) !== normalizePresetLabel(label)
+    )
+  );
 
   const matchingParamsChanged = $derived.by(() => {
     if (!matchingExisting) return false;
@@ -42,52 +82,124 @@
     return !paramsEqual(studio.params, existingParams);
   });
 
-  const showResetWarning = $derived.by(() => {
-    if (!matchingExisting || !matchingParamsChanged) return false;
-    return getPresetVerification(matchingExisting).status !== 'unverified';
+  const isAlreadyDefault = $derived(
+    Boolean(matchingExisting && studio.defaultPresetKey === matchingExisting.key)
+  );
+
+  const overwriteNotice = $derived.by<{ title: string; detail: string } | null>(() => {
+    if (!matchingExisting || !matchKind) return null;
+    const targetName = matchingExisting.label;
+    if (matchKind === 'overwrite') {
+      const scopeLabel = scope === 'project' ? 'project' : 'user';
+      return {
+        title: `Existing ${scopeLabel} preset will be overwritten`,
+        detail: matchedByKeyOnly
+          ? `This name maps to the same preset key as "${targetName}" and will overwrite it. Change the name to save as a new preset.`
+          : `Saving will overwrite "${targetName}". Change the name to save as a new preset.`,
+      };
+    }
+    if (matchKind === 'override-local') {
+      return {
+        title: 'Existing project preset will be overridden',
+        detail: matchedByKeyOnly
+          ? `This name maps to the same preset key as "${targetName}" and will locally override it on this device. Change the name to save as a new preset.`
+          : `Saving will locally override "${targetName}" on this device without modifying presets.json. Change the name to save as a new preset.`,
+      };
+    }
+    return {
+      title: 'Existing user preset will be replaced',
+      detail: matchedByKeyOnly
+        ? `This name maps to the same preset key as "${targetName}" and will replace your local user copy. Change the name to save as a new preset.`
+        : `Saving as a Project preset will overwrite "${targetName}" and remove your local user copy. Change the name to save as a new preset.`,
+    };
   });
 
-  $effect(() => {
-    if (studio.savePresetModalOpen) {
-      formError = '';
-      sparseOnly = true;
-      verificationTouched = false;
+  const submitLabel = $derived.by(() => {
+    if (matchKind === 'override-local') return 'Save Local Override';
+    if (matchKind === 'overwrite' || matchKind === 'replace-project') return 'Overwrite Preset';
+    return 'Save New Preset';
+  });
 
-      const cur = studio.presets.find((p) => p.key === studio.selectedPresetKey);
-      if (cur && cur.key !== 'default' && (cur.source === 'user' || cur.source === 'project')) {
-        label = cur.label;
-        description = cur.description;
-        scope = cur.source === 'project' ? 'project' : 'user';
-        setAsDefault = studio.defaultPresetKey === cur.key;
-      } else {
-        label = '';
-        description = '';
-        scope = studio.config.preset_save_scope === 'project' ? 'project' : 'user';
-        setAsDefault = false;
+  const nameDescribedBy = $derived(
+    [overwriteNotice ? 'preset-name-match-notice' : '', formError ? 'save-preset-form-error' : '']
+      .filter(Boolean)
+      .join(' ')
+  );
+
+  function initializeForm() {
+    formError = '';
+    sparseOnly = true;
+    setAsDefault = false;
+
+    const cur = studio.presets.find((p) => p.key === studio.selectedPresetKey);
+    if (cur && cur.key !== 'default' && (cur.source === 'user' || cur.source === 'project')) {
+      label = cur.label;
+      description = cur.description;
+      scope = cur.source === 'project' ? 'project' : 'user';
+    } else {
+      label = '';
+      description = '';
+      scope = studio.config.preset_save_scope === 'project' ? 'project' : 'user';
+    }
+  }
+
+  let wasOpen = false;
+  $effect(() => {
+    const el = dialogEl;
+    const isOpen = studio.savePresetModalOpen && Boolean(studio.activeModel);
+    if (!el) return;
+    if (isOpen && !wasOpen) {
+      wasOpen = true;
+      untrack(() => initializeForm());
+      if (!el.open) {
+        el.showModal();
+      }
+      queueMicrotask(() => {
+        nameInputEl?.focus();
+      });
+    } else if (!isOpen && wasOpen) {
+      wasOpen = false;
+      if (el.open) {
+        el.close();
       }
     }
   });
 
-  $effect(() => {
-    if (!studio.savePresetModalOpen || verificationTouched) return;
-    if (matchingExisting) {
-      const existingVer = getPresetVerification(matchingExisting);
-      verificationStatus = matchingParamsChanged ? 'unverified' : existingVer.status;
-      verificationNote = existingVer.note;
-    } else {
-      verificationStatus = 'unverified';
-      verificationNote = '';
-    }
-  });
-
   function closeModal() {
+    if (saving) return;
     studio.savePresetModalOpen = false;
   }
 
-  function handleKeydown(e: KeyboardEvent) {
-    if (e.key === 'Escape' && studio.savePresetModalOpen) {
+  function handleDialogCancel(e: Event) {
+    if (saving) {
+      e.preventDefault();
+    }
+  }
+
+  function handleDialogClose() {
+    wasOpen = false;
+    pressedOutside = false;
+    if (studio.savePresetModalOpen) {
+      studio.savePresetModalOpen = false;
+    }
+  }
+
+  function isOutsideDialog(e: PointerEvent, el: HTMLDialogElement): boolean {
+    const r = el.getBoundingClientRect();
+    return e.clientX < r.left || e.clientX > r.right || e.clientY < r.top || e.clientY > r.bottom;
+  }
+
+  function handleDialogPointerDown(e: PointerEvent) {
+    if (!dialogEl || 'closedBy' in HTMLDialogElement.prototype) return;
+    pressedOutside = isOutsideDialog(e, dialogEl);
+  }
+
+  function handleDialogPointerUp(e: PointerEvent) {
+    if (!dialogEl || 'closedBy' in HTMLDialogElement.prototype) return;
+    if (pressedOutside && isOutsideDialog(e, dialogEl)) {
       closeModal();
     }
+    pressedOutside = false;
   }
 
   async function handleSubmit(e: SubmitEvent) {
@@ -95,21 +207,33 @@
     const trimmed = label.trim();
     if (!trimmed) {
       formError = 'Preset name is required.';
+      nameInputEl?.focus();
       return;
     }
+
+    let nextVerification: PresetVerification | null = null;
+    if (matchingExisting) {
+      const existingVer = getPresetVerification(matchingExisting);
+      nextVerification = matchingParamsChanged
+        ? { status: 'unverified', note: existingVer.note }
+        : { status: existingVer.status, note: existingVer.note };
+    }
+
     saving = true;
     formError = '';
     try {
-      const saved = await studio.savePreset(trimmed, description.trim(), scope, !sparseOnly, {
-        status: verificationStatus,
-        note: verificationNote.trim(),
-      });
+      const saved = await studio.savePreset(
+        trimmed,
+        description.trim(),
+        scope,
+        !sparseOnly,
+        nextVerification
+      );
       if (saved) {
         if (setAsDefault && saved.key) {
           await studio.setDefaultPreset(saved.key);
-        } else if (!setAsDefault && saved.key && studio.defaultPresetKey === saved.key) {
-          await studio.setDefaultPreset('');
         }
+        saving = false;
         closeModal();
       }
     } catch (err) {
@@ -120,27 +244,23 @@
   }
 </script>
 
-<svelte:window onkeydown={handleKeydown} />
-
-{#if studio.savePresetModalOpen && studio.activeModel}
-  <!-- Lightweight zero-transition overlay to avoid WebKitGTK/Wayland software-compositing lag over WebGL -->
-  <!-- svelte-ignore a11y_click_events_have_key_events -->
-  <!-- svelte-ignore a11y_no_static_element_interactions -->
-  <div
-    class="fixed inset-0 z-50 flex items-center justify-center bg-black/50 p-4"
-    onclick={closeModal}
-  >
+<dialog
+  bind:this={dialogEl}
+  class="studio-dialog"
+  aria-labelledby="save-preset-modal-title"
+  {...({ closedby: 'any' } as Record<string, unknown>)}
+  oncancel={handleDialogCancel}
+  onclose={handleDialogClose}
+  onpointerdown={handleDialogPointerDown}
+  onpointerup={handleDialogPointerUp}
+>
+  {#if studio.activeModel}
     <div
-      role="dialog"
-      aria-modal="true"
-      aria-labelledby="save-preset-modal-title"
-      tabindex="-1"
-      class="bg-base-100 border border-base-300 rounded-box shadow-md w-full max-w-lg max-h-[90vh] overflow-y-auto p-6 space-y-4"
-      onclick={(e) => e.stopPropagation()}
+      class="bg-base-100 border border-base-300 rounded-box shadow-md w-[32rem] max-w-[calc(100vw-2rem)] max-h-[calc(100vh-2rem)] overflow-y-auto p-6 space-y-4"
     >
-      <div class="flex items-center justify-between">
+      <div class="flex items-center justify-between gap-3">
         <div>
-          <h3 id="save-preset-modal-title" class="font-bold text-base">Save Preset</h3>
+          <h2 id="save-preset-modal-title" class="font-bold text-base">Save Preset</h2>
           <p class="text-[11px] opacity-60">{studio.activeModel.name}</p>
         </div>
         <button
@@ -148,6 +268,7 @@
           class="btn btn-ghost btn-square h-[26px] w-[26px] min-h-0 p-0 hover:bg-error/85 hover:text-error-content shrink-0"
           title="Close"
           aria-label="Close save preset dialog"
+          disabled={saving}
           onclick={closeModal}
         >
           <svg
@@ -167,22 +288,44 @@
         </button>
       </div>
 
-      <form class="space-y-3" onsubmit={handleSubmit}>
+      <form
+        class="space-y-3"
+        aria-labelledby="save-preset-modal-title"
+        onsubmit={handleSubmit}
+        novalidate
+      >
         <div class="form-control">
           <label class="label py-1" for="preset-name-input">
             <span class="label-text text-xs font-semibold">Preset Name</span>
           </label>
+          <!-- svelte-ignore a11y_autofocus -->
           <input
+            bind:this={nameInputEl}
             id="preset-name-input"
+            name="preset-name"
             type="text"
+            required
+            autofocus
             bind:value={label}
+            oninput={() => {
+              if (formError) formError = '';
+            }}
+            aria-invalid={formError ? 'true' : undefined}
+            aria-describedby={nameDescribedBy || undefined}
             placeholder="e.g. Gridfinity Bin - 2x2x6u"
             class="input input-bordered input-sm w-full"
+            class:input-error={Boolean(formError || overwriteNotice)}
           />
-          {#if matchingExisting}
-            <p class="text-[11px] text-warning mt-1">
-              A preset with this name already exists and will be overwritten.
-            </p>
+          {#if overwriteNotice}
+            <Alert
+              id="preset-name-match-notice"
+              variant="error"
+              role="status"
+              title={overwriteNotice.title}
+              class="mt-2"
+            >
+              <p>{overwriteNotice.detail}</p>
+            </Alert>
           {/if}
         </div>
 
@@ -192,6 +335,7 @@
           </label>
           <input
             id="preset-desc-input"
+            name="preset-description"
             type="text"
             bind:value={description}
             placeholder="Optional short note shown on hover"
@@ -204,7 +348,9 @@
           <div class="grid grid-cols-2 gap-2">
             <label
               class={`flex items-start gap-2 p-2.5 rounded-box border cursor-pointer text-xs ${
-                scope === 'user' ? 'border-primary bg-primary/5' : 'border-base-300'
+                scope === 'user'
+                  ? 'border-primary bg-primary/5'
+                  : 'border-base-300 bg-base-100 hover:border-base-content/25'
               }`}
             >
               <input
@@ -222,7 +368,9 @@
 
             <label
               class={`flex items-start gap-2 p-2.5 rounded-box border cursor-pointer text-xs ${
-                scope === 'project' ? 'border-primary bg-primary/5' : 'border-base-300'
+                scope === 'project'
+                  ? 'border-primary bg-primary/5'
+                  : 'border-base-300 bg-base-100 hover:border-base-content/25'
               }`}
             >
               <input
@@ -240,58 +388,11 @@
           </div>
         </fieldset>
 
-        <div class="rounded-box bg-base-200/70 border border-base-300 p-2.5 space-y-2.5">
-          <fieldset class="space-y-1.5">
-            <legend class="text-xs font-semibold">Print Verification</legend>
-            {#if showResetWarning}
-              <p class="text-[11px] text-warning leading-snug">
-                Parameters changed — status defaulted to Unverified. Update below if you have
-                already print-tested these settings.
-              </p>
-            {/if}
-            <div class="grid grid-cols-2 gap-1.5">
-              {#each VERIFICATION_STATUSES as opt (opt.value)}
-                {@const active = verificationStatus === opt.value}
-                <button
-                  type="button"
-                  aria-pressed={active}
-                  title={opt.hint}
-                  class="flex items-center gap-1.5 px-2 py-1.5 rounded-field border text-left text-xs cursor-pointer focus-visible:outline-2 focus-visible:outline-offset-1 focus-visible:outline-primary {active
-                    ? `${opt.selectedButtonClass} font-semibold`
-                    : 'border-base-300 hover:border-base-content/30 bg-base-100'}"
-                  onclick={() => {
-                    verificationTouched = true;
-                    verificationStatus = opt.value;
-                  }}
-                >
-                  <VerificationIcon status={opt.value} class="h-3.5 w-3.5" />
-                  <span class="truncate">{opt.label}</span>
-                </button>
-              {/each}
-            </div>
-          </fieldset>
-
-          <div class="form-control">
-            <label class="label py-0.5" for="save-preset-verification-note">
-              <span class="label-text text-xs font-semibold">Print Notes</span>
-            </label>
-            <textarea
-              id="save-preset-verification-note"
-              bind:value={verificationNote}
-              oninput={() => {
-                verificationTouched = true;
-              }}
-              rows="2"
-              placeholder="Optional material, layer height, fit feedback, or known issues"
-              class="textarea textarea-bordered textarea-xs w-full text-xs leading-snug bg-base-100"
-            ></textarea>
-          </div>
-        </div>
-
-        <div class="rounded-box bg-base-200/70 border border-base-300 p-2.5 space-y-2">
+        <div class="rounded-box bg-base-200/60 border border-base-300 p-2.5 space-y-2">
           <label class="flex items-start gap-2 cursor-pointer text-xs">
             <input
               type="checkbox"
+              name="sparse-only"
               bind:checked={sparseOnly}
               class="checkbox checkbox-xs checkbox-primary mt-0.5"
             />
@@ -307,32 +408,49 @@
           <label class="flex items-center gap-2 cursor-pointer text-xs">
             <input
               type="checkbox"
+              name="set-as-default"
               bind:checked={setAsDefault}
               class="checkbox checkbox-xs checkbox-primary"
             />
-            <span class="font-medium">Set preset as model default</span>
+            <span class="font-medium">
+              Set preset as model default
+              {#if isAlreadyDefault}
+                <span class="font-normal opacity-60">(currently default)</span>
+              {/if}
+            </span>
           </label>
         </div>
 
         {#if formError}
-          <div class="alert alert-error alert-soft text-xs py-2">
-            <span>{formError}</span>
-          </div>
+          <Alert id="save-preset-form-error" variant="error">
+            {formError}
+          </Alert>
         {/if}
 
         <div class="flex justify-end gap-2 pt-2">
-          <button type="button" class="btn btn-sm btn-ghost" onclick={closeModal}>Cancel</button>
-          <button type="submit" class="btn btn-sm btn-primary" disabled={saving}>
+          <button
+            type="button"
+            class="btn btn-sm btn-ghost"
+            disabled={saving}
+            onclick={closeModal}
+          >
+            Cancel
+          </button>
+          <button
+            type="submit"
+            class="btn btn-sm"
+            class:btn-error={Boolean(overwriteNotice)}
+            class:btn-primary={!overwriteNotice}
+            disabled={saving}
+          >
             {#if saving}
               <span class="loading loading-spinner loading-xs"></span>
-            {:else if matchingExisting}
-              Overwrite Preset
             {:else}
-              Save Preset
+              {submitLabel}
             {/if}
           </button>
         </div>
       </form>
     </div>
-  </div>
-{/if}
+  {/if}
+</dialog>

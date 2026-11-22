@@ -996,3 +996,117 @@ def create_ver_demo(params: VerDemoParams):
 		t.Fatalf("expected project preset verification intact, got %+v", afterUpdate.Presets[1].Verification)
 	}
 }
+
+func TestSavePresetOverwritesHandKeyedPresetAndPreservesDefaultPin(t *testing.T) {
+	projectDir := t.TempDir()
+	modelDir := filepath.Join(projectDir, "models", "lid_demo")
+	if err := os.MkdirAll(modelDir, 0o755); err != nil {
+		t.Fatalf("mkdir: %v", err)
+	}
+
+	modelSrc := `from dataclasses import dataclass, field
+
+@dataclass
+class CoreParams:
+    diameter: float = 150.0
+
+@dataclass
+class LidDemoParams:
+    core: CoreParams = field(default_factory=CoreParams)
+
+def create_lid_demo(params: LidDemoParams):
+    return None
+`
+	if err := os.WriteFile(filepath.Join(modelDir, "lid_demo.py"), []byte(modelSrc), 0o644); err != nil {
+		t.Fatalf("write lid_demo.py: %v", err)
+	}
+
+	seedPresets := `{
+  "anchor_round_6_cup": {
+    "label": "Anchor Hocking Round 6-Cup (1.5 qt)",
+    "description": "Initial bowl",
+    "params": {
+      "core": {
+        "diameter": 187.3
+      }
+    }
+  }
+}
+`
+	if err := os.WriteFile(filepath.Join(modelDir, "presets.json"), []byte(seedPresets), 0o644); err != nil {
+		t.Fatalf("write presets.json: %v", err)
+	}
+
+	srv := newTestServer(t, &stubDialogs{})
+	saveBody, _ := json.Marshal(map[string]string{
+		"project_root": projectDir,
+		"python_path":  "python3",
+	})
+	rec := httptest.NewRecorder()
+	srv.Handler().ServeHTTP(rec, httptest.NewRequest(http.MethodPost, "/api/config", bytes.NewReader(saveBody)))
+	if rec.Code != http.StatusOK {
+		t.Fatalf("POST /api/config status = %d", rec.Code)
+	}
+
+	// Pin the hand-keyed preset as model default
+	rec = httptest.NewRecorder()
+	srv.Handler().ServeHTTP(rec, httptest.NewRequest(
+		http.MethodPost,
+		"/api/models/lid_demo/presets/default",
+		bytes.NewBufferString(`{"key":"anchor_round_6_cup"}`),
+	))
+	if rec.Code != http.StatusOK {
+		t.Fatalf("POST presets/default status = %d", rec.Code)
+	}
+
+	// Overwrite by saving with the exact same name
+	rec = httptest.NewRecorder()
+	srv.Handler().ServeHTTP(rec, httptest.NewRequest(
+		http.MethodPost,
+		"/api/models/lid_demo/presets",
+		bytes.NewBufferString(`{"label":"Anchor Hocking Round 6-Cup (1.5 qt)","description":"Tighter fit","scope":"project","params":{"core":{"diameter":186.2}}}`),
+	))
+	if rec.Code != http.StatusOK {
+		t.Fatalf("POST overwrite preset status = %d, body = %s", rec.Code, rec.Body.String())
+	}
+	var saveResp struct {
+		OK          bool   `json:"ok"`
+		SelectedKey string `json:"selected_key"`
+		Presets     []struct {
+			Key         string         `json:"key"`
+			Label       string         `json:"label"`
+			Description string         `json:"description"`
+			Source      string         `json:"source"`
+			Params      map[string]any `json:"params"`
+		} `json:"presets"`
+	}
+	if err := json.Unmarshal(rec.Body.Bytes(), &saveResp); err != nil {
+		t.Fatalf("decode saveResp: %v", err)
+	}
+	if !saveResp.OK || saveResp.SelectedKey != "anchor_round_6_cup" {
+		t.Fatalf("expected selected_key='anchor_round_6_cup', got %+v", saveResp)
+	}
+	if len(saveResp.Presets) != 2 {
+		t.Fatalf("expected 2 presets (default + overwritten), got %d: %+v", len(saveResp.Presets), saveResp.Presets)
+	}
+	if saveResp.Presets[1].Description != "Tighter fit" {
+		t.Fatalf("expected updated description, got %+v", saveResp.Presets[1])
+	}
+
+	// Saving with a distinct name creates a new preset
+	rec = httptest.NewRecorder()
+	srv.Handler().ServeHTTP(rec, httptest.NewRequest(
+		http.MethodPost,
+		"/api/models/lid_demo/presets",
+		bytes.NewBufferString(`{"label":"Anchor Hocking Round 6-Cup (Loose)","description":"Loose variant","scope":"project","params":{"core":{"diameter":188.0}}}`),
+	))
+	if rec.Code != http.StatusOK {
+		t.Fatalf("POST new preset status = %d, body = %s", rec.Code, rec.Body.String())
+	}
+	if err := json.Unmarshal(rec.Body.Bytes(), &saveResp); err != nil {
+		t.Fatalf("decode new saveResp: %v", err)
+	}
+	if !saveResp.OK || saveResp.SelectedKey != "anchor_hocking_round_6_cup_loose" || len(saveResp.Presets) != 3 {
+		t.Fatalf("expected 3 presets with new key, got %+v", saveResp)
+	}
+}

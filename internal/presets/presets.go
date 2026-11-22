@@ -319,7 +319,12 @@ func List(modelID, modelDir string, defaults map[string]any, defaultMeta *Defaul
 		keys = append(keys, k)
 	}
 	sort.Slice(keys, func(i, j int) bool {
-		return strings.ToLower(byKey[keys[i]].Label) < strings.ToLower(byKey[keys[j]].Label)
+		li := strings.ToLower(byKey[keys[i]].Label)
+		lj := strings.ToLower(byKey[keys[j]].Label)
+		if li != lj {
+			return li < lj
+		}
+		return keys[i] < keys[j]
 	})
 
 	defaultLabel := "Base"
@@ -362,21 +367,80 @@ func writePresetFile(path string, entries map[string]PresetEntry) error {
 	return os.WriteFile(path, append(data, '\n'), 0o644)
 }
 
-// Save writes a preset (sparse diff or full snapshot) to either "project" (<modelDir>/presets.json)
-// or "user" (~/.config/...). Saving to "project" also removes any identically keyed user preset
-// so a stale local copy cannot silently shadow the shared project preset.
-func Save(modelID, modelDir, label, description, scope string, fullSnapshot bool, currentParams, defaults map[string]any, verification *Verification) (string, error) {
-	key := Slugify(label)
-	var targetPath string
-	isProject := scope == "project" && modelDir != ""
-	if isProject {
-		targetPath = filepath.Join(modelDir, "presets.json")
-	} else {
-		p, err := userPresetPath(modelID)
-		if err != nil {
-			return "", err
+// findMatchingKey locates an existing non-default preset key matching the given label
+// (case-insensitive trimmed label match first, then slugified key match).
+func findMatchingKey(entries map[string]PresetEntry, label string) (string, bool) {
+	trimmed := strings.TrimSpace(label)
+	if trimmed == "" || len(entries) == 0 {
+		return "", false
+	}
+
+	keys := make([]string, 0, len(entries))
+	for k := range entries {
+		if k == "default" {
+			continue
 		}
-		targetPath = p
+		keys = append(keys, k)
+	}
+	sort.Strings(keys)
+
+	for _, k := range keys {
+		if strings.EqualFold(strings.TrimSpace(entries[k].Label), trimmed) {
+			return k, true
+		}
+	}
+
+	slug := Slugify(trimmed)
+	if slug != "default" {
+		if _, ok := entries[slug]; ok {
+			return slug, true
+		}
+	}
+	return "", false
+}
+
+// Save writes a preset (sparse diff or full snapshot) to either "project" (<modelDir>/presets.json)
+// or "user" (~/.config/...). If a preset with the same name (or slugified key) already exists, its
+// existing key is preserved and updated in-place rather than creating a duplicate entry. Saving to
+// "project" also removes any identically keyed or identically named user preset so a stale local
+// copy cannot silently shadow or duplicate the shared project preset.
+func Save(modelID, modelDir, label, description, scope string, fullSnapshot bool, currentParams, defaults map[string]any, verification *Verification) (string, error) {
+	trimmedLabel := strings.TrimSpace(label)
+	isProject := scope == "project" && modelDir != ""
+
+	var projPath string
+	var projEntries map[string]PresetEntry
+	if modelDir != "" {
+		projPath = filepath.Join(modelDir, "presets.json")
+		projEntries = readPresetFile(projPath)
+	}
+
+	userPath, userErr := userPresetPath(modelID)
+	if !isProject && userErr != nil {
+		return "", userErr
+	}
+	var userEntries map[string]PresetEntry
+	if userErr == nil {
+		userEntries = readPresetFile(userPath)
+	}
+
+	var key string
+	if isProject {
+		if k, ok := findMatchingKey(projEntries, trimmedLabel); ok {
+			key = k
+		} else if k, ok := findMatchingKey(userEntries, trimmedLabel); ok {
+			key = k
+		} else {
+			key = Slugify(trimmedLabel)
+		}
+	} else {
+		if k, ok := findMatchingKey(userEntries, trimmedLabel); ok {
+			key = k
+		} else if k, ok := findMatchingKey(projEntries, trimmedLabel); ok {
+			key = k
+		} else {
+			key = Slugify(trimmedLabel)
+		}
 	}
 
 	var storedParams map[string]any
@@ -386,25 +450,44 @@ func Save(modelID, modelDir, label, description, scope string, fullSnapshot bool
 		storedParams = SparseDiff(currentParams, defaults)
 	}
 
-	existing := readPresetFile(targetPath)
-	existing[key] = PresetEntry{
-		Label:        strings.TrimSpace(label),
+	entry := PresetEntry{
+		Label:        trimmedLabel,
 		Description:  strings.TrimSpace(description),
 		Verification: NormalizeVerification(verification),
 		Params:       storedParams,
 	}
 
-	if err := writePresetFile(targetPath, existing); err != nil {
-		return "", err
-	}
-
 	if isProject {
-		if upath, err := userPresetPath(modelID); err == nil {
-			userEntries := readPresetFile(upath)
-			if _, shadowed := userEntries[key]; shadowed {
-				delete(userEntries, key)
-				_ = writePresetFile(upath, userEntries)
+		if projEntries == nil {
+			projEntries = map[string]PresetEntry{}
+		}
+		projEntries[key] = entry
+		if err := writePresetFile(projPath, projEntries); err != nil {
+			return "", err
+		}
+
+		if userErr == nil && len(userEntries) > 0 {
+			changed := false
+			for uk, ue := range userEntries {
+				if uk == "default" {
+					continue
+				}
+				if uk == key || strings.EqualFold(strings.TrimSpace(ue.Label), trimmedLabel) {
+					delete(userEntries, uk)
+					changed = true
+				}
 			}
+			if changed {
+				_ = writePresetFile(userPath, userEntries)
+			}
+		}
+	} else {
+		if userEntries == nil {
+			userEntries = map[string]PresetEntry{}
+		}
+		userEntries[key] = entry
+		if err := writePresetFile(userPath, userEntries); err != nil {
+			return "", err
 		}
 	}
 
@@ -553,11 +636,19 @@ func Rename(modelID, modelDir, oldKey, scope, newLabel, newDescription string) (
 		return "", errors.New("preset not found in target scope")
 	}
 
-	newKey := Slugify(trimmedLabel)
-	if newKey != oldKey {
-		if _, collision := existing[newKey]; collision {
+	newKey := oldKey
+	if !strings.EqualFold(strings.TrimSpace(entry.Label), trimmedLabel) {
+		newKey = Slugify(trimmedLabel)
+	}
+	for k, e := range existing {
+		if k == oldKey || k == "default" {
+			continue
+		}
+		if k == newKey || strings.EqualFold(strings.TrimSpace(e.Label), trimmedLabel) {
 			return "", errors.New("a preset with that name already exists")
 		}
+	}
+	if newKey != oldKey {
 		delete(existing, oldKey)
 	}
 
