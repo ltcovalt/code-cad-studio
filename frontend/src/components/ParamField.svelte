@@ -2,17 +2,19 @@
   import InfoTooltip from './InfoTooltip.svelte';
   import Self from './ParamField.svelte';
   import { evaluateWhen, getParamByPath, isPlainObject, stepNumber } from '../lib/params';
-  import type { ParamField, ParamsRecord } from '../lib/types';
+  import type { ParamField, ParamsRecord, ParamUpdateMode } from '../lib/types';
 
   interface Props {
     field: ParamField;
     rootParams: ParamsRecord;
     groupParams: ParamsRecord;
     showDescriptions: boolean;
-    onUpdate: (path: string, value: unknown, immediate?: boolean) => void;
+    onUpdate: (path: string, value: unknown, mode?: ParamUpdateMode) => void;
+    onPreviewCommit?: () => void;
   }
 
-  let { field, rootParams, groupParams, showDescriptions, onUpdate }: Props = $props();
+  let { field, rootParams, groupParams, showDescriptions, onUpdate, onPreviewCommit }: Props =
+    $props();
 
   let isVisible = $derived(evaluateWhen(field.when, rootParams, groupParams));
 
@@ -73,35 +75,98 @@
     const trimmed = raw.trim();
     if (trimmed === '') {
       if (field.nullable) {
-        onUpdate(field.path, null, false);
+        onUpdate(field.path, null, 'debounced');
       }
       return;
     }
     const parsed = isInt ? Math.round(Number(trimmed)) : Number(trimmed);
     if (!Number.isFinite(parsed)) return;
-    onUpdate(field.path, parsed, false);
+    onUpdate(field.path, parsed, 'debounced');
   }
 
   function handleStep(direction: -1 | 1) {
     const next = stepNumber(numValue, direction, stepVal, isInt, field.min, field.max);
-    onUpdate(field.path, next, false);
+    onUpdate(field.path, next, 'debounced');
+  }
+
+  let rangePointerDown = false;
+  let rangeDragged = false;
+  let rangeStartValue: number | null = null;
+
+  function parseNumericValue(raw: string): number | null {
+    const parsed = isInt ? Math.round(Number(raw)) : Number(raw);
+    return Number.isFinite(parsed) ? parsed : null;
+  }
+
+  function handleRangePointerDown() {
+    rangePointerDown = true;
+    rangeDragged = false;
+    rangeStartValue = numValue;
+  }
+
+  function handleRangeKeyDown() {
+    rangePointerDown = false;
+    rangeDragged = false;
   }
 
   function handleRangeInput(raw: string) {
-    const parsed = isInt ? Math.round(Number(raw)) : Number(raw);
-    if (!Number.isFinite(parsed)) return;
-    onUpdate(field.path, parsed, false);
+    const parsed = parseNumericValue(raw);
+    if (parsed === null) return;
+    if (rangePointerDown) {
+      // Live-update UI readout and conditional fields while dragging, deferring CAD rebuild to release.
+      rangeDragged = true;
+      onUpdate(field.path, parsed, 'preview');
+    } else {
+      onUpdate(field.path, parsed, 'debounced');
+    }
+  }
+
+  function handleRangeChange(raw: string) {
+    const parsed = parseNumericValue(raw);
+    const wasPointer = rangePointerDown || rangeDragged;
+    rangePointerDown = false;
+    rangeDragged = false;
+    if (parsed === null) return;
+    if (wasPointer) {
+      onUpdate(field.path, parsed, 'immediate');
+    }
+  }
+
+  function handleRangePointerUp(raw: string) {
+    rangePointerDown = false;
+    if (rangeDragged) {
+      const parsed = parseNumericValue(raw);
+      if (parsed !== null && parsed === rangeStartValue) {
+        // Dragged away and returned to the original value: browser will not fire `change`.
+        rangeDragged = false;
+        onPreviewCommit?.();
+      }
+    }
+  }
+
+  function handleRangeCancel(raw: string) {
+    const hadDrag = rangeDragged;
+    rangePointerDown = false;
+    rangeDragged = false;
+    if (hadDrag) {
+      const parsed = parseNumericValue(raw);
+      if (parsed !== null) {
+        onUpdate(field.path, parsed, 'immediate');
+      } else {
+        onPreviewCommit?.();
+      }
+    }
   }
 
   function handleClearNullable() {
-    onUpdate(field.path, null, true);
+    onUpdate(field.path, null, 'immediate');
   }
 
   function handleToggleGroupChange(checked: boolean) {
     if (!toggleChild) return;
     detailsOpen = checked;
     lastToggleState = checked;
-    onUpdate(toggleChild.path, checked, true);
+    onUpdate(toggleChild.path, checked, 'immediate');
   }
 </script>
 
@@ -150,6 +215,7 @@
                 groupParams={childGroupParams}
                 {showDescriptions}
                 {onUpdate}
+                {onPreviewCommit}
               />
             {/each}
           </div>
@@ -178,7 +244,7 @@
             class:btn-primary={currentValue === null || currentValue === undefined}
             class:btn-ghost={currentValue !== null && currentValue !== undefined}
             class:border-base-300={currentValue !== null && currentValue !== undefined}
-            onclick={() => onUpdate(field.path, null, true)}
+            onclick={() => onUpdate(field.path, null, 'immediate')}
           >
             Auto
           </button>
@@ -188,7 +254,7 @@
             class:btn-primary={currentValue === true}
             class:btn-ghost={currentValue !== true}
             class:border-base-300={currentValue !== true}
-            onclick={() => onUpdate(field.path, true, true)}
+            onclick={() => onUpdate(field.path, true, 'immediate')}
           >
             On
           </button>
@@ -198,7 +264,7 @@
             class:btn-primary={currentValue === false}
             class:btn-ghost={currentValue !== false}
             class:border-base-300={currentValue !== false}
-            onclick={() => onUpdate(field.path, false, true)}
+            onclick={() => onUpdate(field.path, false, 'immediate')}
           >
             Off
           </button>
@@ -227,7 +293,8 @@
           type="checkbox"
           class="toggle toggle-primary toggle-xs shrink-0"
           checked={Boolean(currentValue)}
-          onchange={(e) => onUpdate(field.path, (e.currentTarget as HTMLInputElement).checked, true)}
+          onchange={(e) =>
+            onUpdate(field.path, (e.currentTarget as HTMLInputElement).checked, 'immediate')}
         />
       </div>
       {#if field.description && showDescriptions}
@@ -253,7 +320,7 @@
         value={currentValue === null || currentValue === undefined ? '' : String(currentValue)}
         onchange={(e) => {
           const v = (e.currentTarget as HTMLSelectElement).value;
-          onUpdate(field.path, field.nullable && v === '' ? null : v, true);
+          onUpdate(field.path, field.nullable && v === '' ? null : v, 'immediate');
         }}
       >
         {#if field.nullable}
@@ -335,7 +402,13 @@
           value={rangeValue}
           class="range range-primary range-xs w-full mt-1.5"
           class:opacity-40={field.nullable && numValue === null}
+          onpointerdown={handleRangePointerDown}
+          onkeydown={handleRangeKeyDown}
           oninput={(e) => handleRangeInput((e.currentTarget as HTMLInputElement).value)}
+          onchange={(e) => handleRangeChange((e.currentTarget as HTMLInputElement).value)}
+          onpointerup={(e) => handleRangePointerUp((e.currentTarget as HTMLInputElement).value)}
+          onpointercancel={(e) => handleRangeCancel((e.currentTarget as HTMLInputElement).value)}
+          onblur={(e) => handleRangeCancel((e.currentTarget as HTMLInputElement).value)}
         />
       {/if}
       {#if field.description && showDescriptions}
@@ -367,7 +440,7 @@
         class="input input-bordered input-xs w-full"
         oninput={(e) => {
           const v = (e.currentTarget as HTMLInputElement).value;
-          onUpdate(field.path, field.nullable && v === '' ? null : v, false);
+          onUpdate(field.path, field.nullable && v === '' ? null : v, 'debounced');
         }}
       />
       {#if field.description && showDescriptions}

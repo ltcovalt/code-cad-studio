@@ -2,8 +2,10 @@
   import { onMount } from 'svelte';
   import CadViewport from './components/CadViewport.svelte';
   import Header from './components/Header.svelte';
+  import ManagePresetsModal from './components/ManagePresetsModal.svelte';
   import ModelSidebar from './components/ModelSidebar.svelte';
   import ModelWorkspace from './components/ModelWorkspace.svelte';
+  import SavePresetModal from './components/SavePresetModal.svelte';
   import SettingsModal from './components/SettingsModal.svelte';
   import { studio } from './lib/studioState.svelte';
   import type { LayoutMode, LayoutState } from './lib/types';
@@ -266,3 +268,5 @@
 </div>
 
 <SettingsModal />
+<SavePresetModal />
+<ManagePresetsModal />

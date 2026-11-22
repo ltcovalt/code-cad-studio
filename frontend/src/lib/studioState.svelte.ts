@@ -7,13 +7,15 @@ import type {
   ModelInfo,
   ParamField,
   ParamsRecord,
+  ParamUpdateMode,
   Preset,
   StatusState,
+  UpdateDefaultsResponse,
 } from './types';
 
 const THEME_STORAGE_KEY = 'code-cad-theme';
 const DESCRIPTIONS_STORAGE_KEY = 'code-cad-show-descriptions';
-const RENDER_DEBOUNCE_MS = 80;
+const RENDER_DEBOUNCE_MS = 180;
 
 function loadShowDescriptions(): boolean {
   try {
@@ -33,6 +35,8 @@ class StudioState {
   theme = $state('dark');
   showDescriptions = $state(loadShowDescriptions());
   settingsOpen = $state(false);
+  savePresetModalOpen = $state(false);
+  managePresetsModalOpen = $state(false);
   reloadedVisible = $state(false);
 
   // Models list
@@ -64,6 +68,7 @@ class StudioState {
   params = $state<ParamsRecord>({});
   presets = $state<Preset[]>([]);
   selectedPresetKey = $state('default');
+  defaultPresetKey = $state('');
   exportFilename = $state('');
 
   // Render & status
@@ -75,8 +80,7 @@ class StudioState {
   private viewport: CadViewportController | null = null;
   private latestRenderSeq = 0;
   private renderAbort: AbortController | null = null;
-  private renderInFlight = false;
-  private pendingCoalescedRender = false;
+  private lastRenderedKey = '';
   private debounceTimer: ReturnType<typeof setTimeout> | null = null;
   private reloadBadgeTimer: ReturnType<typeof setTimeout> | null = null;
   private unsubscribeSSE: (() => void) | null = null;
@@ -133,9 +137,9 @@ class StudioState {
   private applyThemeDom(themeName: string): void {
     const t = themeName || 'dark';
     this.theme = t;
-    this.viewport?.setTheme(t);
     document.documentElement.setAttribute('data-theme', t);
-    document.body.setAttribute('data-theme', t);
+    document.body.removeAttribute('data-theme');
+    this.viewport?.setTheme(t);
     try {
       localStorage.setItem(THEME_STORAGE_KEY, t);
     } catch {
@@ -201,6 +205,7 @@ class StudioState {
       this.presets = [];
       this.modelLoadError = '';
       this.modelLoadTraceback = '';
+      this.lastRenderedKey = '';
       this.status = { kind: 'idle' };
     }
     await this.refreshModels();
@@ -257,13 +262,25 @@ class StudioState {
       this.modelDescription = resp.description ?? '';
       this.fields = resp.fields ?? [];
       this.defaults = deepClone(resp.defaults ?? {});
-      this.params = deepClone(resp.defaults ?? {});
       this.presets = resp.presets ?? [];
-      this.selectedPresetKey = 'default';
+      this.defaultPresetKey = resp.default_preset_key ?? '';
+
+      const pinned = this.defaultPresetKey
+        ? this.presets.find((p) => p.key === this.defaultPresetKey)
+        : undefined;
+      if (pinned) {
+        this.selectedPresetKey = pinned.key;
+        this.params = mergeWithDefaults(this.defaults, pinned.params);
+      } else {
+        this.selectedPresetKey = 'default';
+        this.params = deepClone(this.defaults);
+      }
+
       this.exportFilename = modelId;
+      this.lastRenderedKey = '';
       this.modelLoading = false;
 
-      await this.triggerRender(isDifferentModel);
+      await this.triggerRender(isDifferentModel, true);
     } catch (err) {
       if (this.activeModelId !== modelId) return;
       this.modelLoadError = err instanceof Error ? err.message : String(err);
@@ -284,33 +301,38 @@ class StudioState {
   }
 
   resetParams(): void {
-    this.selectedPresetKey = 'default';
-    this.params = deepClone(this.defaults);
-    void this.triggerRender(false);
+    this.selectPreset(this.selectedPresetKey);
   }
 
-  updateParam(path: string, value: unknown, immediate = false): void {
+  private makeRenderKey(modelId: string, params: ParamsRecord): string {
+    return `${modelId}:${JSON.stringify(params)}`;
+  }
+
+  updateParam(path: string, value: unknown, mode: ParamUpdateMode = 'debounced'): void {
     this.params = setParamByPath(this.params, path, value);
-    if (immediate) {
-      if (this.debounceTimer) {
-        clearTimeout(this.debounceTimer);
-        this.debounceTimer = null;
-      }
-      if (this.renderInFlight) {
-        this.pendingCoalescedRender = true;
-        return;
-      }
-      void this.triggerRender(false, false);
-    } else {
-      if (this.debounceTimer) clearTimeout(this.debounceTimer);
-      this.debounceTimer = setTimeout(() => {
-        this.debounceTimer = null;
-        if (this.renderInFlight) {
-          this.pendingCoalescedRender = true;
-          return;
-        }
-        void this.triggerRender(false, false);
-      }, RENDER_DEBOUNCE_MS);
+    if (this.debounceTimer) {
+      clearTimeout(this.debounceTimer);
+      this.debounceTimer = null;
+    }
+    if (mode === 'preview') {
+      return;
+    }
+    if (mode === 'immediate') {
+      void this.triggerRender(false);
+      return;
+    }
+    this.debounceTimer = setTimeout(() => {
+      this.debounceTimer = null;
+      void this.triggerRender(false);
+    }, RENDER_DEBOUNCE_MS);
+  }
+
+  commitPreviewIfStale(): void {
+    const modelId = this.activeModelId;
+    if (!modelId || this.rendering || this.debounceTimer) return;
+    const currentKey = this.makeRenderKey(modelId, this.params);
+    if (currentKey !== this.lastRenderedKey) {
+      void this.triggerRender(false);
     }
   }
 
@@ -319,37 +341,52 @@ class StudioState {
       clearTimeout(this.debounceTimer);
       this.debounceTimer = null;
     }
-    this.pendingCoalescedRender = false;
     if (this.renderAbort) {
       this.renderAbort.abort();
       this.renderAbort = null;
     }
-    this.renderInFlight = false;
   }
 
-  async triggerRender(resetCamera: boolean, forceAbort = true): Promise<void> {
+  async triggerRender(resetCamera: boolean, force = false): Promise<void> {
     const modelId = this.activeModelId;
     if (!modelId) return;
 
-    if (forceAbort) {
-      this.cancelPendingRender();
-    } else if (this.debounceTimer) {
-      clearTimeout(this.debounceTimer);
-      this.debounceTimer = null;
+    const paramsSnapshot = deepClone(this.params);
+    const renderKey = this.makeRenderKey(modelId, paramsSnapshot);
+
+    if (!force && !resetCamera && renderKey === this.lastRenderedKey) {
+      if (this.debounceTimer) {
+        clearTimeout(this.debounceTimer);
+        this.debounceTimer = null;
+      }
+      if (this.renderAbort) {
+        this.renderAbort.abort();
+        this.renderAbort = null;
+        this.latestRenderSeq++;
+        this.rendering = false;
+      }
+      return;
     }
+
+    // Always abort any superseded in-flight request and immediately send the latest
+    // params so worker.py bumps _render_seq and skips tessellating stale builds.
+    this.cancelPendingRender();
 
     const seq = ++this.latestRenderSeq;
     const abort = new AbortController();
     this.renderAbort = abort;
-    this.renderInFlight = true;
     this.rendering = true;
 
     try {
-      const resp = await api.renderModel(modelId, this.params, abort.signal);
-      if (seq !== this.latestRenderSeq) return;
-      if (resp.superseded) return;
+      const resp = await api.renderModel(modelId, paramsSnapshot, abort.signal);
+      if (seq !== this.latestRenderSeq || resp.superseded) return;
+      if (this.activeModelId !== modelId) return;
+
+      // Discard results if the user has already started editing newer params (e.g., slider drag)
+      if (this.makeRenderKey(modelId, this.params) !== renderKey) return;
 
       if (!resp.ok) {
+        this.lastRenderedKey = '';
         this.status = {
           kind: 'error',
           error: resp.error || 'Model build failed',
@@ -358,6 +395,7 @@ class StudioState {
         return;
       }
 
+      this.lastRenderedKey = renderKey;
       if (resp.export_filename) {
         this.exportFilename = resp.export_filename;
       }
@@ -376,23 +414,27 @@ class StudioState {
       };
     } catch (err) {
       if (abort.signal.aborted || seq !== this.latestRenderSeq) return;
+      if (this.activeModelId !== modelId) return;
+      if (this.makeRenderKey(modelId, this.params) !== renderKey) return;
+      this.lastRenderedKey = '';
       this.status = {
         kind: 'error',
         error: err instanceof Error ? err.message : String(err),
       };
     } finally {
       if (seq === this.latestRenderSeq) {
-        this.renderInFlight = false;
+        this.renderAbort = null;
         this.rendering = false;
-        if (this.pendingCoalescedRender && this.activeModelId === modelId) {
-          this.pendingCoalescedRender = false;
-          void this.triggerRender(false, false);
-        }
       }
     }
   }
 
-  async savePreset(label: string, description: string, scope: string): Promise<string | null> {
+  async savePreset(
+    label: string,
+    description: string,
+    scope: string,
+    fullSnapshot = false
+  ): Promise<{ key: string; message: string } | null> {
     const modelId = this.activeModelId;
     if (!modelId) return null;
 
@@ -400,6 +442,7 @@ class StudioState {
       label,
       description,
       scope,
+      full_snapshot: fullSnapshot,
       params: this.params,
     });
     if (!resp.ok) {
@@ -411,7 +454,128 @@ class StudioState {
     if (resp.selected_key) {
       this.selectedPresetKey = resp.selected_key;
     }
-    return `Saved preset "${label.trim()}"`;
+    if (resp.preset_save_scope) {
+      this.config = { ...this.config, preset_save_scope: resp.preset_save_scope };
+    }
+    return {
+      key: resp.selected_key ?? '',
+      message: `Saved preset "${label.trim()}"`,
+    };
+  }
+
+  async deletePreset(key: string, scope: string): Promise<void> {
+    const modelId = this.activeModelId;
+    if (!modelId) return;
+
+    const resp = await api.deletePreset(modelId, key, scope);
+    if (!resp.ok) {
+      throw new Error(resp.error || 'Failed to delete preset');
+    }
+    if (resp.presets) {
+      this.presets = resp.presets;
+    }
+    this.defaultPresetKey = resp.default_preset_key ?? '';
+    if (this.selectedPresetKey === key) {
+      const stillPresent = this.presets.find((p) => p.key === key);
+      if (stillPresent) {
+        this.params = mergeWithDefaults(this.defaults, stillPresent.params);
+      } else {
+        this.selectedPresetKey = 'default';
+        this.params = deepClone(this.defaults);
+      }
+      void this.triggerRender(false);
+    }
+  }
+
+  async renamePreset(
+    oldKey: string,
+    scope: string,
+    label: string,
+    description: string
+  ): Promise<string> {
+    const modelId = this.activeModelId;
+    if (!modelId) return oldKey;
+
+    const resp = await api.renamePreset(modelId, oldKey, { scope, label, description });
+    if (!resp.ok) {
+      throw new Error(resp.error || 'Failed to rename preset');
+    }
+    if (resp.presets) {
+      this.presets = resp.presets;
+    }
+    const newKey = resp.key || oldKey;
+    if (this.selectedPresetKey === oldKey) {
+      this.selectedPresetKey = newKey;
+    }
+    if (resp.default_preset_key !== undefined) {
+      this.defaultPresetKey = resp.default_preset_key;
+      const nextMap = { ...(this.config.default_presets ?? {}) };
+      if (this.defaultPresetKey) {
+        nextMap[modelId] = this.defaultPresetKey;
+      } else {
+        delete nextMap[modelId];
+      }
+      this.config = { ...this.config, default_presets: nextMap };
+    }
+    return newKey;
+  }
+
+  async setDefaultPreset(key: string): Promise<void> {
+    const modelId = this.activeModelId;
+    if (!modelId) return;
+
+    const resp = await api.setDefaultPreset(modelId, key);
+    if (!resp.ok) {
+      throw new Error(resp.error || 'Failed to set default preset');
+    }
+    this.defaultPresetKey = resp.default_preset_key ?? '';
+    const nextMap = { ...(this.config.default_presets ?? {}) };
+    if (this.defaultPresetKey) {
+      nextMap[modelId] = this.defaultPresetKey;
+    } else {
+      delete nextMap[modelId];
+    }
+    this.config = { ...this.config, default_presets: nextMap };
+  }
+
+  async previewUpdateDefaults(): Promise<UpdateDefaultsResponse> {
+    const modelId = this.activeModelId;
+    if (!modelId) {
+      throw new Error('No active model');
+    }
+    return api.updateModelDefaults(modelId, {
+      params: this.params,
+      dry_run: true,
+    });
+  }
+
+  async applyUpdateDefaults(expectedSha256: string): Promise<UpdateDefaultsResponse> {
+    const modelId = this.activeModelId;
+    if (!modelId) {
+      throw new Error('No active model');
+    }
+    const resp = await api.updateModelDefaults(modelId, {
+      params: this.params,
+      dry_run: false,
+      expected_sha256: expectedSha256,
+    });
+    if (!resp.ok) {
+      throw new Error(resp.error || 'Failed to update model defaults');
+    }
+    // Refresh schema/defaults immediately so UI matches updated Python file
+    const schemaResp = await api.getModel(modelId);
+    if (this.activeModelId === modelId && schemaResp.ok && schemaResp.model) {
+      this.activeModel = schemaResp.model;
+      this.modelDescription = schemaResp.description ?? '';
+      this.fields = schemaResp.fields ?? [];
+      this.defaults = deepClone(schemaResp.defaults ?? {});
+      this.params = deepClone(schemaResp.defaults ?? {});
+      this.presets = schemaResp.presets ?? [];
+      this.selectedPresetKey = 'default';
+      this.lastRenderedKey = '';
+      void this.triggerRender(false, true);
+    }
+    return resp;
   }
 
   async exportActiveModel(format: ExportFormat): Promise<void> {
@@ -480,8 +644,9 @@ class StudioState {
       this.presets = resp.presets ?? [];
       this.modelLoadError = '';
       this.modelLoadTraceback = '';
+      this.lastRenderedKey = '';
 
-      await this.triggerRender(false);
+      await this.triggerRender(false, true);
     } catch (err) {
       if (this.activeModelId !== modelId) return;
       this.status = {

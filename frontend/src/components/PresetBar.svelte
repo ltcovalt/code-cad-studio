@@ -1,117 +1,132 @@
 <script lang="ts">
   import { studio } from '../lib/studioState.svelte';
 
-  let drawerOpen = $state(false);
-  let label = $state('');
-  let description = $state('');
-  let scope = $state<'user' | 'project'>('user');
-  let saving = $state(false);
-  let savedMessage = $state('');
-  let saveError = $state('');
+  const selectedPreset = $derived(
+    studio.presets.find((p) => p.key === studio.selectedPresetKey) ?? null
+  );
 
-  async function handleSave() {
-    if (!label.trim()) {
-      saveError = 'Preset name is required';
-      return;
-    }
-    saving = true;
-    saveError = '';
-    savedMessage = '';
-    try {
-      const msg = await studio.savePreset(label.trim(), description.trim(), scope);
-      if (msg) {
-        savedMessage = msg;
-        label = '';
-        description = '';
-        drawerOpen = false;
-      }
-    } catch (err) {
-      saveError = err instanceof Error ? err.message : String(err);
-    } finally {
-      saving = false;
-    }
+  function formatPresetOption(preset: { key: string; label: string; source: string }): string {
+    const isStartupDefault =
+      studio.defaultPresetKey !== ''
+        ? preset.key === studio.defaultPresetKey
+        : preset.key === 'default';
+    const tags: string[] = [];
+    if (preset.source === 'user') tags.push('user');
+    if (isStartupDefault) tags.push('default');
+    return tags.length > 0 ? `${preset.label} (${tags.join(', ')})` : preset.label;
   }
 </script>
 
-<div class="space-y-2">
-  <div class="flex items-center gap-1.5 min-w-0">
+<div class="flex items-center gap-1 min-w-0">
+  <div class="relative flex-1 min-w-0">
     <select
       aria-label="Preset"
-      class="select select-bordered select-xs flex-1 min-w-0"
+      title={selectedPreset?.description || selectedPreset?.label || undefined}
+      class="select select-bordered select-xs h-7 min-h-7 w-full min-w-0 pl-2 pr-8 truncate !bg-none"
       value={studio.selectedPresetKey}
       onchange={(e) => studio.selectPreset((e.currentTarget as HTMLSelectElement).value)}
     >
       {#each studio.presets as preset (preset.key)}
-        <option value={preset.key}>
-          {preset.label}{preset.source === 'user' ? ' (local)' : ''}
+        <option value={preset.key} title={preset.description || undefined}>
+          {formatPresetOption(preset)}
         </option>
       {/each}
     </select>
-
-    <button
-      type="button"
-      class="btn btn-ghost btn-xs shrink-0"
-      title="Reset all parameters to canonical dataclass defaults"
-      onclick={() => {
-        savedMessage = '';
-        studio.resetParams();
-      }}
+    <span
+      class="pointer-events-none absolute inset-y-[3px] right-[3px] flex items-center pl-2.5 pr-1.5 bg-gradient-to-l from-base-100 via-base-100 via-70% to-transparent text-base-content/75"
+      aria-hidden="true"
     >
-      Reset
-    </button>
-
-    <button
-      type="button"
-      class="btn btn-outline btn-xs shrink-0"
-      title="Save current parameters as a preset"
-      onclick={() => {
-        drawerOpen = !drawerOpen;
-        saveError = '';
-      }}
-    >
-      Save
-    </button>
+      <svg
+        xmlns="http://www.w3.org/2000/svg"
+        class="h-3 w-3"
+        viewBox="0 0 24 24"
+        fill="none"
+        stroke="currentColor"
+        stroke-width="2.25"
+        stroke-linecap="round"
+        stroke-linejoin="round"
+      >
+        <path d="m6 9 6 6 6-6" />
+      </svg>
+    </span>
   </div>
 
-  {#if savedMessage}
-    <div class="text-[11px] text-success">{savedMessage}</div>
-  {/if}
+  <button
+    type="button"
+    class="btn btn-ghost btn-xs btn-square h-7 w-7 min-h-7 shrink-0 opacity-75 hover:opacity-100"
+    aria-label={selectedPreset
+      ? `Reset parameters to ${selectedPreset.label}`
+      : 'Reset parameters to selected preset'}
+    title={selectedPreset
+      ? `Reset parameters to "${selectedPreset.label}"`
+      : 'Reset parameters to selected preset'}
+    onclick={() => studio.resetParams()}
+  >
+    <svg
+      xmlns="http://www.w3.org/2000/svg"
+      class="h-3.5 w-3.5"
+      viewBox="0 0 24 24"
+      fill="none"
+      stroke="currentColor"
+      stroke-width="2"
+      stroke-linecap="round"
+      stroke-linejoin="round"
+      aria-hidden="true"
+    >
+      <path d="M3 12a9 9 0 1 0 9-9 9.75 9.75 0 0 0-6.74 2.74L3 8" />
+      <path d="M3 3v5h5" />
+    </svg>
+  </button>
 
-  {#if drawerOpen}
-    <div class="p-2 rounded-box bg-base-200 border border-base-300 space-y-1.5">
-      <input
-        type="text"
-        bind:value={label}
-        placeholder="Preset name (e.g. Prusa 12.7mm)"
-        class="input input-bordered input-xs w-full"
-      />
-      <input
-        type="text"
-        bind:value={description}
-        placeholder="Short description (optional)"
-        class="input input-bordered input-xs w-full"
-      />
-      {#if saveError}
-        <div class="text-[11px] text-error">{saveError}</div>
-      {/if}
-      <div class="flex items-center justify-between gap-2">
-        <select bind:value={scope} class="select select-bordered select-xs">
-          <option value="user">User local (~/.config)</option>
-          <option value="project">Project presets.json</option>
-        </select>
-        <button
-          type="button"
-          class="btn btn-primary btn-xs"
-          disabled={saving}
-          onclick={handleSave}
-        >
-          {#if saving}
-            <span class="loading loading-spinner loading-xs"></span>
-          {:else}
-            Save Preset
-          {/if}
-        </button>
-      </div>
-    </div>
-  {/if}
+  <button
+    type="button"
+    class="btn btn-ghost btn-xs btn-square h-7 w-7 min-h-7 shrink-0 opacity-75 hover:opacity-100"
+    aria-label="Save preset"
+    title="Save current parameters as a preset"
+    onclick={() => {
+      studio.savePresetModalOpen = true;
+    }}
+  >
+    <svg
+      xmlns="http://www.w3.org/2000/svg"
+      class="h-3.5 w-3.5"
+      viewBox="0 0 24 24"
+      fill="none"
+      stroke="currentColor"
+      stroke-width="2"
+      stroke-linecap="round"
+      stroke-linejoin="round"
+      aria-hidden="true"
+    >
+      <path d="M15.2 3a2 2 0 0 1 1.4.6l3.8 3.8a2 2 0 0 1 .6 1.4V19a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2z" />
+      <path d="M17 21v-7a1 1 0 0 0-1-1H8a1 1 0 0 0-1 1v7" />
+      <path d="M7 3v4a1 1 0 0 0 1 1h7" />
+    </svg>
+  </button>
+
+  <button
+    type="button"
+    class="btn btn-ghost btn-xs btn-square h-7 w-7 min-h-7 shrink-0 opacity-75 hover:opacity-100"
+    aria-label="Manage presets"
+    title="Manage presets & source file defaults"
+    onclick={() => {
+      studio.managePresetsModalOpen = true;
+    }}
+  >
+    <svg
+      xmlns="http://www.w3.org/2000/svg"
+      class="h-3.5 w-3.5"
+      viewBox="0 0 24 24"
+      fill="none"
+      stroke="currentColor"
+      stroke-width="2"
+      stroke-linecap="round"
+      stroke-linejoin="round"
+      aria-hidden="true"
+    >
+      <circle cx="12" cy="12" r="1" />
+      <circle cx="19" cy="12" r="1" />
+      <circle cx="5" cy="12" r="1" />
+    </svg>
+  </button>
 </div>

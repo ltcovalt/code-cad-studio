@@ -1,5 +1,6 @@
 import type {
   ConfigResponse,
+  DeletePresetResponse,
   DialogResponse,
   ExportFormat,
   ExportResult,
@@ -8,8 +9,11 @@ import type {
   ModelsResponse,
   ParamsRecord,
   PresetsResponse,
+  RenamePresetResponse,
   RenderResponse,
   SavePresetResponse,
+  SetDefaultPresetResponse,
+  UpdateDefaultsResponse,
 } from './types';
 
 async function fetchJSON<T>(url: string, init?: RequestInit): Promise<T> {
@@ -169,12 +173,70 @@ export function getPresets(modelId: string): Promise<PresetsResponse> {
 
 export function savePreset(
   modelId: string,
-  payload: { label: string; description: string; scope: string; params: ParamsRecord }
+  payload: {
+    label: string;
+    description: string;
+    scope: string;
+    full_snapshot?: boolean;
+    params: ParamsRecord;
+  }
 ): Promise<SavePresetResponse> {
   return fetchJSON<SavePresetResponse>(`/api/models/${encodeURIComponent(modelId)}/presets`, {
     method: 'POST',
     body: JSON.stringify(payload),
   });
+}
+
+export function deletePreset(
+  modelId: string,
+  key: string,
+  scope: string
+): Promise<DeletePresetResponse> {
+  const qs = `?scope=${encodeURIComponent(scope)}`;
+  return fetchJSON<DeletePresetResponse>(
+    `/api/models/${encodeURIComponent(modelId)}/presets/${encodeURIComponent(key)}${qs}`,
+    { method: 'DELETE' }
+  );
+}
+
+export function renamePreset(
+  modelId: string,
+  key: string,
+  payload: { scope: string; label: string; description: string }
+): Promise<RenamePresetResponse> {
+  return fetchJSON<RenamePresetResponse>(
+    `/api/models/${encodeURIComponent(modelId)}/presets/${encodeURIComponent(key)}`,
+    {
+      method: 'PATCH',
+      body: JSON.stringify(payload),
+    }
+  );
+}
+
+export function setDefaultPreset(
+  modelId: string,
+  key: string
+): Promise<SetDefaultPresetResponse> {
+  return fetchJSON<SetDefaultPresetResponse>(
+    `/api/models/${encodeURIComponent(modelId)}/presets/default`,
+    {
+      method: 'POST',
+      body: JSON.stringify({ key }),
+    }
+  );
+}
+
+export function updateModelDefaults(
+  modelId: string,
+  payload: { params: ParamsRecord; dry_run: boolean; expected_sha256?: string }
+): Promise<UpdateDefaultsResponse> {
+  return fetchJSON<UpdateDefaultsResponse>(
+    `/api/models/${encodeURIComponent(modelId)}/update-defaults`,
+    {
+      method: 'POST',
+      body: JSON.stringify(payload),
+    }
+  );
 }
 
 export interface SSEHandlers {

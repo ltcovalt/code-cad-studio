@@ -115,7 +115,8 @@
                     rootParams={studio.params}
                     groupParams={studio.params}
                     showDescriptions={studio.showDescriptions}
-                    onUpdate={(path, val, immediate) => studio.updateParam(path, val, immediate)}
+                    onUpdate={(path, val, mode) => studio.updateParam(path, val, mode)}
+                    onPreviewCommit={() => studio.commitPreviewIfStale()}
                   />
                 {/each}
               </div>
@@ -129,7 +130,8 @@
             rootParams={studio.params}
             groupParams={studio.params}
             showDescriptions={studio.showDescriptions}
-            onUpdate={(path, val, immediate) => studio.updateParam(path, val, immediate)}
+            onUpdate={(path, val, mode) => studio.updateParam(path, val, mode)}
+            onPreviewCommit={() => studio.commitPreviewIfStale()}
           />
         {/each}
       </div>

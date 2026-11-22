@@ -2,6 +2,8 @@ export interface Config {
   project_root: string;
   python_path: string;
   theme: string;
+  preset_save_scope?: 'user' | 'project' | string;
+  default_presets?: Record<string, string>;
 }
 
 export interface HealthResponse {
@@ -77,6 +79,8 @@ export interface ParamField {
 
 export type ParamsRecord = Record<string, unknown>;
 
+export type ParamUpdateMode = 'debounced' | 'immediate' | 'preview';
+
 export interface Preset {
   key: string;
   label: string;
@@ -92,6 +96,7 @@ export interface ModelDetailResponse {
   fields?: ParamField[];
   defaults?: ParamsRecord;
   presets?: Preset[];
+  default_preset_key?: string;
   error?: string;
   traceback?: string;
 }
@@ -134,6 +139,7 @@ export interface ExportResult {
 export interface PresetsResponse {
   ok: boolean;
   presets: Preset[];
+  default_preset_key?: string;
   error?: string;
 }
 
@@ -141,7 +147,55 @@ export interface SavePresetResponse {
   ok: boolean;
   selected_key?: string;
   presets?: Preset[];
+  preset_save_scope?: string;
   error?: string;
+}
+
+export interface DeletePresetResponse {
+  ok: boolean;
+  presets?: Preset[];
+  default_preset_key?: string;
+  error?: string;
+}
+
+export interface RenamePresetResponse {
+  ok: boolean;
+  key?: string;
+  presets?: Preset[];
+  default_preset_key?: string;
+  error?: string;
+}
+
+export interface SetDefaultPresetResponse {
+  ok: boolean;
+  default_preset_key?: string;
+  error?: string;
+}
+
+export interface DefaultChange {
+  path: string;
+  line: number;
+  old_value: unknown;
+  new_value: unknown;
+  old_literal: string;
+  new_literal: string;
+}
+
+export interface UnsupportedDefaultChange {
+  path: string;
+  reason: string;
+}
+
+export interface UpdateDefaultsResponse {
+  ok: boolean;
+  file?: string;
+  rel_path?: string;
+  sha256?: string;
+  updated?: number;
+  changes: DefaultChange[];
+  unsupported: UnsupportedDefaultChange[];
+  error?: string;
+  traceback?: string;
 }
 
 export type LayoutMode = 'stacked' | 'side-by-side' | 'right';
