@@ -533,11 +533,12 @@ func (s *Server) handleGetPresets(w http.ResponseWriter, r *http.Request) {
 func (s *Server) handleSavePreset(w http.ResponseWriter, r *http.Request) {
 	modelID := r.PathValue("id")
 	var req struct {
-		Label        string         `json:"label"`
-		Description  string         `json:"description"`
-		Scope        string         `json:"scope"`
-		FullSnapshot bool           `json:"full_snapshot"`
-		Params       map[string]any `json:"params"`
+		Label        string                `json:"label"`
+		Description  string                `json:"description"`
+		Scope        string                `json:"scope"`
+		FullSnapshot bool                  `json:"full_snapshot"`
+		Params       map[string]any        `json:"params"`
+		Verification *presets.Verification `json:"verification,omitempty"`
 	}
 	if err := decodeJSON(r, &req); err != nil {
 		writeJSON(w, http.StatusBadRequest, map[string]any{"ok": false, "error": "invalid JSON body"})
@@ -550,6 +551,19 @@ func (s *Server) handleSavePreset(w http.ResponseWriter, r *http.Request) {
 	}
 	if req.Params == nil {
 		req.Params = map[string]any{}
+	}
+
+	var verification *presets.Verification
+	if req.Verification != nil {
+		status, err := presets.ParseVerificationStatus(string(req.Verification.Status))
+		if err != nil {
+			writeJSON(w, http.StatusBadRequest, map[string]any{"ok": false, "error": err.Error()})
+			return
+		}
+		verification = presets.NormalizeVerification(&presets.Verification{
+			Status: status,
+			Note:   req.Verification.Note,
+		})
 	}
 
 	scope := strings.TrimSpace(req.Scope)
@@ -577,6 +591,7 @@ func (s *Server) handleSavePreset(w http.ResponseWriter, r *http.Request) {
 		req.FullSnapshot,
 		req.Params,
 		schema.Defaults,
+		verification,
 	)
 	if err != nil {
 		writeJSON(w, http.StatusInternalServerError, map[string]any{"ok": false, "error": err.Error()})
@@ -593,6 +608,58 @@ func (s *Server) handleSavePreset(w http.ResponseWriter, r *http.Request) {
 		"selected_key":      key,
 		"presets":           presetList,
 		"preset_save_scope": scope,
+	})
+}
+
+func (s *Server) handleSetPresetVerification(w http.ResponseWriter, r *http.Request) {
+	modelID := r.PathValue("id")
+	key := strings.TrimSpace(r.PathValue("key"))
+	var req struct {
+		Scope  string `json:"scope"`
+		Status string `json:"status"`
+		Note   string `json:"note"`
+	}
+	if err := decodeJSON(r, &req); err != nil {
+		writeJSON(w, http.StatusBadRequest, map[string]any{"ok": false, "error": "invalid JSON body"})
+		return
+	}
+
+	status, err := presets.ParseVerificationStatus(req.Status)
+	if err != nil {
+		writeJSON(w, http.StatusBadRequest, map[string]any{"ok": false, "error": err.Error()})
+		return
+	}
+
+	scope := strings.TrimSpace(req.Scope)
+	if key == "default" {
+		scope = "default"
+	} else if scope != "project" {
+		scope = "user"
+	}
+
+	if err := s.ensureWorkerRunning(r.Context()); err != nil {
+		writeJSON(w, http.StatusInternalServerError, map[string]any{"ok": false, "error": err.Error()})
+		return
+	}
+	schema, err := s.worker.GetSchema(r.Context(), modelID)
+	if err != nil || !schema.OK {
+		writeJSON(w, http.StatusInternalServerError, map[string]any{"ok": false, "error": "failed to load model schema"})
+		return
+	}
+
+	err = presets.SetVerification(modelID, schema.Model.Dir, key, scope, &presets.Verification{
+		Status: status,
+		Note:   req.Note,
+	})
+	if err != nil {
+		writeJSON(w, http.StatusBadRequest, map[string]any{"ok": false, "error": err.Error()})
+		return
+	}
+
+	presetList := presets.List(modelID, schema.Model.Dir, schema.Defaults, schemaDefaultPresetMeta(schema))
+	writeJSON(w, http.StatusOK, map[string]any{
+		"ok":      true,
+		"presets": presetList,
 	})
 }
 
@@ -760,6 +827,9 @@ func (s *Server) handleUpdateModelDefaults(w http.ResponseWriter, r *http.Reques
 	if err != nil {
 		writeJSON(w, http.StatusInternalServerError, map[string]any{"ok": false, "error": err.Error()})
 		return
+	}
+	if !req.DryRun && resp.OK && resp.Updated > 0 && resp.File != "" {
+		_ = presets.DowngradeDefaultVerification(filepath.Dir(resp.File))
 	}
 	if resp.Changes == nil {
 		resp.Changes = []worker.DefaultChange{}

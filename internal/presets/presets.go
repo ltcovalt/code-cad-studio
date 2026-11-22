@@ -13,11 +13,65 @@ import (
 	"github.com/ltcovalt/code-cad-studio/internal/config"
 )
 
+// VerificationStatus describes the print-testing state of a preset.
+type VerificationStatus string
+
+const (
+	StatusUnverified VerificationStatus = "unverified"
+	StatusUnusable   VerificationStatus = "unusable"
+	StatusUsable     VerificationStatus = "usable"
+	StatusVerified   VerificationStatus = "verified"
+)
+
+// Verification tracks physical print-testing status and free-text notes for a preset.
+type Verification struct {
+	Status VerificationStatus `json:"status"`
+	Note   string             `json:"note,omitempty"`
+}
+
+// ParseVerificationStatus validates a raw status string. Empty string maps to StatusUnverified.
+func ParseVerificationStatus(raw string) (VerificationStatus, error) {
+	switch VerificationStatus(strings.ToLower(strings.TrimSpace(raw))) {
+	case "", StatusUnverified:
+		return StatusUnverified, nil
+	case StatusUnusable:
+		return StatusUnusable, nil
+	case StatusUsable:
+		return StatusUsable, nil
+	case StatusVerified:
+		return StatusVerified, nil
+	default:
+		return "", errors.New("invalid verification status (must be unverified, unusable, usable, or verified)")
+	}
+}
+
+// NormalizeVerification trims fields and returns nil when unverified with no note
+// so empty verification metadata is omitted cleanly from JSON.
+func NormalizeVerification(v *Verification) *Verification {
+	if v == nil {
+		return nil
+	}
+	status, err := ParseVerificationStatus(string(v.Status))
+	if err != nil {
+		status = StatusUnverified
+	}
+	note := strings.TrimSpace(v.Note)
+	if status == StatusUnverified && note == "" {
+		return nil
+	}
+	return &Verification{
+		Status: status,
+		Note:   note,
+	}
+}
+
 // PresetEntry is the JSON schema stored inside presets.json.
+// For the special "default" key, only Verification is used (Label/Description/Params are omitted).
 type PresetEntry struct {
-	Label       string         `json:"label"`
-	Description string         `json:"description,omitempty"`
-	Params      map[string]any `json:"params"`
+	Label        string         `json:"label,omitempty"`
+	Description  string         `json:"description,omitempty"`
+	Verification *Verification  `json:"verification,omitempty"`
+	Params       map[string]any `json:"params,omitempty"`
 }
 
 // DefaultMeta carries optional display metadata for the synthesized canonical default preset.
@@ -28,11 +82,12 @@ type DefaultMeta struct {
 
 // Preset is the resolved preset returned to the UI.
 type Preset struct {
-	Key         string         `json:"key"`
-	Label       string         `json:"label"`
-	Description string         `json:"description"`
-	Source      string         `json:"source"` // "default", "project", "user"
-	Params      map[string]any `json:"params"`
+	Key          string         `json:"key"`
+	Label        string         `json:"label"`
+	Description  string         `json:"description"`
+	Source       string         `json:"source"` // "default", "project", "user"
+	Verification *Verification  `json:"verification,omitempty"`
+	Params       map[string]any `json:"params"`
 }
 
 var nonSlug = regexp.MustCompile(`[^a-z0-9]+`)
@@ -214,11 +269,13 @@ func deepCopyMap(src map[string]any) map[string]any {
 // List returns the synthesized default preset followed by project and user presets.
 func List(modelID, modelDir string, defaults map[string]any, defaultMeta *DefaultMeta) []Preset {
 	byKey := make(map[string]Preset)
+	var defaultVerification *Verification
 
 	if modelDir != "" {
 		projEntries := readPresetFile(filepath.Join(modelDir, "presets.json"))
 		for key, entry := range projEntries {
 			if key == "default" {
+				defaultVerification = NormalizeVerification(entry.Verification)
 				continue
 			}
 			label := entry.Label
@@ -226,11 +283,12 @@ func List(modelID, modelDir string, defaults map[string]any, defaultMeta *Defaul
 				label = key
 			}
 			byKey[key] = Preset{
-				Key:         key,
-				Label:       label,
-				Description: entry.Description,
-				Source:      "project",
-				Params:      FilterParams(entry.Params, defaults),
+				Key:          key,
+				Label:        label,
+				Description:  entry.Description,
+				Source:       "project",
+				Verification: NormalizeVerification(entry.Verification),
+				Params:       FilterParams(entry.Params, defaults),
 			}
 		}
 	}
@@ -246,11 +304,12 @@ func List(modelID, modelDir string, defaults map[string]any, defaultMeta *Defaul
 				label = key
 			}
 			byKey[key] = Preset{
-				Key:         key,
-				Label:       label,
-				Description: entry.Description,
-				Source:      "user",
-				Params:      FilterParams(entry.Params, defaults),
+				Key:          key,
+				Label:        label,
+				Description:  entry.Description,
+				Source:       "user",
+				Verification: NormalizeVerification(entry.Verification),
+				Params:       FilterParams(entry.Params, defaults),
 			}
 		}
 	}
@@ -276,11 +335,12 @@ func List(modelID, modelDir string, defaults map[string]any, defaultMeta *Defaul
 
 	result := make([]Preset, 0, len(keys)+1)
 	result = append(result, Preset{
-		Key:         "default",
-		Label:       defaultLabel,
-		Description: defaultDesc,
-		Source:      "default",
-		Params:      map[string]any{},
+		Key:          "default",
+		Label:        defaultLabel,
+		Description:  defaultDesc,
+		Source:       "default",
+		Verification: defaultVerification,
+		Params:       map[string]any{},
 	})
 	for _, k := range keys {
 		result = append(result, byKey[k])
@@ -305,7 +365,7 @@ func writePresetFile(path string, entries map[string]PresetEntry) error {
 // Save writes a preset (sparse diff or full snapshot) to either "project" (<modelDir>/presets.json)
 // or "user" (~/.config/...). Saving to "project" also removes any identically keyed user preset
 // so a stale local copy cannot silently shadow the shared project preset.
-func Save(modelID, modelDir, label, description, scope string, fullSnapshot bool, currentParams, defaults map[string]any) (string, error) {
+func Save(modelID, modelDir, label, description, scope string, fullSnapshot bool, currentParams, defaults map[string]any, verification *Verification) (string, error) {
 	key := Slugify(label)
 	var targetPath string
 	isProject := scope == "project" && modelDir != ""
@@ -328,9 +388,10 @@ func Save(modelID, modelDir, label, description, scope string, fullSnapshot bool
 
 	existing := readPresetFile(targetPath)
 	existing[key] = PresetEntry{
-		Label:       strings.TrimSpace(label),
-		Description: strings.TrimSpace(description),
-		Params:      storedParams,
+		Label:        strings.TrimSpace(label),
+		Description:  strings.TrimSpace(description),
+		Verification: NormalizeVerification(verification),
+		Params:       storedParams,
 	}
 
 	if err := writePresetFile(targetPath, existing); err != nil {
@@ -348,6 +409,87 @@ func Save(modelID, modelDir, label, description, scope string, fullSnapshot bool
 	}
 
 	return key, nil
+}
+
+// SetVerification updates verification metadata for a preset in its owning scope.
+// For the canonical "default" preset, verification is stored as a metadata-only entry
+// under key "default" in <modelDir>/presets.json and removed when cleared.
+func SetVerification(modelID, modelDir, key, scope string, v *Verification) error {
+	key = strings.TrimSpace(key)
+	if key == "" {
+		return errors.New("preset key is required")
+	}
+
+	norm := NormalizeVerification(v)
+
+	if key == "default" {
+		if modelDir == "" {
+			return errors.New("project model directory is unavailable")
+		}
+		targetPath := filepath.Join(modelDir, "presets.json")
+		existing := readPresetFile(targetPath)
+		if norm == nil {
+			delete(existing, "default")
+		} else {
+			existing["default"] = PresetEntry{
+				Verification: norm,
+			}
+		}
+		return writePresetFile(targetPath, existing)
+	}
+
+	var targetPath string
+	if scope == "project" {
+		if modelDir == "" {
+			return errors.New("project model directory is unavailable")
+		}
+		targetPath = filepath.Join(modelDir, "presets.json")
+	} else {
+		p, err := userPresetPath(modelID)
+		if err != nil {
+			return err
+		}
+		targetPath = p
+	}
+
+	existing := readPresetFile(targetPath)
+	entry, ok := existing[key]
+	if !ok {
+		return errors.New("preset not found in target scope")
+	}
+	entry.Verification = norm
+	existing[key] = entry
+	return writePresetFile(targetPath, existing)
+}
+
+// DowngradeDefaultVerification resets the canonical "default" preset's verification status
+// to "unverified" while preserving any print note (or pruning the entry if no note exists).
+// Called after modifying model default parameters in the Python source file.
+func DowngradeDefaultVerification(modelDir string) error {
+	if modelDir == "" {
+		return nil
+	}
+	targetPath := filepath.Join(modelDir, "presets.json")
+	existing := readPresetFile(targetPath)
+	entry, ok := existing["default"]
+	if !ok {
+		return nil
+	}
+	norm := NormalizeVerification(entry.Verification)
+	if norm == nil || norm.Status == StatusUnverified {
+		return nil
+	}
+	if norm.Note == "" {
+		delete(existing, "default")
+	} else {
+		existing["default"] = PresetEntry{
+			Verification: &Verification{
+				Status: StatusUnverified,
+				Note:   norm.Note,
+			},
+		}
+	}
+	return writePresetFile(targetPath, existing)
 }
 
 // Delete removes a preset key from either "project" or "user" storage.

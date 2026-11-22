@@ -846,3 +846,153 @@ func TestSetupOnboardingHandlers(t *testing.T) {
 		t.Fatalf("unexpected export dir config=%q resolved=%q", cfgResp.Config.ExportDir, cfgResp.ResolvedExportDir)
 	}
 }
+
+func TestPresetVerificationHandlers(t *testing.T) {
+	projectDir := t.TempDir()
+	modelDir := filepath.Join(projectDir, "models", "ver_demo")
+	if err := os.MkdirAll(modelDir, 0o755); err != nil {
+		t.Fatalf("mkdir: %v", err)
+	}
+
+	modelSrc := `from dataclasses import dataclass, field
+
+@dataclass
+class CoreParams:
+    width: float = 40.0
+
+@dataclass
+class VerDemoParams:
+    __default_preset__ = {"label": "Standard Block", "description": "40mm block"}
+    core: CoreParams = field(default_factory=CoreParams)
+
+def create_ver_demo(params: VerDemoParams):
+    return None
+`
+	if err := os.WriteFile(filepath.Join(modelDir, "ver_demo.py"), []byte(modelSrc), 0o644); err != nil {
+		t.Fatalf("write ver_demo.py: %v", err)
+	}
+
+	srv := newTestServer(t, &stubDialogs{})
+	saveBody, _ := json.Marshal(map[string]string{
+		"project_root": projectDir,
+		"python_path":  "python3",
+	})
+	rec := httptest.NewRecorder()
+	srv.Handler().ServeHTTP(rec, httptest.NewRequest(http.MethodPost, "/api/config", bytes.NewReader(saveBody)))
+	if rec.Code != http.StatusOK {
+		t.Fatalf("POST /api/config status = %d", rec.Code)
+	}
+
+	type presetWire struct {
+		Key          string `json:"key"`
+		Label        string `json:"label"`
+		Source       string `json:"source"`
+		Verification *struct {
+			Status string `json:"status"`
+			Note   string `json:"note"`
+		} `json:"verification"`
+	}
+
+	// 1. Mark canonical default preset verified via PUT .../presets/default/verification
+	rec = httptest.NewRecorder()
+	srv.Handler().ServeHTTP(rec, httptest.NewRequest(
+		http.MethodPut,
+		"/api/models/ver_demo/presets/default/verification",
+		bytes.NewBufferString(`{"scope":"default","status":"verified","note":"Printed in PETG, exact fit"}`),
+	))
+	if rec.Code != http.StatusOK {
+		t.Fatalf("PUT default verification status = %d, body = %s", rec.Code, rec.Body.String())
+	}
+	var verResp struct {
+		OK      bool         `json:"ok"`
+		Presets []presetWire `json:"presets"`
+	}
+	if err := json.Unmarshal(rec.Body.Bytes(), &verResp); err != nil || !verResp.OK || len(verResp.Presets) != 1 {
+		t.Fatalf("unexpected default verification response: %+v", verResp)
+	}
+	if verResp.Presets[0].Verification == nil || verResp.Presets[0].Verification.Status != "verified" || verResp.Presets[0].Verification.Note != "Printed in PETG, exact fit" {
+		t.Fatalf("expected verified default preset, got %+v", verResp.Presets[0])
+	}
+
+	// 2. Reject invalid verification status with 400
+	rec = httptest.NewRecorder()
+	srv.Handler().ServeHTTP(rec, httptest.NewRequest(
+		http.MethodPut,
+		"/api/models/ver_demo/presets/default/verification",
+		bytes.NewBufferString(`{"scope":"default","status":"bogus","note":""}`),
+	))
+	if rec.Code != http.StatusBadRequest {
+		t.Fatalf("expected 400 for invalid status, got %d (%s)", rec.Code, rec.Body.String())
+	}
+
+	// 3. Save a project preset with verification metadata
+	rec = httptest.NewRecorder()
+	srv.Handler().ServeHTTP(rec, httptest.NewRequest(
+		http.MethodPost,
+		"/api/models/ver_demo/presets",
+		bytes.NewBufferString(`{"label":"Wide Block","description":"60mm","scope":"project","params":{"core":{"width":60.0}},"verification":{"status":"usable","note":"Slightly tight on first layer"}}`),
+	))
+	if rec.Code != http.StatusOK {
+		t.Fatalf("POST preset with verification status = %d, body = %s", rec.Code, rec.Body.String())
+	}
+	var saveResp struct {
+		OK      bool         `json:"ok"`
+		Presets []presetWire `json:"presets"`
+	}
+	if err := json.Unmarshal(rec.Body.Bytes(), &saveResp); err != nil || !saveResp.OK || len(saveResp.Presets) != 2 {
+		t.Fatalf("unexpected save preset response: %+v", saveResp)
+	}
+	if saveResp.Presets[1].Verification == nil || saveResp.Presets[1].Verification.Status != "usable" {
+		t.Fatalf("expected usable status on saved project preset, got %+v", saveResp.Presets[1])
+	}
+
+	// 4. Update saved project preset verification to unusable
+	rec = httptest.NewRecorder()
+	srv.Handler().ServeHTTP(rec, httptest.NewRequest(
+		http.MethodPut,
+		"/api/models/ver_demo/presets/wide_block/verification",
+		bytes.NewBufferString(`{"scope":"project","status":"unusable","note":"Interferes with bracket"}`),
+	))
+	if rec.Code != http.StatusOK {
+		t.Fatalf("PUT project verification status = %d, body = %s", rec.Code, rec.Body.String())
+	}
+
+	// 5. Applying update-defaults must downgrade canonical "default" status to unverified while preserving note
+	rec = httptest.NewRecorder()
+	srv.Handler().ServeHTTP(rec, httptest.NewRequest(
+		http.MethodPost,
+		"/api/models/ver_demo/update-defaults",
+		bytes.NewBufferString(`{"dry_run":true,"params":{"core":{"width":45.0}}}`),
+	))
+	var previewResp worker.UpdateDefaultsResponse
+	if err := json.Unmarshal(rec.Body.Bytes(), &previewResp); err != nil || !previewResp.OK {
+		t.Fatalf("preview update-defaults failed: %s", rec.Body.String())
+	}
+
+	applyBody, _ := json.Marshal(map[string]any{
+		"dry_run":         false,
+		"expected_sha256": previewResp.SHA256,
+		"params":          map[string]any{"core": map[string]any{"width": 45.0}},
+	})
+	rec = httptest.NewRecorder()
+	srv.Handler().ServeHTTP(rec, httptest.NewRequest(http.MethodPost, "/api/models/ver_demo/update-defaults", bytes.NewReader(applyBody)))
+	if rec.Code != http.StatusOK {
+		t.Fatalf("apply update-defaults status = %d, body = %s", rec.Code, rec.Body.String())
+	}
+
+	rec = httptest.NewRecorder()
+	srv.Handler().ServeHTTP(rec, httptest.NewRequest(http.MethodGet, "/api/models/ver_demo/presets", nil))
+	var afterUpdate struct {
+		OK      bool         `json:"ok"`
+		Presets []presetWire `json:"presets"`
+	}
+	if err := json.Unmarshal(rec.Body.Bytes(), &afterUpdate); err != nil || !afterUpdate.OK {
+		t.Fatalf("GET presets failed: %s", rec.Body.String())
+	}
+	if afterUpdate.Presets[0].Verification == nil || afterUpdate.Presets[0].Verification.Status != "unverified" || afterUpdate.Presets[0].Verification.Note != "Printed in PETG, exact fit" {
+		t.Fatalf("expected default verification downgraded to unverified with preserved note, got %+v", afterUpdate.Presets[0].Verification)
+	}
+	if afterUpdate.Presets[1].Verification == nil || afterUpdate.Presets[1].Verification.Status != "unusable" {
+		t.Fatalf("expected project preset verification intact, got %+v", afterUpdate.Presets[1].Verification)
+	}
+}

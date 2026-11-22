@@ -1,6 +1,12 @@
 import * as api from './api';
 import type { CadViewportController } from './cadViewer';
-import { deepClone, mergeWithDefaults, normalizeParamsWithFields, setParamByPath } from './params';
+import {
+  deepClone,
+  mergeWithDefaults,
+  normalizeParamsWithFields,
+  paramsEqual,
+  setParamByPath,
+} from './params';
 import type {
   Config,
   ConfigResponse,
@@ -10,10 +16,12 @@ import type {
   ParamsRecord,
   ParamUpdateMode,
   Preset,
+  PresetVerification,
   SetupLogEvent,
   SetupProgressEvent,
   StatusState,
   UpdateDefaultsResponse,
+  VerificationStatus,
 } from './types';
 
 const THEME_STORAGE_KEY = 'code-cad-theme';
@@ -88,6 +96,8 @@ class StudioState {
     const merged = found ? mergeWithDefaults(this.defaults, found.params) : deepClone(this.defaults);
     return normalizeParamsWithFields(merged, this.fields);
   });
+
+  paramsModified = $derived(!paramsEqual(this.params, this.presetDefaults));
 
   // Render & status
   rendering = $state(false);
@@ -496,7 +506,8 @@ class StudioState {
     label: string,
     description: string,
     scope: string,
-    fullSnapshot = false
+    fullSnapshot = false,
+    verification?: PresetVerification | null
   ): Promise<{ key: string; message: string } | null> {
     const modelId = this.activeModelId;
     if (!modelId) return null;
@@ -507,6 +518,7 @@ class StudioState {
       scope,
       full_snapshot: fullSnapshot,
       params: this.params,
+      ...(verification ? { verification } : {}),
     });
     if (!resp.ok) {
       throw new Error(resp.error || 'Failed to save preset');
@@ -524,6 +536,28 @@ class StudioState {
       key: resp.selected_key ?? '',
       message: `Saved preset "${label.trim()}"`,
     };
+  }
+
+  async updatePresetVerification(
+    key: string,
+    scope: string,
+    status: VerificationStatus,
+    note: string
+  ): Promise<void> {
+    const modelId = this.activeModelId;
+    if (!modelId) return;
+
+    const resp = await api.setPresetVerification(modelId, key, {
+      scope,
+      status,
+      note: note.trim(),
+    });
+    if (!resp.ok) {
+      throw new Error(resp.error || 'Failed to update preset verification');
+    }
+    if (resp.presets) {
+      this.presets = resp.presets;
+    }
   }
 
   async deletePreset(key: string, scope: string): Promise<void> {

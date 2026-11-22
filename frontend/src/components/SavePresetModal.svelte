@@ -1,11 +1,18 @@
 <script lang="ts">
+  import { mergeWithDefaults, normalizeParamsWithFields, paramsEqual } from '../lib/params';
   import { studio } from '../lib/studioState.svelte';
+  import type { VerificationStatus } from '../lib/types';
+  import { VERIFICATION_STATUSES, getPresetVerification } from '../lib/verification';
+  import VerificationIcon from './VerificationIcon.svelte';
 
   let label = $state('');
   let description = $state('');
   let scope = $state<'user' | 'project'>('user');
   let sparseOnly = $state(true);
   let setAsDefault = $state(false);
+  let verificationStatus = $state<VerificationStatus>('unverified');
+  let verificationNote = $state('');
+  let verificationTouched = $state(false);
 
   let saving = $state(false);
   let formError = $state('');
@@ -26,10 +33,25 @@
     return studio.presets.find((p) => p.key === slug && p.source === scope) ?? null;
   });
 
+  const matchingParamsChanged = $derived.by(() => {
+    if (!matchingExisting) return false;
+    const existingParams = normalizeParamsWithFields(
+      mergeWithDefaults(studio.defaults, matchingExisting.params),
+      studio.fields
+    );
+    return !paramsEqual(studio.params, existingParams);
+  });
+
+  const showResetWarning = $derived.by(() => {
+    if (!matchingExisting || !matchingParamsChanged) return false;
+    return getPresetVerification(matchingExisting).status !== 'unverified';
+  });
+
   $effect(() => {
     if (studio.savePresetModalOpen) {
       formError = '';
       sparseOnly = true;
+      verificationTouched = false;
 
       const cur = studio.presets.find((p) => p.key === studio.selectedPresetKey);
       if (cur && cur.key !== 'default' && (cur.source === 'user' || cur.source === 'project')) {
@@ -43,6 +65,18 @@
         scope = studio.config.preset_save_scope === 'project' ? 'project' : 'user';
         setAsDefault = false;
       }
+    }
+  });
+
+  $effect(() => {
+    if (!studio.savePresetModalOpen || verificationTouched) return;
+    if (matchingExisting) {
+      const existingVer = getPresetVerification(matchingExisting);
+      verificationStatus = matchingParamsChanged ? 'unverified' : existingVer.status;
+      verificationNote = existingVer.note;
+    } else {
+      verificationStatus = 'unverified';
+      verificationNote = '';
     }
   });
 
@@ -66,7 +100,10 @@
     saving = true;
     formError = '';
     try {
-      const saved = await studio.savePreset(trimmed, description.trim(), scope, !sparseOnly);
+      const saved = await studio.savePreset(trimmed, description.trim(), scope, !sparseOnly, {
+        status: verificationStatus,
+        note: verificationNote.trim(),
+      });
       if (saved) {
         if (setAsDefault && saved.key) {
           await studio.setDefaultPreset(saved.key);
@@ -202,6 +239,54 @@
             </label>
           </div>
         </fieldset>
+
+        <div class="rounded-box bg-base-200/70 border border-base-300 p-2.5 space-y-2.5">
+          <fieldset class="space-y-1.5">
+            <legend class="text-xs font-semibold">Print Verification</legend>
+            {#if showResetWarning}
+              <p class="text-[11px] text-warning leading-snug">
+                Parameters changed — status defaulted to Unverified. Update below if you have
+                already print-tested these settings.
+              </p>
+            {/if}
+            <div class="grid grid-cols-2 gap-1.5">
+              {#each VERIFICATION_STATUSES as opt (opt.value)}
+                {@const active = verificationStatus === opt.value}
+                <button
+                  type="button"
+                  aria-pressed={active}
+                  title={opt.hint}
+                  class="flex items-center gap-1.5 px-2 py-1.5 rounded-field border text-left text-xs cursor-pointer focus-visible:outline-2 focus-visible:outline-offset-1 focus-visible:outline-primary {active
+                    ? `${opt.selectedButtonClass} font-semibold`
+                    : 'border-base-300 hover:border-base-content/30 bg-base-100'}"
+                  onclick={() => {
+                    verificationTouched = true;
+                    verificationStatus = opt.value;
+                  }}
+                >
+                  <VerificationIcon status={opt.value} class="h-3.5 w-3.5" />
+                  <span class="truncate">{opt.label}</span>
+                </button>
+              {/each}
+            </div>
+          </fieldset>
+
+          <div class="form-control">
+            <label class="label py-0.5" for="save-preset-verification-note">
+              <span class="label-text text-xs font-semibold">Print Notes</span>
+            </label>
+            <textarea
+              id="save-preset-verification-note"
+              bind:value={verificationNote}
+              oninput={() => {
+                verificationTouched = true;
+              }}
+              rows="2"
+              placeholder="Optional material, layer height, fit feedback, or known issues"
+              class="textarea textarea-bordered textarea-xs w-full text-xs leading-snug bg-base-100"
+            ></textarea>
+          </div>
+        </div>
 
         <div class="rounded-box bg-base-200/70 border border-base-300 p-2.5 space-y-2">
           <label class="flex items-start gap-2 cursor-pointer text-xs">

@@ -180,11 +180,19 @@ export type ParamsRecord = Record<string, unknown>;
 
 export type ParamUpdateMode = 'debounced' | 'immediate' | 'preview';
 
+export type VerificationStatus = 'unverified' | 'unusable' | 'usable' | 'verified';
+
+export interface PresetVerification {
+  status: VerificationStatus;
+  note?: string;
+}
+
 export interface Preset {
   key: string;
   label: string;
   description: string;
   source: 'default' | 'project' | 'user' | string;
+  verification?: PresetVerification | null;
   params: ParamsRecord;
 }
 
@@ -268,6 +276,12 @@ export interface RenamePresetResponse {
 export interface SetDefaultPresetResponse {
   ok: boolean;
   default_preset_key?: string;
+  error?: string;
+}
+
+export interface SetPresetVerificationResponse {
+  ok: boolean;
+  presets?: Preset[];
   error?: string;
 }
 

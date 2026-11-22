@@ -151,6 +151,7 @@ func (s *Server) registerRoutes() {
 	s.mux.HandleFunc("GET /api/models/{id}/presets", s.handleGetPresets)
 	s.mux.HandleFunc("POST /api/models/{id}/presets", s.handleSavePreset)
 	s.mux.HandleFunc("PATCH /api/models/{id}/presets/{key}", s.handleRenamePreset)
+	s.mux.HandleFunc("PUT /api/models/{id}/presets/{key}/verification", s.handleSetPresetVerification)
 	s.mux.HandleFunc("DELETE /api/models/{id}/presets/{key}", s.handleDeletePreset)
 	s.mux.HandleFunc("POST /api/models/{id}/presets/default", s.handleSetDefaultPreset)
 	s.mux.HandleFunc("POST /api/models/{id}/update-defaults", s.handleUpdateModelDefaults)

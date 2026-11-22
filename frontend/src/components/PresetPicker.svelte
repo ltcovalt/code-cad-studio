@@ -1,15 +1,22 @@
 <script lang="ts">
   import { tick } from 'svelte';
   import type { Preset } from '../lib/types';
+  import {
+    formatVerificationTooltip,
+    getPresetVerification,
+    getVerificationMeta,
+  } from '../lib/verification';
+  import VerificationIcon from './VerificationIcon.svelte';
 
   interface Props {
     presets: Preset[];
     selectedKey: string;
     defaultKey: string;
+    modified?: boolean;
     onSelect: (key: string) => void;
   }
 
-  let { presets, selectedKey, defaultKey, onSelect }: Props = $props();
+  let { presets, selectedKey, defaultKey, modified = false, onSelect }: Props = $props();
 
   const LISTBOX_ID = 'preset-listbox';
   const LABEL_ID = 'preset-picker-label';
@@ -27,6 +34,9 @@
   let menuMaxHeight = $state(256);
 
   const selectedPreset = $derived(presets.find((p) => p.key === selectedKey) ?? null);
+  const hasAnyVerificationStatus = $derived(
+    presets.some((p) => getPresetVerification(p).status !== 'unverified')
+  );
 
   const activeOptionId = $derived.by(() => {
     if (!open || presets.length === 0) return undefined;
@@ -219,7 +229,7 @@
   });
 </script>
 
-<div class="flex-1 min-w-0 @container">
+<div class="w-full min-w-0 @container">
   <span id={LABEL_ID} class="sr-only">Preset</span>
   <button
     bind:this={triggerEl}
@@ -228,7 +238,9 @@
     aria-expanded={open}
     aria-controls={LISTBOX_ID}
     aria-labelledby="{LABEL_ID} {VALUE_ID}"
-    title={selectedPreset?.description || selectedPreset?.label || 'Preset'}
+    title={selectedPreset
+      ? `${selectedPreset.description || selectedPreset.label}${modified ? ' (modified)' : ''}`
+      : 'Preset'}
     disabled={presets.length === 0}
     class="flex items-center gap-1.5 w-full min-w-0 h-7 px-2 bg-base-100 border rounded-field text-left text-xs cursor-pointer focus-visible:outline-2 focus-visible:outline-offset-1 focus-visible:outline-primary disabled:opacity-50 disabled:cursor-not-allowed {open
       ? 'border-primary/60'
@@ -236,8 +248,16 @@
     onclick={toggleMenu}
     onkeydown={handleTriggerKeydown}
   >
-    <span id={VALUE_ID} class="flex-1 min-w-0 truncate">
-      {selectedPreset?.label ?? 'Default'}
+    <span id={VALUE_ID} class="flex-1 min-w-0 truncate flex items-center gap-1">
+      <span class="truncate">{selectedPreset?.label ?? 'Default'}</span>
+      {#if modified}
+        <span
+          class="inline-block h-1.5 w-1.5 rounded-full bg-warning shrink-0"
+          title="Parameters modified from saved preset"
+          aria-hidden="true"
+        ></span>
+        <span class="sr-only">(modified)</span>
+      {/if}
     </span>
 
     {#if selectedPreset && (selectedPreset.source === 'user' || isStartupDefault(selectedPreset))}
@@ -278,7 +298,7 @@
     tabindex="-1"
     aria-labelledby={LABEL_ID}
     aria-activedescendant={activeOptionId}
-    class="fixed z-40 overflow-y-auto bg-base-100 border border-base-300 rounded-box shadow-md p-1 space-y-0.5 focus:outline-none"
+    class="fixed z-40 overflow-y-auto bg-base-100 border border-base-300 rounded-box shadow-md p-1 space-y-0.5 focus:outline-none [scrollbar-gutter:stable]"
     style="left: {menuLeft}px; width: {menuWidth}px; max-height: {menuMaxHeight}px; {menuTop !== null
       ? `top: ${menuTop}px;`
       : `bottom: ${menuBottom}px;`}"
@@ -288,14 +308,24 @@
       {@const isSelected = preset.key === selectedKey}
       {@const isDefault = isStartupDefault(preset)}
       {@const isHighlighted = index === highlightedIndex}
+      {@const ver = getPresetVerification(preset)}
+      {@const verMeta = getVerificationMeta(ver.status)}
+      {@const optionTooltip = [
+        preset.description,
+        ver.status !== 'unverified' || ver.note
+          ? formatVerificationTooltip(ver.status, ver.note)
+          : '',
+      ]
+        .filter(Boolean)
+        .join('\n')}
       <!-- svelte-ignore a11y_click_events_have_key_events -->
       <div
         id={optionId(preset.key)}
         role="option"
         tabindex="-1"
         aria-selected={isSelected}
-        title={preset.description || undefined}
-        class="flex items-start gap-1.5 rounded-field px-2 py-1.5 cursor-pointer select-none {isHighlighted
+        title={optionTooltip || undefined}
+        class="flex items-start gap-2 rounded-field pl-2 pr-3 py-1.5 cursor-pointer select-none {isHighlighted
           ? 'bg-base-200'
           : ''}"
         onpointermove={() => {
@@ -323,10 +353,23 @@
         </div>
 
         <div class="min-w-0 flex-1">
-          <div class="flex items-center gap-1.5 min-w-0">
-            <span class="text-xs truncate {isSelected ? 'font-semibold' : 'font-medium'}">
-              {preset.label}
-            </span>
+          <div class="text-xs truncate leading-4 {isSelected ? 'font-semibold' : 'font-medium'}">
+            {preset.label}
+          </div>
+          {#if preset.description}
+            <p class="text-[10px] opacity-55 truncate leading-tight mt-0.5">
+              {preset.description}
+            </p>
+          {/if}
+          {#if ver.note}
+            <p class="text-[10px] opacity-65 italic truncate leading-tight mt-0.5">
+              {ver.note}
+            </p>
+          {/if}
+        </div>
+
+        {#if preset.source === 'user' || isDefault || hasAnyVerificationStatus}
+          <div class="shrink-0 flex items-center gap-1.5 h-4">
             {#if preset.source === 'user'}
               <span class="badge badge-xs badge-soft h-4 px-1 text-[10px] shrink-0">
                 User
@@ -337,13 +380,21 @@
                 Default
               </span>
             {/if}
+            {#if hasAnyVerificationStatus}
+              <span class="flex items-center justify-center w-4 h-4 shrink-0">
+                {#if ver.status !== 'unverified'}
+                  <span
+                    class="inline-flex items-center"
+                    title={formatVerificationTooltip(ver.status, ver.note)}
+                  >
+                    <VerificationIcon status={ver.status} class="h-3.5 w-3.5" />
+                    <span class="sr-only">({verMeta.label})</span>
+                  </span>
+                {/if}
+              </span>
+            {/if}
           </div>
-          {#if preset.description}
-            <p class="text-[10px] opacity-55 truncate leading-tight mt-0.5">
-              {preset.description}
-            </p>
-          {/if}
-        </div>
+        {/if}
       </div>
     {/each}
   </div>

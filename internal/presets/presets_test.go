@@ -141,7 +141,7 @@ func TestSaveSparseVsFullAndDelete(t *testing.T) {
 	}
 
 	// Sparse user save stores only changed fields
-	key, err := Save("clip", dir, "Thin Clip", "Half width", "user", false, current, defaults)
+	key, err := Save("clip", dir, "Thin Clip", "Half width", "user", false, current, defaults, nil)
 	if err != nil || key != "thin_clip" {
 		t.Fatalf("Save sparse user failed: key=%q err=%v", key, err)
 	}
@@ -155,7 +155,10 @@ func TestSaveSparseVsFullAndDelete(t *testing.T) {
 	}
 
 	// Full snapshot project save stores all fields and clears shadowed user copy
-	key2, err := Save("clip", dir, "Thin Clip", "Shared full", "project", true, current, defaults)
+	key2, err := Save("clip", dir, "Thin Clip", "Shared full", "project", true, current, defaults, &Verification{
+		Status: StatusVerified,
+		Note:   "Printed in PETG, snug fit",
+	})
 	if err != nil || key2 != "thin_clip" {
 		t.Fatalf("Save full project failed: key=%q err=%v", key2, err)
 	}
@@ -163,12 +166,15 @@ func TestSaveSparseVsFullAndDelete(t *testing.T) {
 	if len(list) != 2 || list[1].Source != "project" {
 		t.Fatalf("expected project preset without user shadow, got %#v", list)
 	}
+	if list[1].Verification == nil || list[1].Verification.Status != StatusVerified || list[1].Verification.Note != "Printed in PETG, snug fit" {
+		t.Fatalf("expected verification preserved on project preset, got %#v", list[1].Verification)
+	}
 	coreMap = list[1].Params["core"].(map[string]any)
 	if coreMap["diameter"] != 44.0 || coreMap["thickness"] != 6.0 {
 		t.Fatalf("expected full snapshot with both fields, got %#v", coreMap)
 	}
 
-	// Rename project preset and verify params are preserved under the new key
+	// Rename project preset and verify params and verification are preserved under the new key
 	renamedKey, err := Rename("clip", dir, "thin_clip", "project", "Slim Clip", "Updated note")
 	if err != nil || renamedKey != "slim_clip" {
 		t.Fatalf("Rename failed: key=%q err=%v", renamedKey, err)
@@ -176,6 +182,9 @@ func TestSaveSparseVsFullAndDelete(t *testing.T) {
 	list = List("clip", dir, defaults, nil)
 	if len(list) != 2 || list[1].Key != "slim_clip" || list[1].Label != "Slim Clip" || list[1].Description != "Updated note" {
 		t.Fatalf("unexpected preset after rename: %#v", list)
+	}
+	if list[1].Verification == nil || list[1].Verification.Status != StatusVerified || list[1].Verification.Note != "Printed in PETG, snug fit" {
+		t.Fatalf("expected verification preserved after rename, got %#v", list[1].Verification)
 	}
 
 	// Delete project preset and verify canonical default cannot be deleted
@@ -241,5 +250,71 @@ func TestSparseDiffWithListItems(t *testing.T) {
 	origLeg := defaults["cutouts"].(map[string]any)["items"].([]any)[0].(map[string]any)["leg"]
 	if origLeg != "x" {
 		t.Fatalf("MergeWithDefaults mutated original defaults slice: got leg=%v", origLeg)
+	}
+}
+
+func TestVerificationLifecycleAndDefaultMetadata(t *testing.T) {
+	t.Setenv("XDG_CONFIG_HOME", t.TempDir())
+	dir := t.TempDir()
+	defaults := map[string]any{"diameter": 150.0}
+
+	// Initially unverified with no presets.json file
+	list := List("lid", dir, defaults, &DefaultMeta{Label: "Base Lid", Description: "Canonical"})
+	if len(list) != 1 || list[0].Verification != nil {
+		t.Fatalf("expected single unverified default preset, got %#v", list)
+	}
+
+	// Setting verification on canonical "default" creates metadata-only entry in presets.json
+	if err := SetVerification("lid", dir, "default", "default", &Verification{
+		Status: StatusVerified,
+		Note:   "TPU 95A, 0.2mm layers",
+	}); err != nil {
+		t.Fatalf("SetVerification default failed: %v", err)
+	}
+	list = List("lid", dir, defaults, &DefaultMeta{Label: "Base Lid", Description: "Canonical"})
+	if len(list) != 1 || list[0].Label != "Base Lid" || list[0].Verification == nil || list[0].Verification.Status != StatusVerified || list[0].Verification.Note != "TPU 95A, 0.2mm layers" {
+		t.Fatalf("unexpected default preset after verification: %#v", list)
+	}
+
+	// DowngradeDefaultVerification resets status to unverified while keeping print note
+	if err := DowngradeDefaultVerification(dir); err != nil {
+		t.Fatalf("DowngradeDefaultVerification failed: %v", err)
+	}
+	list = List("lid", dir, defaults, &DefaultMeta{Label: "Base Lid"})
+	if list[0].Verification == nil || list[0].Verification.Status != StatusUnverified || list[0].Verification.Note != "TPU 95A, 0.2mm layers" {
+		t.Fatalf("expected downgraded status with preserved note, got %#v", list[0].Verification)
+	}
+
+	// Clearing default verification removes the "default" entry and cleans up empty presets.json
+	if err := SetVerification("lid", dir, "default", "default", &Verification{Status: StatusUnverified, Note: ""}); err != nil {
+		t.Fatalf("clearing default verification failed: %v", err)
+	}
+	if _, err := os.Stat(filepath.Join(dir, "presets.json")); !os.IsNotExist(err) {
+		t.Fatalf("expected empty presets.json to be removed after clearing default verification")
+	}
+
+	// Verify user & project verification updates
+	if _, err := Save("lid", dir, "Small Bowl", "", "user", false, map[string]any{"diameter": 98.0}, defaults, nil); err != nil {
+		t.Fatalf("Save user failed: %v", err)
+	}
+	if err := SetVerification("lid", dir, "small_bowl", "user", &Verification{Status: StatusUsable, Note: "Slightly loose"}); err != nil {
+		t.Fatalf("SetVerification user failed: %v", err)
+	}
+	list = List("lid", dir, defaults, nil)
+	if len(list) != 2 || list[1].Verification == nil || list[1].Verification.Status != StatusUsable || list[1].Verification.Note != "Slightly loose" {
+		t.Fatalf("unexpected user preset verification: %#v", list)
+	}
+
+	if err := SetVerification("lid", dir, "small_bowl", "user", &Verification{Status: StatusUnusable, Note: "Skirt too short"}); err != nil {
+		t.Fatalf("SetVerification unusable failed: %v", err)
+	}
+	list = List("lid", dir, defaults, nil)
+	if list[1].Verification == nil || list[1].Verification.Status != StatusUnusable {
+		t.Fatalf("expected unusable status, got %#v", list[1].Verification)
+	}
+
+	// Invalid status parsing must fail
+	if _, err := ParseVerificationStatus("bogus"); err == nil {
+		t.Fatalf("expected invalid status to fail parsing")
 	}
 }

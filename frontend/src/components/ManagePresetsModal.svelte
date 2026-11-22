@@ -1,6 +1,13 @@
 <script lang="ts">
   import { studio } from '../lib/studioState.svelte';
-  import type { Preset, UpdateDefaultsResponse } from '../lib/types';
+  import type { Preset, UpdateDefaultsResponse, VerificationStatus } from '../lib/types';
+  import {
+    VERIFICATION_STATUSES,
+    formatVerificationTooltip,
+    getPresetVerification,
+    getVerificationMeta,
+  } from '../lib/verification';
+  import VerificationIcon from './VerificationIcon.svelte';
 
   type ManageTab = 'presets' | 'source';
 
@@ -13,6 +20,11 @@
   let editingKey = $state<string | null>(null);
   let editLabel = $state('');
   let editDescription = $state('');
+
+  // Inline verification state
+  let verifyingKey = $state<string | null>(null);
+  let verifyStatus = $state<VerificationStatus>('unverified');
+  let verifyNote = $state('');
 
   // Inline delete confirm state
   let deletingKey = $state<string | null>(null);
@@ -32,10 +44,13 @@
     studio.presets.find((p) => p.key === 'default') ?? null
   );
 
+  const canonicalDefaultVer = $derived(getPresetVerification(canonicalDefault));
+
   $effect(() => {
     if (studio.managePresetsModalOpen) {
       activeTab = 'presets';
       editingKey = null;
+      verifyingKey = null;
       deletingKey = null;
       manageError = '';
       manageSuccess = '';
@@ -53,6 +68,10 @@
     if (e.key === 'Escape' && studio.managePresetsModalOpen) {
       if (editingKey) {
         editingKey = null;
+        return;
+      }
+      if (verifyingKey) {
+        verifyingKey = null;
         return;
       }
       closeModal();
@@ -88,11 +107,39 @@
 
   function startRename(preset: Preset) {
     deletingKey = null;
+    verifyingKey = null;
     manageError = '';
     manageSuccess = '';
     editingKey = preset.key;
     editLabel = preset.label;
     editDescription = preset.description;
+  }
+
+  function startVerify(preset: Preset) {
+    editingKey = null;
+    deletingKey = null;
+    manageError = '';
+    manageSuccess = '';
+    const ver = getPresetVerification(preset);
+    verifyingKey = preset.key;
+    verifyStatus = ver.status;
+    verifyNote = ver.note;
+  }
+
+  async function submitVerify(preset: Preset) {
+    actionBusy = true;
+    manageError = '';
+    manageSuccess = '';
+    try {
+      await studio.updatePresetVerification(preset.key, preset.source, verifyStatus, verifyNote);
+      verifyingKey = null;
+      const meta = getVerificationMeta(verifyStatus);
+      manageSuccess = `Updated verification for "${preset.label}" (${meta.label}).`;
+    } catch (err) {
+      manageError = err instanceof Error ? err.message : String(err);
+    } finally {
+      actionBusy = false;
+    }
   }
 
   async function submitRename(preset: Preset) {
@@ -146,6 +193,9 @@
       deletingKey = null;
       if (editingKey === preset.key) {
         editingKey = null;
+      }
+      if (verifyingKey === preset.key) {
+        verifyingKey = null;
       }
       manageSuccess = `Deleted "${preset.label}".`;
     } catch (err) {
@@ -254,55 +304,138 @@
         <div class="space-y-2.5">
           {#if canonicalDefault}
             {@const isDefaultActive = studio.defaultPresetKey === ''}
+            {@const defaultVer = getPresetVerification(canonicalDefault)}
+            {@const defaultVerLabel = getVerificationMeta(defaultVer.status).label}
             <div
-              class="flex items-center justify-between gap-2 rounded-box bg-base-200/60 border border-base-300 px-3 py-2"
+              class="rounded-box bg-base-200/60 border border-base-300 px-3 py-2 space-y-2"
             >
-              <div class="min-w-0">
-                <div class="flex items-center gap-1.5 min-w-0">
-                  <span class="text-xs font-medium truncate">{canonicalDefault.label}</span>
-                  <span class="badge badge-xs badge-secondary badge-soft shrink-0">Model</span>
-                  {#if isDefaultActive}
-                    <span class="badge badge-xs badge-primary badge-soft shrink-0">Default</span>
-                  {/if}
-                </div>
-                {#if canonicalDefault.description}
-                  <p class="text-[11px] opacity-60 truncate">{canonicalDefault.description}</p>
-                {/if}
-              </div>
-              <button
-                type="button"
-                class={`btn btn-ghost btn-xs btn-square shrink-0 ${
-                  isDefaultActive ? 'text-primary' : 'opacity-60 hover:opacity-100 hover:text-primary'
-                }`}
-                disabled={actionBusy || isDefaultActive}
-                title={isDefaultActive
-                  ? 'Active model default'
-                  : 'Set base preset as model default'}
-                aria-label={isDefaultActive
-                  ? 'Active model default'
-                  : 'Set base preset as model default'}
-                onclick={() => handleToggleDefault(canonicalDefault)}
-              >
-                <svg
-                  xmlns="http://www.w3.org/2000/svg"
-                  class="h-3.5 w-3.5"
-                  viewBox="0 0 24 24"
-                  fill="none"
-                  stroke="currentColor"
-                  stroke-width="2"
-                  stroke-linecap="round"
-                  stroke-linejoin="round"
-                  aria-hidden="true"
+              {#if verifyingKey === canonicalDefault.key}
+                <form
+                  class="space-y-2"
+                  onsubmit={(e) => {
+                    e.preventDefault();
+                    void submitVerify(canonicalDefault);
+                  }}
                 >
-                  {#if isDefaultActive}
-                    <circle cx="12" cy="12" r="10" fill="currentColor" stroke="none" />
-                    <path d="m9 12 2 2 4-4" stroke="var(--color-primary-content, #fff)" stroke-width="2.25" />
-                  {:else}
-                    <circle cx="12" cy="12" r="10" />
-                    <path d="m9 12 2 2 4-4" />
-                  {/if}
-                </svg>
-              </button>
+                  <div class="flex items-center gap-1.5">
+                    <span class="text-xs font-semibold truncate">{canonicalDefault.label}</span>
+                    <span class="badge badge-xs badge-secondary badge-soft shrink-0">Model</span>
+                  </div>
+                  <div class="grid grid-cols-2 gap-1.5">
+                    {#each VERIFICATION_STATUSES as opt (opt.value)}
+                      {@const active = verifyStatus === opt.value}
+                      <button
+                        type="button"
+                        aria-pressed={active}
+                        title={opt.hint}
+                        class="flex items-center gap-1.5 px-2 py-1 rounded-field border text-left text-[11px] cursor-pointer focus-visible:outline-2 focus-visible:outline-offset-1 focus-visible:outline-primary {active
+                          ? `${opt.selectedButtonClass} font-semibold`
+                          : 'border-base-300 hover:border-base-content/30 bg-base-100'}"
+                        onclick={() => {
+                          verifyStatus = opt.value;
+                        }}
+                      >
+                        <VerificationIcon status={opt.value} class="h-3.5 w-3.5" />
+                        <span class="truncate">{opt.label}</span>
+                      </button>
+                    {/each}
+                  </div>
+                  <textarea
+                    bind:value={verifyNote}
+                    rows="2"
+                    placeholder="Optional print notes (material, tolerances, fit feedback...)"
+                    class="textarea textarea-bordered textarea-xs w-full text-xs leading-snug bg-base-100"
+                  ></textarea>
+                  <div class="flex justify-end gap-1.5">
+                    <button
+                      type="button"
+                      class="btn btn-xs btn-ghost"
+                      disabled={actionBusy}
+                      onclick={() => {
+                        verifyingKey = null;
+                      }}
+                    >
+                      Cancel
+                    </button>
+                    <button type="submit" class="btn btn-xs btn-primary" disabled={actionBusy}>
+                      Save
+                    </button>
+                  </div>
+                </form>
+              {:else}
+                <div class="flex items-center justify-between gap-2">
+                  <div class="min-w-0">
+                    <div class="flex items-center gap-1.5 min-w-0">
+                      <span class="text-xs font-medium truncate">{canonicalDefault.label}</span>
+                      <span class="badge badge-xs badge-secondary badge-soft shrink-0">Model</span>
+                      {#if isDefaultActive}
+                        <span class="badge badge-xs badge-primary badge-soft shrink-0">Default</span>
+                      {/if}
+                    </div>
+                    {#if canonicalDefault.description}
+                      <p class="text-[11px] opacity-60 truncate">{canonicalDefault.description}</p>
+                    {/if}
+                    {#if defaultVer.note}
+                      <p class="text-[11px] opacity-70 italic truncate" title={defaultVer.note}>
+                        {defaultVer.note}
+                      </p>
+                    {/if}
+                  </div>
+                  <div class="flex items-center gap-0.5 shrink-0">
+                    <button
+                      type="button"
+                      class="btn btn-ghost btn-xs btn-square {defaultVer.status === 'unverified' && !defaultVer.note
+                        ? 'opacity-60 hover:opacity-100'
+                        : 'opacity-90 hover:opacity-100'}"
+                      disabled={actionBusy}
+                      title={formatVerificationTooltip(defaultVer.status, defaultVer.note)}
+                      aria-label={`Verification (${defaultVerLabel}): edit for ${canonicalDefault.label}`}
+                      onclick={() => startVerify(canonicalDefault)}
+                    >
+                      <VerificationIcon status={defaultVer.status} class="h-3.5 w-3.5" />
+                    </button>
+                    <button
+                      type="button"
+                      class={`btn btn-ghost btn-xs btn-square shrink-0 ${
+                        isDefaultActive ? 'text-primary' : 'opacity-60 hover:opacity-100 hover:text-primary'
+                      }`}
+                      disabled={actionBusy || isDefaultActive}
+                      title={isDefaultActive
+                        ? 'Active model default'
+                        : 'Set base preset as model default'}
+                      aria-label={isDefaultActive
+                        ? 'Active model default'
+                        : 'Set base preset as model default'}
+                      onclick={() => handleToggleDefault(canonicalDefault)}
+                    >
+                      <svg
+                        xmlns="http://www.w3.org/2000/svg"
+                        class="h-3.5 w-3.5"
+                        viewBox="0 0 24 24"
+                        fill="none"
+                        stroke="currentColor"
+                        stroke-width="2"
+                        stroke-linecap="round"
+                        stroke-linejoin="round"
+                        aria-hidden="true"
+                      >
+                        {#if isDefaultActive}
+                          <path d="M12 17v5" />
+                          <path
+                            d="M9 10.76a2 2 0 0 1-1.11 1.79l-1.78.9A2 2 0 0 0 5 15.24V16a1 1 0 0 0 1 1h12a1 1 0 0 0 1-1v-.76a2 2 0 0 0-1.11-1.79l-1.78-.9A2 2 0 0 1 15 10.76V7a1 1 0 0 1 1-1 2 2 0 0 0 0-4H8a2 2 0 0 0 0 4 1 1 0 0 1 1 1z"
+                            fill="currentColor"
+                          />
+                        {:else}
+                          <path d="M12 17v5" />
+                          <path
+                            d="M9 10.76a2 2 0 0 1-1.11 1.79l-1.78.9A2 2 0 0 0 5 15.24V16a1 1 0 0 0 1 1h12a1 1 0 0 0 1-1v-.76a2 2 0 0 0-1.11-1.79l-1.78-.9A2 2 0 0 1 15 10.76V7a1 1 0 0 1 1-1 2 2 0 0 0 0-4H8a2 2 0 0 0 0 4 1 1 0 0 1 1 1z"
+                          />
+                        {/if}
+                      </svg>
+                    </button>
+                  </div>
+                </div>
+              {/if}
             </div>
           {/if}
 
@@ -314,6 +447,8 @@
             <div class="space-y-1.5">
               {#each savedPresets as preset (preset.key)}
                 {@const isPinned = studio.defaultPresetKey === preset.key}
+                {@const ver = getPresetVerification(preset)}
+                {@const verLabel = getVerificationMeta(ver.status).label}
                 <div class="rounded-box bg-base-200/40 border border-base-300 px-3 py-2 space-y-2">
                   {#if editingKey === preset.key}
                     <form
@@ -351,6 +486,61 @@
                         </button>
                       </div>
                     </form>
+                  {:else if verifyingKey === preset.key}
+                    <form
+                      class="space-y-2"
+                      onsubmit={(e) => {
+                        e.preventDefault();
+                        void submitVerify(preset);
+                      }}
+                    >
+                      <div class="flex items-center gap-1.5">
+                        <span class="text-xs font-semibold truncate">{preset.label}</span>
+                        <span class="badge badge-xs badge-soft shrink-0">
+                          {preset.source === 'project' ? 'Project' : 'User'}
+                        </span>
+                      </div>
+                      <div class="grid grid-cols-2 gap-1.5">
+                        {#each VERIFICATION_STATUSES as opt (opt.value)}
+                          {@const active = verifyStatus === opt.value}
+                          <button
+                            type="button"
+                            aria-pressed={active}
+                            title={opt.hint}
+                            class="flex items-center gap-1.5 px-2 py-1 rounded-field border text-left text-[11px] cursor-pointer focus-visible:outline-2 focus-visible:outline-offset-1 focus-visible:outline-primary {active
+                              ? `${opt.selectedButtonClass} font-semibold`
+                              : 'border-base-300 hover:border-base-content/30 bg-base-100'}"
+                            onclick={() => {
+                              verifyStatus = opt.value;
+                            }}
+                          >
+                            <VerificationIcon status={opt.value} class="h-3.5 w-3.5" />
+                            <span class="truncate">{opt.label}</span>
+                          </button>
+                        {/each}
+                      </div>
+                      <textarea
+                        bind:value={verifyNote}
+                        rows="2"
+                        placeholder="Optional print notes (material, tolerances, fit feedback...)"
+                        class="textarea textarea-bordered textarea-xs w-full text-xs leading-snug bg-base-100"
+                      ></textarea>
+                      <div class="flex justify-end gap-1.5">
+                        <button
+                          type="button"
+                          class="btn btn-xs btn-ghost"
+                          disabled={actionBusy}
+                          onclick={() => {
+                            verifyingKey = null;
+                          }}
+                        >
+                          Cancel
+                        </button>
+                        <button type="submit" class="btn btn-xs btn-primary" disabled={actionBusy}>
+                          Save
+                        </button>
+                      </div>
+                    </form>
                   {:else}
                     <div class="flex items-center justify-between gap-2">
                       <div class="min-w-0">
@@ -367,6 +557,11 @@
                         </div>
                         {#if preset.description}
                           <p class="text-[11px] opacity-60 truncate">{preset.description}</p>
+                        {/if}
+                        {#if ver.note}
+                          <p class="text-[11px] opacity-70 italic truncate" title={ver.note}>
+                            {ver.note}
+                          </p>
                         {/if}
                       </div>
 
@@ -391,6 +586,19 @@
                             Cancel
                           </button>
                         {:else}
+                          <button
+                            type="button"
+                            class="btn btn-ghost btn-xs btn-square {ver.status === 'unverified' && !ver.note
+                              ? 'opacity-60 hover:opacity-100'
+                              : 'opacity-90 hover:opacity-100'}"
+                            disabled={actionBusy}
+                            title={formatVerificationTooltip(ver.status, ver.note)}
+                            aria-label={`Verification (${verLabel}): edit for ${preset.label}`}
+                            onclick={() => startVerify(preset)}
+                          >
+                            <VerificationIcon status={ver.status} class="h-3.5 w-3.5" />
+                          </button>
+
                           <button
                             type="button"
                             class={`btn btn-ghost btn-xs btn-square ${
@@ -419,15 +627,16 @@
                               aria-hidden="true"
                             >
                               {#if isPinned}
-                                <circle cx="12" cy="12" r="10" fill="currentColor" stroke="none" />
+                                <path d="M12 17v5" />
                                 <path
-                                  d="m9 12 2 2 4-4"
-                                  stroke="var(--color-primary-content, #fff)"
-                                  stroke-width="2.25"
+                                  d="M9 10.76a2 2 0 0 1-1.11 1.79l-1.78.9A2 2 0 0 0 5 15.24V16a1 1 0 0 0 1 1h12a1 1 0 0 0 1-1v-.76a2 2 0 0 0-1.11-1.79l-1.78-.9A2 2 0 0 1 15 10.76V7a1 1 0 0 1 1-1 2 2 0 0 0 0-4H8a2 2 0 0 0 0 4 1 1 0 0 1 1 1z"
+                                  fill="currentColor"
                                 />
                               {:else}
-                                <circle cx="12" cy="12" r="10" />
-                                <path d="m9 12 2 2 4-4" />
+                                <path d="M12 17v5" />
+                                <path
+                                  d="M9 10.76a2 2 0 0 1-1.11 1.79l-1.78.9A2 2 0 0 0 5 15.24V16a1 1 0 0 0 1 1h12a1 1 0 0 0 1-1v-.76a2 2 0 0 0-1.11-1.79l-1.78-.9A2 2 0 0 1 15 10.76V7a1 1 0 0 1 1-1 2 2 0 0 0 0-4H8a2 2 0 0 0 0 4 1 1 0 0 1 1 1z"
+                                />
                               {/if}
                             </svg>
                           </button>
@@ -466,6 +675,7 @@
                             aria-label={`Delete ${preset.label}`}
                             onclick={() => {
                               editingKey = null;
+                              verifyingKey = null;
                               deletingKey = preset.key;
                             }}
                           >
@@ -544,6 +754,14 @@
             {/if}
 
             {#if previewData.changes.length > 0}
+              {#if canonicalDefaultVer.status !== 'unverified'}
+                <div class="alert alert-info alert-soft text-xs py-2">
+                  <span>
+                    Applying these changes will reset the base preset's verification status to
+                    <strong>Unverified</strong> (any print note will be preserved).
+                  </span>
+                </div>
+              {/if}
               <div class="rounded-box border border-base-300 overflow-hidden">
                 <table class="table table-xs w-full">
                   <thead>

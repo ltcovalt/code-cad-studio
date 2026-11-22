@@ -8,11 +8,13 @@ import type {
   ModelDetailResponse,
   ModelsResponse,
   ParamsRecord,
+  PresetVerification,
   PresetsResponse,
   RenamePresetResponse,
   RenderResponse,
   SavePresetResponse,
   SetDefaultPresetResponse,
+  SetPresetVerificationResponse,
   SetupDefaultsResponse,
   SetupDownloadResponse,
   SetupInspectDirResponse,
@@ -21,6 +23,7 @@ import type {
   SetupProbeResponse,
   SetupProgressEvent,
   UpdateDefaultsResponse,
+  VerificationStatus,
 } from './types';
 
 async function fetchJSON<T>(url: string, init?: RequestInit): Promise<T> {
@@ -268,12 +271,31 @@ export function savePreset(
     scope: string;
     full_snapshot?: boolean;
     params: ParamsRecord;
+    verification?: PresetVerification | null;
   }
 ): Promise<SavePresetResponse> {
   return fetchJSON<SavePresetResponse>(`/api/models/${encodeURIComponent(modelId)}/presets`, {
     method: 'POST',
     body: JSON.stringify(payload),
   });
+}
+
+export function setPresetVerification(
+  modelId: string,
+  key: string,
+  payload: {
+    scope: string;
+    status: VerificationStatus;
+    note: string;
+  }
+): Promise<SetPresetVerificationResponse> {
+  return fetchJSON<SetPresetVerificationResponse>(
+    `/api/models/${encodeURIComponent(modelId)}/presets/${encodeURIComponent(key)}/verification`,
+    {
+      method: 'PUT',
+      body: JSON.stringify(payload),
+    }
+  );
 }
 
 export function deletePreset(
