@@ -5,6 +5,7 @@
   import ManagePresetsModal from './components/ManagePresetsModal.svelte';
   import ModelSidebar from './components/ModelSidebar.svelte';
   import ModelWorkspace from './components/ModelWorkspace.svelte';
+  import OnboardingModal from './components/OnboardingModal.svelte';
   import SavePresetModal from './components/SavePresetModal.svelte';
   import SettingsModal from './components/SettingsModal.svelte';
   import { studio } from './lib/studioState.svelte';
@@ -267,6 +268,7 @@
   {/if}
 </div>
 
+<OnboardingModal />
 <SettingsModal />
 <SavePresetModal />
 <ManagePresetsModal />

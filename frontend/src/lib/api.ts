@@ -13,6 +13,13 @@ import type {
   RenderResponse,
   SavePresetResponse,
   SetDefaultPresetResponse,
+  SetupDefaultsResponse,
+  SetupDownloadResponse,
+  SetupInspectDirResponse,
+  SetupInstallEnvResponse,
+  SetupLogEvent,
+  SetupProbeResponse,
+  SetupProgressEvent,
   UpdateDefaultsResponse,
 } from './types';
 
@@ -76,6 +83,73 @@ export async function saveTheme(theme: string): Promise<void> {
 
 export function getHealth(): Promise<HealthCheckResponse> {
   return fetchJSON<HealthCheckResponse>('/api/health');
+}
+
+export function getSetupDefaults(): Promise<SetupDefaultsResponse> {
+  return fetchJSON<SetupDefaultsResponse>('/api/setup/defaults');
+}
+
+export function inspectSetupDir(path: string): Promise<SetupInspectDirResponse> {
+  return fetchJSON<SetupInspectDirResponse>('/api/setup/inspect-dir', {
+    method: 'POST',
+    body: JSON.stringify({ path }),
+  });
+}
+
+export function probeSetup(
+  projectRoot: string,
+  pythonPath = ''
+): Promise<SetupProbeResponse> {
+  return fetchJSON<SetupProbeResponse>('/api/setup/probe', {
+    method: 'POST',
+    body: JSON.stringify({
+      project_root: projectRoot,
+      python_path: pythonPath,
+    }),
+  });
+}
+
+export function downloadStarterProject(
+  targetDir: string,
+  archiveUrl = '',
+  allowOverwrite = false
+): Promise<SetupDownloadResponse> {
+  return fetchJSON<SetupDownloadResponse>('/api/setup/download-project', {
+    method: 'POST',
+    body: JSON.stringify({
+      target_dir: targetDir,
+      archive_url: archiveUrl,
+      allow_overwrite: allowOverwrite,
+    }),
+  });
+}
+
+export function installSetupEnv(payload: {
+  project_root: string;
+  base_python: string;
+  use_uv?: boolean;
+}): Promise<SetupInstallEnvResponse> {
+  return fetchJSON<SetupInstallEnvResponse>('/api/setup/install-env', {
+    method: 'POST',
+    body: JSON.stringify(payload),
+  });
+}
+
+export function cancelSetupTask(): Promise<{ ok: boolean; cancelled: boolean }> {
+  return fetchJSON<{ ok: boolean; cancelled: boolean }>('/api/setup/cancel', {
+    method: 'POST',
+  });
+}
+
+export function completeSetup(payload: {
+  project_root: string;
+  export_dir?: string;
+  python_path?: string;
+}): Promise<ConfigResponse> {
+  return fetchJSON<ConfigResponse>('/api/setup/complete', {
+    method: 'POST',
+    body: JSON.stringify(payload),
+  });
 }
 
 export function browseProject(current?: string): Promise<DialogResponse> {
@@ -258,6 +332,8 @@ export interface SSEHandlers {
   onFileChanged: (path: string) => void;
   onPresetsChanged: (path: string) => void;
   onWorkerError: (error: string) => void;
+  onSetupProgress?: (event: SetupProgressEvent) => void;
+  onSetupLog?: (event: SetupLogEvent) => void;
 }
 
 export function subscribeEvents(handlers: SSEHandlers): () => void {
@@ -293,6 +369,24 @@ export function subscribeEvents(handlers: SSEHandlers): () => void {
         handlers.onWorkerError(data.error ?? 'Worker reload error');
       } catch {
         handlers.onWorkerError('Worker reload error');
+      }
+    });
+
+    es.addEventListener('setup-progress', (evt) => {
+      try {
+        const data = JSON.parse((evt as MessageEvent).data) as SetupProgressEvent;
+        handlers.onSetupProgress?.(data);
+      } catch {
+        // ignore malformed progress payload
+      }
+    });
+
+    es.addEventListener('setup-log', (evt) => {
+      try {
+        const data = JSON.parse((evt as MessageEvent).data) as SetupLogEvent;
+        handlers.onSetupLog?.(data);
+      } catch {
+        // ignore malformed log payload
       }
     });
 

@@ -51,15 +51,24 @@
 
   <div class="flex-1 overflow-y-auto space-y-1 p-2">
     {#if !studio.config.project_root}
-      <div class="text-xs opacity-70 py-2">
-        No project folder configured yet.
-        <button
-          type="button"
-          class="link link-primary ml-1"
-          onclick={() => (studio.settingsOpen = true)}
-        >
-          Open Settings
-        </button>
+      <div class="text-xs opacity-80 py-2 space-y-2">
+        <div>No project folder configured yet.</div>
+        <div class="flex flex-wrap items-center gap-2">
+          <button
+            type="button"
+            class="btn btn-xs btn-primary"
+            onclick={() => studio.openOnboarding()}
+          >
+            Run Setup Wizard
+          </button>
+          <button
+            type="button"
+            class="link link-hover text-xs opacity-75"
+            onclick={() => (studio.settingsOpen = true)}
+          >
+            Open Settings
+          </button>
+        </div>
       </div>
     {:else if studio.modelsError}
       <div class="alert alert-error alert-soft text-xs p-2">

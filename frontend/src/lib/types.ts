@@ -5,6 +5,7 @@ export interface Config {
   theme: string;
   preset_save_scope?: 'user' | 'project' | string;
   default_presets?: Record<string, string>;
+  onboarding_completed?: boolean;
 }
 
 export interface HealthResponse {
@@ -20,12 +21,107 @@ export interface ConfigResponse {
   config: Config;
   resolved_python: string;
   resolved_export_dir: string;
+  needs_onboarding?: boolean;
   has_desktop: boolean;
   worker_running: boolean;
   worker_starting?: boolean;
   worker_error: string;
   health?: HealthResponse | null;
   health_error?: string;
+}
+
+export interface DetectedProject {
+  path: string;
+  name: string;
+  model_count: number;
+  has_venv: boolean;
+}
+
+export interface ProjectDirInfo {
+  path: string;
+  exists: boolean;
+  is_dir: boolean;
+  is_empty: boolean;
+  has_models: boolean;
+  model_count: number;
+  has_venv: boolean;
+  venv_python?: string;
+  has_requirements: boolean;
+}
+
+export interface SetupDefaultsResponse {
+  suggested_project_dir: string;
+  suggested_export_dir: string;
+  default_download_dir: string;
+  detected_projects: DetectedProject[];
+  default_repo_url: string;
+  default_archive_url: string;
+  os: string;
+}
+
+export interface SetupInspectDirResponse {
+  ok: boolean;
+  info: ProjectDirInfo;
+  error?: string;
+}
+
+export interface PythonCandidate {
+  path: string;
+  source: string;
+  version: string;
+  version_ok: boolean;
+  has_build123d: boolean;
+  build123d_version?: string;
+  has_ocp_tessellate: boolean;
+  has_pip: boolean;
+  has_venv: boolean;
+  sys_prefix?: string;
+  error?: string;
+}
+
+export interface SetupProbeResponse {
+  candidates: PythonCandidate[];
+  recommended?: PythonCandidate | null;
+  has_uv: boolean;
+  uv_path?: string;
+  os: string;
+  project_info: ProjectDirInfo;
+}
+
+export interface SetupDownloadResponse {
+  ok: boolean;
+  cancelled?: boolean;
+  project_info?: ProjectDirInfo;
+  files_added?: number;
+  files_overwritten?: number;
+  merged?: boolean;
+  error?: string;
+}
+
+export interface SetupInstallEnvResponse {
+  ok: boolean;
+  cancelled?: boolean;
+  venv_dir?: string;
+  python_path?: string;
+  candidate?: PythonCandidate;
+  used_uv?: boolean;
+  error?: string;
+}
+
+export interface SetupProgressEvent {
+  task: 'download' | 'install' | string;
+  stage: string;
+  message: string;
+  bytes_downloaded?: number;
+  total_bytes?: number;
+  files_extracted?: number;
+  total_files?: number;
+}
+
+export interface SetupLogEvent {
+  task: string;
+  stage: string;
+  line: string;
 }
 
 export interface HealthCheckResponse {

@@ -5,10 +5,12 @@ import (
 	"io"
 	"net/http"
 	"os"
+	"path/filepath"
 	"strings"
 
 	"github.com/ltcovalt/code-cad-studio/internal/config"
 	"github.com/ltcovalt/code-cad-studio/internal/presets"
+	"github.com/ltcovalt/code-cad-studio/internal/setup"
 	"github.com/ltcovalt/code-cad-studio/internal/worker"
 )
 
@@ -16,6 +18,7 @@ type configResponse struct {
 	Config            config.Config          `json:"config"`
 	ResolvedPython    string                 `json:"resolved_python"`
 	ResolvedExportDir string                 `json:"resolved_export_dir"`
+	NeedsOnboarding   bool                   `json:"needs_onboarding"`
 	HasDesktop        bool                   `json:"has_desktop"`
 	WorkerRunning     bool                   `json:"worker_running"`
 	WorkerStarting    bool                   `json:"worker_starting"`
@@ -34,6 +37,7 @@ func (s *Server) handleGetConfig(w http.ResponseWriter, r *http.Request) {
 		Config:            cfg,
 		ResolvedPython:    cfg.ResolvePython(),
 		ResolvedExportDir: cfg.ResolveExportDir(),
+		NeedsOnboarding:   cfg.NeedsOnboarding(),
 		HasDesktop:        s.dialogs != nil,
 		WorkerRunning:     running,
 		WorkerStarting:    s.worker.Starting(),
@@ -52,14 +56,17 @@ func (s *Server) handleSaveConfig(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	projectRoot := strings.TrimSpace(req.ProjectRoot)
-	pythonPath := strings.TrimSpace(req.PythonPath)
-	exportDir := strings.TrimSpace(req.ExportDir)
+	projectRoot := setup.ExpandPath(req.ProjectRoot)
+	pythonPath := setup.ExpandPath(req.PythonPath)
+	exportDir := setup.ExpandPath(req.ExportDir)
 
 	cfg, err := s.cfgStore.Update(func(c *config.Config) {
 		c.ProjectRoot = projectRoot
 		c.PythonPath = pythonPath
 		c.ExportDir = exportDir
+		if projectRoot != "" {
+			c.OnboardingCompleted = true
+		}
 	})
 	if err != nil {
 		writeJSON(w, http.StatusInternalServerError, map[string]any{"ok": false, "error": err.Error()})
@@ -87,6 +94,7 @@ func (s *Server) handleSaveConfig(w http.ResponseWriter, r *http.Request) {
 		Config:            cfg,
 		ResolvedPython:    cfg.ResolvePython(),
 		ResolvedExportDir: cfg.ResolveExportDir(),
+		NeedsOnboarding:   cfg.NeedsOnboarding(),
 		HasDesktop:        s.dialogs != nil,
 		WorkerRunning:     running,
 		WorkerStarting:    s.worker.Starting(),
@@ -142,6 +150,28 @@ func (s *Server) handleHealth(w http.ResponseWriter, r *http.Request) {
 	})
 }
 
+func nearestExistingDir(p string) string {
+	cur := setup.ExpandPath(p)
+	for cur != "" {
+		if info, err := os.Stat(cur); err == nil {
+			if info.IsDir() {
+				return cur
+			}
+			cur = filepath.Dir(cur)
+			continue
+		}
+		parent := filepath.Dir(cur)
+		if parent == cur {
+			break
+		}
+		cur = parent
+	}
+	if home, err := os.UserHomeDir(); err == nil {
+		return home
+	}
+	return ""
+}
+
 func (s *Server) handleDialogProject(w http.ResponseWriter, r *http.Request) {
 	if s.dialogs == nil {
 		writeJSON(w, http.StatusBadRequest, map[string]any{"error": "native dialogs unavailable"})
@@ -158,6 +188,7 @@ func (s *Server) handleDialogProject(w http.ResponseWriter, r *http.Request) {
 	if startDir == "" {
 		startDir = s.cfgStore.Get().ProjectRoot
 	}
+	startDir = nearestExistingDir(startDir)
 	dir, err := s.dialogs.ChooseDirectory("Select build123d Project Folder", startDir)
 	if err != nil {
 		writeJSON(w, http.StatusInternalServerError, map[string]any{"error": err.Error()})
@@ -185,6 +216,7 @@ func (s *Server) handleDialogPython(w http.ResponseWriter, r *http.Request) {
 	if startDir == "" {
 		startDir = s.cfgStore.Get().ProjectRoot
 	}
+	startDir = nearestExistingDir(startDir)
 	p, err := s.dialogs.ChooseFile("Select Python Interpreter", startDir)
 	if err != nil {
 		writeJSON(w, http.StatusInternalServerError, map[string]any{"error": err.Error()})
@@ -213,11 +245,7 @@ func (s *Server) handleDialogExportDir(w http.ResponseWriter, r *http.Request) {
 	if startDir == "" {
 		startDir = cfg.ResolveExportDir()
 	}
-	if startDir != "" {
-		if info, err := os.Stat(startDir); err != nil || !info.IsDir() {
-			startDir = cfg.ProjectRoot
-		}
-	}
+	startDir = nearestExistingDir(startDir)
 	dir, err := s.dialogs.ChooseDirectory("Select Default Export Folder", startDir)
 	if err != nil {
 		writeJSON(w, http.StatusInternalServerError, map[string]any{"error": err.Error()})

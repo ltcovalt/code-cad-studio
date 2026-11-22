@@ -3,6 +3,7 @@ package config
 import (
 	"encoding/json"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"runtime"
 	"strings"
@@ -13,12 +14,13 @@ const AppDirName = "code-cad-studio"
 
 // Config holds persisted user settings for Code CAD Studio.
 type Config struct {
-	ProjectRoot     string            `json:"project_root"`
-	PythonPath      string            `json:"python_path"`
-	ExportDir       string            `json:"export_dir,omitempty"`
-	Theme           string            `json:"theme"`
-	PresetSaveScope string            `json:"preset_save_scope,omitempty"` // "user" or "project"
-	DefaultPresets  map[string]string `json:"default_presets,omitempty"`   // modelID -> presetKey
+	ProjectRoot         string            `json:"project_root"`
+	PythonPath          string            `json:"python_path"`
+	ExportDir           string            `json:"export_dir,omitempty"`
+	Theme               string            `json:"theme"`
+	PresetSaveScope     string            `json:"preset_save_scope,omitempty"` // "user" or "project"
+	DefaultPresets      map[string]string `json:"default_presets,omitempty"`   // modelID -> presetKey
+	OnboardingCompleted bool              `json:"onboarding_completed,omitempty"`
 }
 
 // Store manages thread-safe loading and saving of Config.
@@ -125,7 +127,19 @@ func (c Config) ResolvePython() string {
 	if runtime.GOOS == "windows" {
 		return "python"
 	}
+	if _, err := exec.LookPath("python3"); err == nil {
+		return "python3"
+	}
+	if _, err := exec.LookPath("python"); err == nil {
+		return "python"
+	}
 	return "python3"
+}
+
+// NeedsOnboarding returns true when the user has neither completed onboarding
+// nor configured a project root yet.
+func (c Config) NeedsOnboarding() bool {
+	return !c.OnboardingCompleted && strings.TrimSpace(c.ProjectRoot) == ""
 }
 
 // ResolveExportDir determines the default directory for model exports:

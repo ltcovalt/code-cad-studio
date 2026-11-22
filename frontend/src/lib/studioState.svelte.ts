@@ -3,12 +3,15 @@ import type { CadViewportController } from './cadViewer';
 import { deepClone, mergeWithDefaults, normalizeParamsWithFields, setParamByPath } from './params';
 import type {
   Config,
+  ConfigResponse,
   ExportFormat,
   ModelInfo,
   ParamField,
   ParamsRecord,
   ParamUpdateMode,
   Preset,
+  SetupLogEvent,
+  SetupProgressEvent,
   StatusState,
   UpdateDefaultsResponse,
 } from './types';
@@ -35,6 +38,10 @@ class StudioState {
   workerError = $state('');
   theme = $state('dark');
   showDescriptions = $state(loadShowDescriptions());
+  needsOnboarding = $state(false);
+  onboardingOpen = $state(false);
+  setupProgress = $state<SetupProgressEvent | null>(null);
+  setupLogs = $state<string[]>([]);
   settingsOpen = $state(false);
   savePresetModalOpen = $state(false);
   managePresetsModalOpen = $state(false);
@@ -130,10 +137,22 @@ class StudioState {
           this.status = { kind: 'error', error: err };
         }
       },
+      onSetupProgress: (evt: SetupProgressEvent) => {
+        this.setupProgress = evt;
+      },
+      onSetupLog: (evt: SetupLogEvent) => {
+        if (!evt.line) return;
+        const next = [...this.setupLogs, evt.line];
+        this.setupLogs = next.length > 300 ? next.slice(next.length - 300) : next;
+      },
     });
 
     await this.loadConfig();
-    await this.refreshModels();
+    if (this.needsOnboarding) {
+      this.onboardingOpen = true;
+    } else {
+      await this.refreshModels();
+    }
   }
 
   destroy(): void {
@@ -183,6 +202,7 @@ class StudioState {
       this.config = resp.config;
       this.resolvedPython = resp.resolved_python;
       this.resolvedExportDir = resp.resolved_export_dir;
+      this.needsOnboarding = Boolean(resp.needs_onboarding);
       this.hasDesktop = resp.has_desktop;
       this.workerRunning = resp.worker_running;
       this.workerError = resp.worker_error;
@@ -194,10 +214,32 @@ class StudioState {
     }
   }
 
+  clearSetupStream(): void {
+    this.setupProgress = null;
+    this.setupLogs = [];
+  }
+
+  openOnboarding(): void {
+    this.settingsOpen = false;
+    this.clearSetupStream();
+    this.onboardingOpen = true;
+  }
+
+  async finishOnboarding(resp: ConfigResponse): Promise<void> {
+    this.needsOnboarding = Boolean(resp.needs_onboarding);
+    this.onboardingOpen = false;
+    this.clearSetupStream();
+    await this.applySavedConfig(resp);
+    if (!this.activeModelId && this.models.length > 0) {
+      void this.selectModel(this.models[0].id);
+    }
+  }
+
   async applySavedConfig(resp: {
     config: Config;
     resolved_python: string;
     resolved_export_dir: string;
+    needs_onboarding?: boolean;
     has_desktop: boolean;
     worker_running: boolean;
     worker_error: string;
@@ -206,6 +248,9 @@ class StudioState {
     this.config = resp.config;
     this.resolvedPython = resp.resolved_python;
     this.resolvedExportDir = resp.resolved_export_dir;
+    if (typeof resp.needs_onboarding === 'boolean') {
+      this.needsOnboarding = resp.needs_onboarding;
+    }
     this.hasDesktop = resp.has_desktop;
     this.workerRunning = resp.worker_running;
     this.workerError = resp.worker_error;

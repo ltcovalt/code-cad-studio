@@ -42,6 +42,9 @@ type Server struct {
 
 	sseMu      sync.Mutex
 	sseClients map[chan string]struct{}
+
+	setupMu     sync.Mutex
+	setupCancel context.CancelFunc
 }
 
 // SetWindow attaches native desktop window controls (optional; nil in standalone web mode).
@@ -67,6 +70,9 @@ func New(cfgStore *config.Store, workerMgr *worker.Manager, dialogs DesktopDialo
 // StartServices boots the Python worker and project watcher using persisted config.
 func (s *Server) StartServices() {
 	cfg := s.cfgStore.Get()
+	if cfg.NeedsOnboarding() {
+		return
+	}
 	pyPath := cfg.ResolvePython()
 	if err := s.worker.EnsureStarted(pyPath, cfg.ProjectRoot); err != nil {
 		log.Printf("Worker startup warning: %v", err)
@@ -78,8 +84,9 @@ func (s *Server) StartServices() {
 	}
 }
 
-// Shutdown stops the file watcher and Python worker cleanly.
+// Shutdown stops any in-flight setup task, the file watcher, and the Python worker cleanly.
 func (s *Server) Shutdown() {
+	s.cancelSetupTask()
 	if s.watcher != nil {
 		s.watcher.Stop()
 	}
@@ -115,6 +122,15 @@ func (s *Server) registerRoutes() {
 	s.mux.HandleFunc("POST /api/config", s.handleSaveConfig)
 	s.mux.HandleFunc("POST /api/config/theme", s.handleSaveTheme)
 	s.mux.HandleFunc("GET /api/health", s.handleHealth)
+
+	// Onboarding & Environment Setup
+	s.mux.HandleFunc("GET /api/setup/defaults", s.handleSetupDefaults)
+	s.mux.HandleFunc("POST /api/setup/inspect-dir", s.handleSetupInspectDir)
+	s.mux.HandleFunc("POST /api/setup/probe", s.handleSetupProbe)
+	s.mux.HandleFunc("POST /api/setup/download-project", s.handleSetupDownloadProject)
+	s.mux.HandleFunc("POST /api/setup/install-env", s.handleSetupInstallEnv)
+	s.mux.HandleFunc("POST /api/setup/cancel", s.handleSetupCancel)
+	s.mux.HandleFunc("POST /api/setup/complete", s.handleSetupComplete)
 
 	// Native OS Dialogs
 	s.mux.HandleFunc("POST /api/dialogs/project", s.handleDialogProject)

@@ -747,3 +747,102 @@ def create_cutout_demo(params: CutoutDemoParams):
 		t.Fatalf("expected empty list coercion -> 'cutout_demo_0_none.stl', got %q", dialogs.lastSave)
 	}
 }
+
+func TestSetupOnboardingHandlers(t *testing.T) {
+	t.Setenv("HOME", t.TempDir())
+	srv := newTestServer(t, nil)
+
+	// Fresh config should request onboarding
+	rec := httptest.NewRecorder()
+	srv.Handler().ServeHTTP(rec, httptest.NewRequest(http.MethodGet, "/api/config", nil))
+	if rec.Code != http.StatusOK {
+		t.Fatalf("GET /api/config status = %d", rec.Code)
+	}
+	var cfgResp configResponse
+	if err := json.Unmarshal(rec.Body.Bytes(), &cfgResp); err != nil {
+		t.Fatalf("decode config: %v", err)
+	}
+	if !cfgResp.NeedsOnboarding {
+		t.Fatalf("expected needs_onboarding=true for fresh config")
+	}
+
+	// GET /api/setup/defaults
+	rec = httptest.NewRecorder()
+	srv.Handler().ServeHTTP(rec, httptest.NewRequest(http.MethodGet, "/api/setup/defaults", nil))
+	if rec.Code != http.StatusOK {
+		t.Fatalf("GET /api/setup/defaults status = %d", rec.Code)
+	}
+	var defResp struct {
+		SuggestedProjectDir string `json:"suggested_project_dir"`
+		SuggestedExportDir  string `json:"suggested_export_dir"`
+		DefaultArchiveURL   string `json:"default_archive_url"`
+	}
+	if err := json.Unmarshal(rec.Body.Bytes(), &defResp); err != nil {
+		t.Fatalf("decode defaults: %v", err)
+	}
+	if defResp.SuggestedProjectDir == "" || defResp.SuggestedExportDir == "" || defResp.DefaultArchiveURL == "" {
+		t.Fatalf("unexpected defaults response: %+v", defResp)
+	}
+
+	// POST /api/setup/inspect-dir
+	projDir := filepath.Join(t.TempDir(), "sample_proj")
+	if err := os.MkdirAll(filepath.Join(projDir, "models", "demo"), 0o755); err != nil {
+		t.Fatalf("mkdir demo: %v", err)
+	}
+	if err := os.WriteFile(filepath.Join(projDir, "models", "demo", "demo.py"), []byte("# demo\n"), 0o644); err != nil {
+		t.Fatalf("write demo.py: %v", err)
+	}
+
+	inspectBody, _ := json.Marshal(map[string]any{"path": projDir})
+	rec = httptest.NewRecorder()
+	srv.Handler().ServeHTTP(rec, httptest.NewRequest(http.MethodPost, "/api/setup/inspect-dir", bytes.NewReader(inspectBody)))
+	if rec.Code != http.StatusOK {
+		t.Fatalf("POST /api/setup/inspect-dir status = %d", rec.Code)
+	}
+	var inspectResp struct {
+		OK   bool `json:"ok"`
+		Info struct {
+			Exists     bool `json:"exists"`
+			HasModels  bool `json:"has_models"`
+			ModelCount int  `json:"model_count"`
+		} `json:"info"`
+	}
+	if err := json.Unmarshal(rec.Body.Bytes(), &inspectResp); err != nil {
+		t.Fatalf("decode inspect: %v", err)
+	}
+	if !inspectResp.OK || !inspectResp.Info.Exists || !inspectResp.Info.HasModels || inspectResp.Info.ModelCount != 1 {
+		t.Fatalf("unexpected inspect response: %+v", inspectResp)
+	}
+
+	// POST /api/setup/probe
+	probeBody, _ := json.Marshal(map[string]any{"project_root": projDir})
+	rec = httptest.NewRecorder()
+	srv.Handler().ServeHTTP(rec, httptest.NewRequest(http.MethodPost, "/api/setup/probe", bytes.NewReader(probeBody)))
+	if rec.Code != http.StatusOK {
+		t.Fatalf("POST /api/setup/probe status = %d", rec.Code)
+	}
+
+	// POST /api/setup/complete marks onboarding completed and persists project_root
+	completeBody, _ := json.Marshal(map[string]any{
+		"project_root": projDir,
+		"export_dir":   filepath.Join(projDir, "exports"),
+	})
+	rec = httptest.NewRecorder()
+	srv.Handler().ServeHTTP(rec, httptest.NewRequest(http.MethodPost, "/api/setup/complete", bytes.NewReader(completeBody)))
+	if rec.Code != http.StatusOK {
+		t.Fatalf("POST /api/setup/complete status = %d", rec.Code)
+	}
+	if err := json.Unmarshal(rec.Body.Bytes(), &cfgResp); err != nil {
+		t.Fatalf("decode complete: %v", err)
+	}
+	if cfgResp.NeedsOnboarding || !cfgResp.Config.OnboardingCompleted {
+		t.Fatalf("expected onboarding_completed=true and needs_onboarding=false after complete, got %+v", cfgResp)
+	}
+	if cfgResp.Config.ProjectRoot != projDir {
+		t.Fatalf("expected project_root=%q, got %q", projDir, cfgResp.Config.ProjectRoot)
+	}
+	// Default <project_root>/exports should normalize to empty export_dir while resolving cleanly
+	if cfgResp.Config.ExportDir != "" || cfgResp.ResolvedExportDir != filepath.Join(projDir, "exports") {
+		t.Fatalf("unexpected export dir config=%q resolved=%q", cfgResp.Config.ExportDir, cfgResp.ResolvedExportDir)
+	}
+}
