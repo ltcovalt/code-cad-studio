@@ -5,6 +5,8 @@ frontend/bindings
 frontend/node_modules
 build/linux/*.desktop
 build/linux/appimage/build
+build/darwin/icons.icns
+build/windows/icon.ico
 build/windows/nsis/MicrosoftEdgeWebview2Setup.exe
 # Mobile generated (per-machine; overlays hold absolute paths)
 build/ios/xcode/overlay.json
