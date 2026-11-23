@@ -34,32 +34,48 @@ func buildTestZip(t *testing.T, entries map[string]string) []byte {
 func TestInspectProjectDirAndDefaults(t *testing.T) {
 	home := t.TempDir()
 	t.Setenv("HOME", home)
+	t.Setenv("XDG_CONFIG_HOME", filepath.Join(home, ".config"))
 
-	// Fresh home with Documents folder -> suggests ~/Documents/code-cad
+	// Fresh home with Documents folder -> suggests ~/Documents/code-cad as default download dir
 	docsDir := filepath.Join(home, "Documents")
 	if err := os.MkdirAll(docsDir, 0o755); err != nil {
 		t.Fatalf("mkdir Documents: %v", err)
 	}
 
 	def := Defaults()
-	wantSuggested := filepath.Join(docsDir, "code-cad")
-	if def.SuggestedProjectDir != wantSuggested {
-		t.Fatalf("SuggestedProjectDir = %q, want %q", def.SuggestedProjectDir, wantSuggested)
+	wantDownload := filepath.Join(docsDir, "code-cad")
+	if def.DefaultDownloadDir != wantDownload {
+		t.Fatalf("DefaultDownloadDir = %q, want %q", def.DefaultDownloadDir, wantDownload)
 	}
-	if def.SuggestedExportDir != filepath.Join(wantSuggested, "exports") {
-		t.Fatalf("SuggestedExportDir = %q", def.SuggestedExportDir)
+	if def.StudioVenvDir == "" {
+		t.Fatalf("expected non-empty StudioVenvDir")
 	}
 	if len(def.DetectedProjects) != 0 {
 		t.Fatalf("expected 0 detected projects, got %d", len(def.DetectedProjects))
 	}
 
-	// Create an existing ~/code-cad with models, requirements.txt, and .venv
+	// Create an existing ~/code-cad with flat + nested models, utils (must be skipped), requirements.txt, and .venv
 	existing := filepath.Join(home, "code-cad")
 	if err := os.MkdirAll(filepath.Join(existing, "models", "widget"), 0o755); err != nil {
 		t.Fatalf("mkdir models/widget: %v", err)
 	}
 	if err := os.WriteFile(filepath.Join(existing, "models", "widget", "widget.py"), []byte("# model\n"), 0o644); err != nil {
 		t.Fatalf("write widget.py: %v", err)
+	}
+	if err := os.MkdirAll(filepath.Join(existing, "models", "gridfinity", "bin"), 0o755); err != nil {
+		t.Fatalf("mkdir models/gridfinity/bin: %v", err)
+	}
+	if err := os.WriteFile(filepath.Join(existing, "models", "gridfinity", "bin", "bin.py"), []byte("# nested model\n"), 0o644); err != nil {
+		t.Fatalf("write bin.py: %v", err)
+	}
+	if err := os.WriteFile(filepath.Join(existing, "root_model.py"), []byte("# root model\n"), 0o644); err != nil {
+		t.Fatalf("write root_model.py: %v", err)
+	}
+	if err := os.MkdirAll(filepath.Join(existing, "utils"), 0o755); err != nil {
+		t.Fatalf("mkdir utils: %v", err)
+	}
+	if err := os.WriteFile(filepath.Join(existing, "utils", "params.py"), []byte("# helper\n"), 0o644); err != nil {
+		t.Fatalf("write params.py: %v", err)
 	}
 	if err := os.WriteFile(filepath.Join(existing, "requirements.txt"), []byte("build123d\n"), 0o644); err != nil {
 		t.Fatalf("write requirements.txt: %v", err)
@@ -76,8 +92,8 @@ func TestInspectProjectDirAndDefaults(t *testing.T) {
 	if !info.Exists || !info.IsDir || info.IsEmpty {
 		t.Fatalf("unexpected info existence flags: %+v", info)
 	}
-	if !info.HasModels || info.ModelCount != 1 {
-		t.Fatalf("expected 1 model, got %+v", info)
+	if !info.HasModels || info.ModelCount != 3 {
+		t.Fatalf("expected 3 models (flat + nested + root, excluding utils), got %+v", info)
 	}
 	if !info.HasVenv || info.VenvPython != venvPy {
 		t.Fatalf("expected venv python %q, got %+v", venvPy, info)
@@ -86,13 +102,10 @@ func TestInspectProjectDirAndDefaults(t *testing.T) {
 		t.Fatalf("expected HasRequirements=true")
 	}
 
-	// Defaults should now detect ~/code-cad and suggest it
+	// Defaults should now detect ~/code-cad
 	def2 := Defaults()
-	if len(def2.DetectedProjects) != 1 || def2.DetectedProjects[0].Path != existing {
-		t.Fatalf("expected detected project %q, got %+v", existing, def2.DetectedProjects)
-	}
-	if def2.SuggestedProjectDir != existing {
-		t.Fatalf("SuggestedProjectDir = %q, want %q", def2.SuggestedProjectDir, existing)
+	if len(def2.DetectedProjects) != 1 || def2.DetectedProjects[0].Path != existing || def2.DetectedProjects[0].ModelCount != 3 {
+		t.Fatalf("expected detected project %q with 3 models, got %+v", existing, def2.DetectedProjects)
 	}
 }
 
@@ -228,14 +241,15 @@ func TestCandidateRanking(t *testing.T) {
 	candidates := []PythonCandidate{
 		{Path: "/usr/bin/python3", Source: "path", Version: "3.12.0", VersionOK: true, HasBuild123d: false, HasVenv: true},
 		{Path: "/global/python3", Source: "path", Version: "3.12.0", VersionOK: true, HasBuild123d: true, HasOCPTessellate: false},
-		{Path: "/proj/.venv/bin/python", Source: "project_venv", Version: "3.12.0", VersionOK: true, HasBuild123d: true, HasOCPTessellate: true},
+		{Path: "/proj/.venv/bin/python", Source: "library_venv", SourceDetail: "proj", Version: "3.12.0", VersionOK: true, HasBuild123d: true, HasOCPTessellate: true},
+		{Path: "/studio/venv/bin/python", Source: "studio_venv", Version: "3.12.0", VersionOK: true, HasBuild123d: true, HasOCPTessellate: true},
 		{Path: "/old/python3.9", Source: "system", Version: "3.9.18", VersionOK: false, HasBuild123d: true},
 	}
 
 	rankCandidates(candidates, false)
 	rec := pickRecommended(candidates, false)
-	if rec == nil || rec.Path != "/proj/.venv/bin/python" {
-		t.Fatalf("expected project_venv with build123d+ocp_tessellate, got %+v", rec)
+	if rec == nil || rec.Path != "/studio/venv/bin/python" {
+		t.Fatalf("expected studio_venv with build123d+ocp_tessellate first, got %+v", rec)
 	}
 
 	// When no candidate has build123d, pick VersionOK + HasVenv

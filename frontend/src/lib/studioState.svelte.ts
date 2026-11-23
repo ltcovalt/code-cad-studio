@@ -1,5 +1,6 @@
 import * as api from './api';
 import type { CadViewportController } from './cadViewer';
+import { buildModelTree, collectFolderKeys, type TreeNode } from './modelTree';
 import {
   deepClone,
   mergeWithDefaults,
@@ -26,6 +27,7 @@ import type {
 
 const THEME_STORAGE_KEY = 'code-cad-theme';
 const DESCRIPTIONS_STORAGE_KEY = 'code-cad-show-descriptions';
+const COLLAPSED_TREE_STORAGE_KEY = 'code-cad-tree-collapsed';
 const RENDER_DEBOUNCE_MS = 180;
 
 function loadShowDescriptions(): boolean {
@@ -36,9 +38,28 @@ function loadShowDescriptions(): boolean {
   }
 }
 
+function loadCollapsedFolders(): Record<string, boolean> {
+  try {
+    const raw = localStorage.getItem(COLLAPSED_TREE_STORAGE_KEY);
+    if (!raw) return {};
+    const parsed: unknown = JSON.parse(raw);
+    if (Array.isArray(parsed)) {
+      const out: Record<string, boolean> = {};
+      for (const k of parsed) {
+        if (typeof k === 'string' && k) out[k] = true;
+      }
+      return out;
+    }
+  } catch {
+    // ignore storage errors
+  }
+  return {};
+}
+
 class StudioState {
   // Config & environment
-  config = $state<Config>({ project_root: '', python_path: '', export_dir: '', theme: 'dark' });
+  config = $state<Config>({ libraries: [], python_path: '', export_dir: '', theme: 'dark' });
+  hasLibraries = $derived((this.config.libraries?.length ?? 0) > 0);
   resolvedPython = $state('');
   resolvedExportDir = $state('');
   hasDesktop = $state(false);
@@ -48,6 +69,7 @@ class StudioState {
   showDescriptions = $state(loadShowDescriptions());
   needsOnboarding = $state(false);
   onboardingOpen = $state(false);
+  onboardingInitialStep = $state<1 | 2>(1);
   setupProgress = $state<SetupProgressEvent | null>(null);
   setupLogs = $state<string[]>([]);
   settingsOpen = $state(false);
@@ -55,22 +77,65 @@ class StudioState {
   managePresetsModalOpen = $state(false);
   reloadedVisible = $state(false);
 
-  // Models list
+  // Models & Explorer tree
   models = $state<ModelInfo[]>([]);
+  libraryErrors = $state<Record<string, string>>({});
   modelsLoading = $state(false);
   modelsError = $state('');
   searchQuery = $state('');
+  collapsedFolders = $state<Record<string, boolean>>(loadCollapsedFolders());
 
-  filteredModels = $derived.by(() => {
-    const q = this.searchQuery.trim().toLowerCase();
-    if (!q) return this.models;
-    return this.models.filter(
-      (m) =>
-        m.name.toLowerCase().includes(q) ||
-        m.id.toLowerCase().includes(q) ||
-        m.description.toLowerCase().includes(q)
-    );
-  });
+  modelTree = $derived.by<TreeNode[]>(() =>
+    buildModelTree(
+      this.config.libraries ?? [],
+      this.models,
+      this.libraryErrors,
+      this.searchQuery
+    )
+  );
+
+  expandableFolderKeys = $derived.by<string[]>(() => collectFolderKeys(this.modelTree));
+
+  private saveCollapsedFolders(): void {
+    try {
+      const keys = Object.keys(this.collapsedFolders).filter((k) => this.collapsedFolders[k]);
+      localStorage.setItem(COLLAPSED_TREE_STORAGE_KEY, JSON.stringify(keys));
+    } catch {
+      // ignore storage errors
+    }
+  }
+
+  isFolderCollapsed(key: string): boolean {
+    if (this.searchQuery.trim() !== '') {
+      return false;
+    }
+    return Boolean(this.collapsedFolders[key]);
+  }
+
+  toggleFolder(key: string): void {
+    const next = { ...this.collapsedFolders };
+    if (next[key]) {
+      delete next[key];
+    } else {
+      next[key] = true;
+    }
+    this.collapsedFolders = next;
+    this.saveCollapsedFolders();
+  }
+
+  expandAllFolders(): void {
+    this.collapsedFolders = {};
+    this.saveCollapsedFolders();
+  }
+
+  collapseAllFolders(): void {
+    const next: Record<string, boolean> = {};
+    for (const key of this.expandableFolderKeys) {
+      next[key] = true;
+    }
+    this.collapsedFolders = next;
+    this.saveCollapsedFolders();
+  }
 
   // Active model workspace
   activeModelId = $state<string | null>(null);
@@ -209,7 +274,10 @@ class StudioState {
   async loadConfig(): Promise<void> {
     try {
       const resp = await api.getConfig();
-      this.config = resp.config;
+      this.config = {
+        ...resp.config,
+        libraries: resp.config.libraries ?? [],
+      };
       this.resolvedPython = resp.resolved_python;
       this.resolvedExportDir = resp.resolved_export_dir;
       this.needsOnboarding = Boolean(resp.needs_onboarding);
@@ -229,20 +297,36 @@ class StudioState {
     this.setupLogs = [];
   }
 
-  openOnboarding(): void {
+  openOnboarding(initialStep: 1 | 2 = 1): void {
     this.settingsOpen = false;
     this.clearSetupStream();
+    this.onboardingInitialStep = initialStep;
     this.onboardingOpen = true;
   }
 
   async finishOnboarding(resp: ConfigResponse): Promise<void> {
     this.needsOnboarding = Boolean(resp.needs_onboarding);
     this.onboardingOpen = false;
+    this.onboardingInitialStep = 1;
     this.clearSetupStream();
     await this.applySavedConfig(resp);
     if (!this.activeModelId && this.models.length > 0) {
       void this.selectModel(this.models[0].id);
     }
+  }
+
+  private clearActiveModel(): void {
+    this.activeModelId = null;
+    this.activeModel = null;
+    this.modelDescription = '';
+    this.fields = [];
+    this.defaults = {};
+    this.params = {};
+    this.presets = [];
+    this.modelLoadError = '';
+    this.modelLoadTraceback = '';
+    this.lastRenderedKey = '';
+    this.status = { kind: 'idle' };
   }
 
   async applySavedConfig(resp: {
@@ -254,8 +338,9 @@ class StudioState {
     worker_running: boolean;
     worker_error: string;
   }): Promise<void> {
-    const projectChanged = resp.config.project_root !== this.config.project_root;
-    this.config = resp.config;
+    const prevLibs = this.config.libraries ?? [];
+    const nextLibs = resp.config.libraries ?? [];
+    this.config = { ...resp.config, libraries: nextLibs };
     this.resolvedPython = resp.resolved_python;
     this.resolvedExportDir = resp.resolved_export_dir;
     if (typeof resp.needs_onboarding === 'boolean') {
@@ -265,24 +350,27 @@ class StudioState {
     this.workerRunning = resp.worker_running;
     this.workerError = resp.worker_error;
 
-    if (projectChanged) {
-      this.activeModelId = null;
-      this.activeModel = null;
-      this.fields = [];
-      this.defaults = {};
-      this.params = {};
-      this.presets = [];
-      this.modelLoadError = '';
-      this.modelLoadTraceback = '';
-      this.lastRenderedKey = '';
-      this.status = { kind: 'idle' };
+    // Clear active model if its owning library was removed or its path changed
+    if (this.activeModel) {
+      const libId = this.activeModel.library_id;
+      const prevLib = prevLibs.find((l) => l.id === libId);
+      const nextLib = nextLibs.find((l) => l.id === libId);
+      if (!nextLib || (prevLib && prevLib.path !== nextLib.path)) {
+        this.clearActiveModel();
+      }
     }
+
     await this.refreshModels();
+
+    if (this.activeModelId && !this.models.some((m) => m.id === this.activeModelId)) {
+      this.clearActiveModel();
+    }
   }
 
   async refreshModels(): Promise<void> {
-    if (!this.config.project_root) {
+    if (!this.hasLibraries) {
       this.models = [];
+      this.libraryErrors = {};
       this.modelsError = '';
       return;
     }
@@ -290,7 +378,10 @@ class StudioState {
     this.modelsError = '';
     try {
       const resp = await api.listModels();
-      this.config = { ...this.config, project_root: resp.project_root };
+      if (resp.libraries) {
+        this.config = { ...this.config, libraries: resp.libraries };
+      }
+      this.libraryErrors = resp.library_errors ?? {};
       if (!resp.ok) {
         this.models = [];
         this.modelsError = resp.error || 'Failed to list models';
@@ -299,6 +390,7 @@ class StudioState {
       }
     } catch (err) {
       this.models = [];
+      this.libraryErrors = {};
       this.modelsError = err instanceof Error ? err.message : String(err);
     } finally {
       this.modelsLoading = false;
@@ -348,7 +440,8 @@ class StudioState {
         this.params = normalizeParamsWithFields(deepClone(this.defaults), this.fields);
       }
 
-      this.exportFilename = modelId;
+      const stemFallback = resp.model.local_id?.split('/').pop() || modelId;
+      this.exportFilename = stemFallback;
       this.lastRenderedKey = '';
       this.modelLoading = false;
 

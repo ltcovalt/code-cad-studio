@@ -2,30 +2,43 @@ package worker
 
 import "encoding/json"
 
+// LibrarySpec identifies a model library configured on the Python worker.
+type LibrarySpec struct {
+	ID   string `json:"id"`
+	Name string `json:"name"`
+	Path string `json:"path"`
+}
+
 type HealthResponse struct {
-	OK             bool   `json:"ok"`
-	Python         string `json:"python"`
-	Build123d      bool   `json:"build123d"`
-	Build123dError string `json:"build123d_error"`
-	OCPTessellate  bool   `json:"ocp_tessellate"`
-	ProjectRoot    string `json:"project_root"`
+	OK             bool          `json:"ok"`
+	Python         string        `json:"python"`
+	Build123d      bool          `json:"build123d"`
+	Build123dError string        `json:"build123d_error"`
+	OCPTessellate  bool          `json:"ocp_tessellate"`
+	Libraries      []LibrarySpec `json:"libraries"`
 }
 
 type ModelInfo struct {
-	ID          string `json:"id"`
-	Name        string `json:"name"`
-	Path        string `json:"path"`
-	RelPath     string `json:"rel_path"`
-	Description string `json:"description"`
-	ParamsClass string `json:"params_class"`
-	Entrypoint  string `json:"entrypoint"`
-	Dir         string `json:"dir"`
+	ID           string   `json:"id"`
+	LocalID      string   `json:"local_id"`
+	LibraryID    string   `json:"library_id"`
+	LibraryName  string   `json:"library_name"`
+	Folders      []string `json:"folders"`
+	FolderLabels []string `json:"folder_labels"`
+	Name         string   `json:"name"`
+	Path         string   `json:"path"`
+	RelPath      string   `json:"rel_path"`
+	Description  string   `json:"description"`
+	ParamsClass  string   `json:"params_class"`
+	Entrypoint   string   `json:"entrypoint"`
+	Dir          string   `json:"dir"`
 }
 
 type ModelsResponse struct {
-	OK     bool        `json:"ok"`
-	Models []ModelInfo `json:"models"`
-	Error  string      `json:"error,omitempty"`
+	OK            bool              `json:"ok"`
+	Models        []ModelInfo       `json:"models"`
+	LibraryErrors map[string]string `json:"library_errors,omitempty"`
+	Error         string            `json:"error,omitempty"`
 }
 
 type ParamField struct {
@@ -91,6 +104,7 @@ type RenderResponse struct {
 type ExportNameResponse struct {
 	OK             bool   `json:"ok"`
 	ExportFilename string `json:"export_filename,omitempty"`
+	LibraryID      string `json:"library_id,omitempty"`
 	Error          string `json:"error,omitempty"`
 }
 

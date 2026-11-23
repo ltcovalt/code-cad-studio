@@ -1,10 +1,13 @@
 package setup
 
 import (
+	"io/fs"
 	"os"
 	"path/filepath"
 	"runtime"
 	"strings"
+
+	"github.com/ltcovalt/code-cad-studio/internal/config"
 )
 
 const (
@@ -35,16 +38,15 @@ type ProjectDirInfo struct {
 
 // DefaultsResult holds OS-aware onboarding defaults and any auto-detected projects.
 type DefaultsResult struct {
-	SuggestedProjectDir string            `json:"suggested_project_dir"`
-	SuggestedExportDir  string            `json:"suggested_export_dir"`
-	DefaultDownloadDir  string            `json:"default_download_dir"`
-	DetectedProjects    []DetectedProject `json:"detected_projects"`
-	DefaultRepoURL      string            `json:"default_repo_url"`
-	DefaultArchiveURL   string            `json:"default_archive_url"`
-	OS                  string            `json:"os"`
+	DefaultDownloadDir string            `json:"default_download_dir"`
+	StudioVenvDir      string            `json:"studio_venv_dir"`
+	DetectedProjects   []DetectedProject `json:"detected_projects"`
+	DefaultRepoURL     string            `json:"default_repo_url"`
+	DefaultArchiveURL  string            `json:"default_archive_url"`
+	OS                 string            `json:"os"`
 }
 
-var nonModelDirs = map[string]struct{}{
+var alwaysSkipDirs = map[string]struct{}{
 	".git":          {},
 	".venv":         {},
 	"venv":          {},
@@ -55,65 +57,35 @@ var nonModelDirs = map[string]struct{}{
 	".ruff_cache":   {},
 	"build":         {},
 	"dist":          {},
-	"exports":       {},
-	"components":    {},
-	"utils":         {},
-	"tests":         {},
-	"test":          {},
-	".agents":       {},
-	"docs":          {},
+}
+
+var rootOnlySkipDirs = map[string]struct{}{
+	"exports":    {},
+	"components": {},
+	"utils":      {},
+	"tests":      {},
+	"test":       {},
+	"docs":       {},
 }
 
 // ExpandPath expands a leading "~" to the user's home directory and cleans the path.
 func ExpandPath(p string) string {
-	trimmed := strings.TrimSpace(p)
-	if trimmed == "" {
-		return ""
-	}
-	if trimmed == "~" || strings.HasPrefix(trimmed, "~/") || strings.HasPrefix(trimmed, `~\`) {
-		if home, err := os.UserHomeDir(); err == nil && home != "" {
-			if trimmed == "~" {
-				trimmed = home
-			} else {
-				trimmed = filepath.Join(home, trimmed[2:])
-			}
-		}
-	}
-	return filepath.Clean(trimmed)
+	return config.ExpandPath(p)
 }
 
 // FindProjectVenvPython returns the Python executable inside <projectRoot>/.venv or venv if present.
 func FindProjectVenvPython(projectRoot string) string {
-	root := ExpandPath(projectRoot)
-	if root == "" {
-		return ""
-	}
-	candidates := []string{
-		filepath.Join(root, ".venv", "bin", "python"),
-		filepath.Join(root, ".venv", "bin", "python3"),
-		filepath.Join(root, "venv", "bin", "python"),
-		filepath.Join(root, "venv", "bin", "python3"),
-	}
-	if runtime.GOOS == "windows" {
-		candidates = []string{
-			filepath.Join(root, ".venv", "Scripts", "python.exe"),
-			filepath.Join(root, "venv", "Scripts", "python.exe"),
-		}
-	}
-	for _, cand := range candidates {
-		if st, err := os.Stat(cand); err == nil && !st.IsDir() {
-			return cand
-		}
-	}
-	return ""
+	return config.FindDirVenvPython(projectRoot)
+}
+
+// FindStudioVenvPython returns the Python executable inside Studio's shared managed venv if present.
+func FindStudioVenvPython() string {
+	return config.StudioVenvPython()
 }
 
 // VenvPythonPath returns the expected Python executable path inside a venv directory.
 func VenvPythonPath(venvDir string) string {
-	if runtime.GOOS == "windows" {
-		return filepath.Join(venvDir, "Scripts", "python.exe")
-	}
-	return filepath.Join(venvDir, "bin", "python")
+	return config.VenvPythonExecutable(venvDir)
 }
 
 // InspectProjectDir inspects a folder path without running Python so UI feedback is instant.
@@ -149,71 +121,57 @@ func InspectProjectDir(dir string) ProjectDirInfo {
 		info.HasRequirements = true
 	}
 
-	info.ModelCount = countLikelyModels(clean, entries)
+	info.ModelCount = countLikelyModels(clean)
 	info.HasModels = info.ModelCount > 0
 	return info
 }
 
-func countLikelyModels(root string, rootEntries []os.DirEntry) int {
+func countLikelyModels(root string) int {
 	count := 0
-
-	// Check canonical models/<name>/<name>.py or models/*.py layout
-	modelsDir := filepath.Join(root, "models")
-	if modelEntries, err := os.ReadDir(modelsDir); err == nil {
-		for _, e := range modelEntries {
-			name := e.Name()
-			if strings.HasPrefix(name, ".") || strings.HasPrefix(name, "_") {
-				continue
+	cleanRoot := filepath.Clean(root)
+	_ = filepath.WalkDir(cleanRoot, func(path string, d fs.DirEntry, err error) error {
+		if err != nil {
+			return nil
+		}
+		if d.IsDir() {
+			if path == cleanRoot {
+				return nil
 			}
-			if _, skip := nonModelDirs[name]; skip {
-				continue
+			name := d.Name()
+			if strings.HasPrefix(name, ".") {
+				return filepath.SkipDir
 			}
-			if e.IsDir() {
-				subPath := filepath.Join(modelsDir, name)
-				if hasPythonFile(subPath) {
-					count++
+			if _, skip := alwaysSkipDirs[name]; skip {
+				return filepath.SkipDir
+			}
+			if filepath.Dir(path) == cleanRoot {
+				if _, skip := rootOnlySkipDirs[name]; skip {
+					return filepath.SkipDir
 				}
-			} else if strings.HasSuffix(name, ".py") {
-				count++
 			}
+			return nil
 		}
-	}
 
-	// Also count top-level standalone .py scripts or model subdirectories
-	for _, e := range rootEntries {
-		name := e.Name()
-		if name == "models" || strings.HasPrefix(name, ".") || strings.HasPrefix(name, "_") {
-			continue
+		name := d.Name()
+		if !strings.HasSuffix(name, ".py") {
+			return nil
 		}
-		if _, skip := nonModelDirs[name]; skip {
-			continue
+		if strings.HasPrefix(name, "_") || strings.HasPrefix(name, "test_") || name == "setup.py" {
+			return nil
 		}
-		if !e.IsDir() && strings.HasSuffix(name, ".py") && name != "setup.py" {
-			count++
-		}
-	}
-
+		count++
+		return nil
+	})
 	return count
 }
 
-func hasPythonFile(dir string) bool {
-	entries, err := os.ReadDir(dir)
-	if err != nil {
-		return false
-	}
-	for _, e := range entries {
-		if !e.IsDir() && strings.HasSuffix(e.Name(), ".py") && !strings.HasPrefix(e.Name(), "_") {
-			return true
-		}
-	}
-	return false
-}
-
-// Defaults computes OS-aware suggested project and export directories and scans
-// common locations for an existing code-cad repository.
+// Defaults computes OS-aware suggested download/venv locations and scans
+// common directories for existing build123d repositories.
 func Defaults() DefaultsResult {
 	home, _ := os.UserHomeDir()
+	studioVenv, _ := config.StudioVenvDir()
 	res := DefaultsResult{
+		StudioVenvDir:     studioVenv,
 		DetectedProjects:  []DetectedProject{},
 		DefaultRepoURL:    DefaultRepoURL,
 		DefaultArchiveURL: DefaultArchiveURL,
@@ -267,13 +225,5 @@ func Defaults() DefaultsResult {
 		downloadDir = filepath.Join(baseDir, "code-cad-starter")
 	}
 	res.DefaultDownloadDir = downloadDir
-
-	if len(res.DetectedProjects) > 0 {
-		res.SuggestedProjectDir = res.DetectedProjects[0].Path
-	} else {
-		res.SuggestedProjectDir = downloadDir
-	}
-
-	res.SuggestedExportDir = filepath.Join(res.SuggestedProjectDir, "exports")
 	return res
 }

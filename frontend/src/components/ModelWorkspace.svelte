@@ -8,6 +8,18 @@
 
   let split = $derived(splitFields(studio.fields));
   let isBusy = $derived(studio.rendering || studio.exporting || studio.modelLoading);
+  let activeBreadcrumb = $derived.by(() => {
+    const model = studio.activeModel;
+    if (!model) return '';
+    const parts: string[] = [];
+    if ((studio.config.libraries?.length ?? 0) > 1 && model.library_name) {
+      parts.push(model.library_name);
+    }
+    if (model.folder_labels && model.folder_labels.length > 0) {
+      parts.push(...model.folder_labels);
+    }
+    return parts.join(' / ');
+  });
 </script>
 
 <section id="model-workspace" class="flex-1 flex flex-col min-h-0 min-w-0 overflow-hidden">
@@ -35,13 +47,13 @@
       class="p-4 text-sm opacity-60 flex flex-col items-center justify-center h-full text-center gap-2"
     >
       <p>Select a model to inspect parameters and render in 3D.</p>
-      {#if !studio.config.project_root}
+      {#if !studio.hasLibraries}
         <button
           type="button"
           class="btn btn-primary btn-sm mt-2"
           onclick={() => (studio.settingsOpen = true)}
         >
-          Choose Project Folder
+          Add Model Library
         </button>
       {/if}
     </div>
@@ -51,6 +63,11 @@
       <div class="p-3 border-b border-base-300 shrink-0 space-y-2">
         <div class="flex items-center justify-between gap-2">
           <div class="min-w-0">
+            {#if activeBreadcrumb}
+              <div class="text-[11px] opacity-60 truncate" title={activeBreadcrumb}>
+                {activeBreadcrumb}
+              </div>
+            {/if}
             <h2 class="font-semibold text-sm truncate">{studio.activeModel.name}</h2>
             {#if studio.modelDescription}
               <p class="text-[11px] opacity-65 truncate" title={studio.modelDescription}>

@@ -1,5 +1,11 @@
+export interface Library {
+  id: string;
+  name: string;
+  path: string;
+}
+
 export interface Config {
-  project_root: string;
+  libraries: Library[];
   python_path: string;
   export_dir?: string;
   theme: string;
@@ -14,7 +20,7 @@ export interface HealthResponse {
   build123d: boolean;
   build123d_error: string;
   ocp_tessellate: boolean;
-  project_root: string;
+  libraries?: Library[];
 }
 
 export interface ConfigResponse {
@@ -50,9 +56,8 @@ export interface ProjectDirInfo {
 }
 
 export interface SetupDefaultsResponse {
-  suggested_project_dir: string;
-  suggested_export_dir: string;
   default_download_dir: string;
+  studio_venv_dir: string;
   detected_projects: DetectedProject[];
   default_repo_url: string;
   default_archive_url: string;
@@ -68,6 +73,7 @@ export interface SetupInspectDirResponse {
 export interface PythonCandidate {
   path: string;
   source: string;
+  source_detail?: string;
   version: string;
   version_ok: boolean;
   has_build123d: boolean;
@@ -85,7 +91,8 @@ export interface SetupProbeResponse {
   has_uv: boolean;
   uv_path?: string;
   os: string;
-  project_info: ProjectDirInfo;
+  studio_venv_dir: string;
+  requirements_files: string[];
 }
 
 export interface SetupDownloadResponse {
@@ -140,6 +147,11 @@ export interface DialogResponse {
 
 export interface ModelInfo {
   id: string;
+  local_id: string;
+  library_id: string;
+  library_name: string;
+  folders: string[];
+  folder_labels: string[];
   name: string;
   path: string;
   rel_path: string;
@@ -151,8 +163,9 @@ export interface ModelInfo {
 
 export interface ModelsResponse {
   ok: boolean;
-  project_root: string;
+  libraries: Library[];
   models: ModelInfo[];
+  library_errors?: Record<string, string>;
   error?: string;
 }
 

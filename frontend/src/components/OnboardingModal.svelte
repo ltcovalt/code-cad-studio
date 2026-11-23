@@ -3,6 +3,7 @@
   import { studio } from '../lib/studioState.svelte';
   import type {
     DetectedProject,
+    Library,
     ProjectDirInfo,
     PythonCandidate,
     SetupDefaultsResponse,
@@ -11,27 +12,64 @@
   import Alert from './Alert.svelte';
 
   type Step = 1 | 2;
-  type ProjectMode = 'download' | 'existing';
+
+  interface LibraryItem {
+    uid: string;
+    id: string;
+    name: string;
+    path: string;
+    modelCount?: number;
+  }
+
+  let uidCounter = 0;
+  function nextUid(): string {
+    uidCounter += 1;
+    return `onb-lib-${uidCounter}`;
+  }
+
+  function basenameOf(p: string): string {
+    const clean = p.trim().replace(/[\\/]+$/, '');
+    const parts = clean.split(/[\\/]/).filter(Boolean);
+    return parts[parts.length - 1] ?? '';
+  }
+
+  function parentOf(p: string): string {
+    const clean = p.trim().replace(/[\\/]+$/, '');
+    const parts = clean.split(/[\\/]/).filter(Boolean);
+    return parts.length >= 2 ? parts[parts.length - 2] : '';
+  }
+
+  function suggestName(path: string, existing: LibraryItem[]): string {
+    const base = basenameOf(path) || 'Library';
+    if (existing.some((l) => l.name.trim().toLowerCase() === base.toLowerCase())) {
+      const parent = parentOf(path);
+      if (parent) return `${base} (${parent})`;
+    }
+    return base;
+  }
 
   let dialogEl: HTMLDialogElement | undefined = $state();
   let dialogBodyEl: HTMLDivElement | undefined = $state();
 
   let step = $state<Step>(1);
-  let mode = $state<ProjectMode>('download');
   let loadingDefaults = $state(false);
   let defaults = $state<SetupDefaultsResponse | null>(null);
 
-  let projectDir = $state('');
-  let exportDir = $state('');
-  let exportDirTouched = $state(false);
-  let dirInfo = $state<ProjectDirInfo | null>(null);
-  let inspectingDir = $state(false);
-
+  // Step 1: libraries + optional starter library download + optional global export override
+  let libraries = $state<LibraryItem[]>([]);
+  let manualPathInput = $state('');
+  let includeStarter = $state(false);
+  let starterDir = $state('');
+  let starterDirInfo = $state<ProjectDirInfo | null>(null);
+  let inspectingStarter = $state(false);
+  let starterDownloadedPath = $state('');
+  let allowOverwriteStarter = $state(false);
   let downloading = $state(false);
-  let downloadCompleted = $state(false);
-  let allowOverwriteExisting = $state(false);
-  let downloadError = $state('');
+  let step1Error = $state('');
 
+  let exportDir = $state('');
+
+  // Step 2: shared Python environment
   let probing = $state(false);
   let probe = $state<SetupProbeResponse | null>(null);
   let probeError = $state('');
@@ -49,8 +87,10 @@
   let logContainerEl: HTMLPreElement | undefined = $state();
 
   let busy = $derived(downloading || installing || completing);
-
   let detectedProjects = $derived<DetectedProject[]>(defaults?.detected_projects ?? []);
+  let unaddedDetectedProjects = $derived(
+    detectedProjects.filter((proj) => !libraries.some((l) => l.path.trim() === proj.path))
+  );
 
   let selectedCandidate = $derived.by<PythonCandidate | null>(() => {
     if (!probe || probe.candidates.length === 0) return null;
@@ -62,14 +102,21 @@
   });
 
   let envReady = $derived(
-    Boolean(selectedCandidate && !selectedCandidate.error && selectedCandidate.version_ok && selectedCandidate.has_build123d)
+    Boolean(
+      selectedCandidate &&
+        !selectedCandidate.error &&
+        selectedCandidate.version_ok &&
+        selectedCandidate.has_build123d
+    )
   );
 
   let canInstallEnv = $derived(
     Boolean(
       !envReady &&
-        projectDir.trim() &&
-        ((selectedCandidate && !selectedCandidate.error && selectedCandidate.version_ok && (selectedCandidate.has_venv || probe?.has_uv)) ||
+        ((selectedCandidate &&
+          !selectedCandidate.error &&
+          selectedCandidate.version_ok &&
+          (selectedCandidate.has_venv || probe?.has_uv)) ||
           probe?.has_uv)
     )
   );
@@ -77,21 +124,44 @@
   let downloadProgressPct = $derived.by<number | null>(() => {
     const p = studio.setupProgress;
     if (!p || p.task !== 'download') return null;
-    if (p.stage === 'downloading' && p.total_bytes && p.total_bytes > 0 && p.bytes_downloaded !== undefined) {
+    if (
+      p.stage === 'downloading' &&
+      p.total_bytes &&
+      p.total_bytes > 0 &&
+      p.bytes_downloaded !== undefined
+    ) {
       return Math.min(100, Math.round((p.bytes_downloaded / p.total_bytes) * 100));
     }
-    if (p.stage === 'extracting' && p.total_files && p.total_files > 0 && p.files_extracted !== undefined) {
+    if (
+      p.stage === 'extracting' &&
+      p.total_files &&
+      p.total_files > 0 &&
+      p.files_extracted !== undefined
+    ) {
       return Math.min(100, Math.round((p.files_extracted / p.total_files) * 100));
     }
     return null;
   });
 
-  function joinExportDefault(proj: string): string {
-    const trimmed = proj.trim().replace(/[\\/]+$/, '');
-    if (!trimmed) return '';
-    const sep = defaults?.os === 'windows' || trimmed.includes('\\') ? '\\' : '/';
-    return `${trimmed}${sep}exports`;
-  }
+  let needsStarterDownload = $derived(
+    includeStarter &&
+      starterDir.trim() !== '' &&
+      starterDownloadedPath !== starterDir.trim()
+  );
+
+  let step1Blocked = $derived.by(() => {
+    if (busy) return true;
+    const validManualLibs = libraries.filter((l) => l.path.trim() !== '').length;
+    const hasStarter = includeStarter && starterDir.trim() !== '';
+    if (validManualLibs === 0 && !hasStarter) return true;
+    if (needsStarterDownload) {
+      if (starterDirInfo?.exists && !starterDirInfo.is_dir) return true;
+      if (starterDirInfo?.exists && !starterDirInfo.is_empty && !allowOverwriteStarter) {
+        return true;
+      }
+    }
+    return false;
+  });
 
   function formatBytes(bytes: number): string {
     if (bytes < 1024) return `${bytes} B`;
@@ -99,10 +169,12 @@
     return `${(bytes / (1024 * 1024)).toFixed(1)} MB`;
   }
 
-  function sourceLabel(source: string): string {
-    switch (source) {
-      case 'project_venv':
-        return 'Project .venv';
+  function sourceLabel(cand: PythonCandidate): string {
+    switch (cand.source) {
+      case 'studio_venv':
+        return 'Studio venv';
+      case 'library_venv':
+        return cand.source_detail ? `Library .venv (${cand.source_detail})` : 'Library .venv';
       case 'configured':
         return 'Selected';
       case 'path':
@@ -114,8 +186,52 @@
       case 'system':
         return 'System';
       default:
-        return source || 'Python';
+        return cand.source || 'Python';
     }
+  }
+
+  function effectiveLibraryRoots(): string[] {
+    const out: string[] = [];
+    const seen = new Set<string>();
+    for (const lib of libraries) {
+      const p = lib.path.trim();
+      if (p && !seen.has(p)) {
+        seen.add(p);
+        out.push(p);
+      }
+    }
+    if (includeStarter) {
+      const sp = (starterDownloadedPath || starterDir).trim();
+      if (sp && !seen.has(sp)) {
+        seen.add(sp);
+        out.push(sp);
+      }
+    }
+    return out;
+  }
+
+  function finalLibrariesPayload(): Library[] {
+    const out: Library[] = [];
+    const seen = new Set<string>();
+    for (const lib of libraries) {
+      const p = lib.path.trim();
+      if (!p || seen.has(p)) continue;
+      seen.add(p);
+      out.push({ id: lib.id, name: lib.name.trim(), path: p });
+    }
+    if (includeStarter) {
+      const sp = (starterDownloadedPath || starterDir).trim();
+      if (sp && !seen.has(sp)) {
+        seen.add(sp);
+        const hasCodeCadName = out.some((l) => l.name.trim().toLowerCase() === 'code-cad');
+        out.push({
+          id: '',
+          name: hasCodeCadName ? 'Starter Library' : 'code-cad',
+          path: sp,
+        });
+      }
+    }
+    return out;
   }
 
   // Sync native <dialog> top-layer modal open state with studio.onboardingOpen
@@ -148,194 +264,230 @@
   });
 
   async function initializeWizard() {
-    step = 1;
-    downloadError = '';
-    downloadCompleted = false;
-    allowOverwriteExisting = false;
+    step = studio.onboardingInitialStep;
+    step1Error = '';
+    starterDownloadedPath = '';
+    allowOverwriteStarter = false;
     probeError = '';
     installError = '';
     completeError = '';
     busyNotice = '';
     probe = null;
-    dirInfo = null;
+    starterDirInfo = null;
+    manualPathInput = '';
     studio.clearSetupStream();
 
     loadingDefaults = true;
     try {
       const def = await api.getSetupDefaults();
       defaults = def;
-
-      if (studio.config.project_root) {
-        projectDir = studio.config.project_root;
-        exportDir = studio.config.export_dir || joinExportDefault(projectDir);
-        exportDirTouched = Boolean(studio.config.export_dir);
-        mode = 'existing';
-      } else if (def.detected_projects.length > 0) {
-        projectDir = def.suggested_project_dir;
-        exportDir = def.suggested_export_dir;
-        exportDirTouched = false;
-        mode = 'existing';
-      } else {
-        projectDir = def.suggested_project_dir;
-        exportDir = def.suggested_export_dir;
-        exportDirTouched = false;
-        mode = 'download';
-      }
+      starterDir = def.default_download_dir;
+      exportDir = studio.config.export_dir ?? '';
       selectedPythonPath = studio.config.python_path || '';
-      await runInspectDir(projectDir);
+
+      if ((studio.config.libraries?.length ?? 0) > 0) {
+        libraries = studio.config.libraries.map((lib) => ({
+          uid: nextUid(),
+          id: lib.id,
+          name: lib.name,
+          path: lib.path,
+        }));
+        includeStarter = false;
+      } else if (def.detected_projects.length > 0) {
+        libraries = def.detected_projects.map((p) => ({
+          uid: nextUid(),
+          id: '',
+          name: p.name,
+          path: p.path,
+          modelCount: p.model_count,
+        }));
+        includeStarter = false;
+      } else {
+        libraries = [];
+        includeStarter = true;
+      }
+
+      if (includeStarter && starterDir) {
+        void runInspectStarterDir(starterDir);
+      }
+
+      if (step === 2) {
+        await runProbe(selectedPythonPath);
+      }
     } catch (err) {
-      downloadError = err instanceof Error ? err.message : String(err);
+      step1Error = err instanceof Error ? err.message : String(err);
     } finally {
       loadingDefaults = false;
     }
   }
 
-  function scheduleInspectDir(path: string) {
+  function scheduleInspectStarter(path: string) {
     if (inspectTimer !== null) {
       clearTimeout(inspectTimer);
       inspectTimer = null;
     }
     inspectTimer = setTimeout(() => {
-      void runInspectDir(path);
+      void runInspectStarterDir(path);
     }, 180);
   }
 
-  async function runInspectDir(path: string) {
+  async function runInspectStarterDir(path: string) {
     const trimmed = path.trim();
     if (!trimmed) {
-      dirInfo = null;
+      starterDirInfo = null;
       return;
     }
-    inspectingDir = true;
+    inspectingStarter = true;
     try {
       const resp = await api.inspectSetupDir(trimmed);
       if (resp.ok) {
-        dirInfo = resp.info;
+        starterDirInfo = resp.info;
       }
     } catch {
-      dirInfo = null;
+      starterDirInfo = null;
     } finally {
-      inspectingDir = false;
+      inspectingStarter = false;
     }
   }
 
-  function handleProjectDirInput(value: string) {
-    projectDir = value;
-    downloadError = '';
-    downloadCompleted = false;
-    allowOverwriteExisting = false;
-    if (!exportDirTouched) {
-      exportDir = joinExportDefault(value);
+  function handleStarterDirInput(val: string) {
+    starterDir = val;
+    step1Error = '';
+    allowOverwriteStarter = false;
+    if (starterDownloadedPath !== val.trim()) {
+      starterDownloadedPath = '';
     }
-    scheduleInspectDir(value);
+    scheduleInspectStarter(val);
   }
 
-  function switchProjectMode(nextMode: ProjectMode) {
-    if (mode === nextMode) return;
-    mode = nextMode;
-    downloadError = '';
-    downloadCompleted = false;
-    allowOverwriteExisting = false;
-
-    if (nextMode === 'download' && defaults?.default_download_dir) {
-      const onDetected = detectedProjects.some((p) => p.path === projectDir);
-      if (onDetected || (studio.config.project_root && projectDir === studio.config.project_root)) {
-        projectDir = defaults.default_download_dir;
-        if (!exportDirTouched) {
-          exportDir = joinExportDefault(projectDir);
-        }
-        void runInspectDir(projectDir);
-      }
-    } else if (nextMode === 'existing' && defaults) {
-      if (projectDir === defaults.default_download_dir) {
-        const existingTarget = studio.config.project_root || detectedProjects[0]?.path || '';
-        if (existingTarget) {
-          projectDir = existingTarget;
-          if (!exportDirTouched) {
-            exportDir = joinExportDefault(projectDir);
-          }
-          void runInspectDir(projectDir);
-        }
-      }
+  function toggleIncludeStarter() {
+    includeStarter = !includeStarter;
+    step1Error = '';
+    allowOverwriteStarter = false;
+    if (includeStarter && starterDir) {
+      void runInspectStarterDir(starterDir);
     }
   }
 
-  function handleExportDirInput(value: string) {
-    exportDir = value;
-    exportDirTouched = value.trim() !== '' && value.trim() !== joinExportDefault(projectDir);
+  function addDetectedProject(proj: DetectedProject) {
+    step1Error = '';
+    if (libraries.some((l) => l.path.trim() === proj.path)) return;
+    libraries = [
+      ...libraries,
+      {
+        uid: nextUid(),
+        id: '',
+        name: suggestName(proj.path, libraries),
+        path: proj.path,
+        modelCount: proj.model_count,
+      },
+    ];
   }
 
-  function resetExportDir() {
-    exportDirTouched = false;
-    exportDir = joinExportDefault(projectDir);
-  }
-
-  function selectDetectedProject(proj: DetectedProject) {
-    mode = 'existing';
-    projectDir = proj.path;
-    if (!exportDirTouched) {
-      exportDir = joinExportDefault(proj.path);
-    }
-    downloadError = '';
-    void runInspectDir(proj.path);
-  }
-
-  async function handleBrowseProject() {
+  async function handleAddFolder() {
+    step1Error = '';
     try {
-      const resp = await api.browseProject(projectDir);
+      const start = libraries[libraries.length - 1]?.path ?? '';
+      const resp = await api.browseProject(start);
       if (!resp.cancelled && resp.path) {
-        handleProjectDirInput(resp.path);
+        const clean = resp.path.trim();
+        if (libraries.some((l) => l.path.trim() === clean)) {
+          step1Error = 'That folder is already selected.';
+          return;
+        }
+        const inspect = await api.inspectSetupDir(clean).catch(() => null);
+        libraries = [
+          ...libraries,
+          {
+            uid: nextUid(),
+            id: '',
+            name: suggestName(clean, libraries),
+            path: clean,
+            modelCount: inspect?.ok ? inspect.info.model_count : undefined,
+          },
+        ];
       }
     } catch (err) {
-      downloadError = err instanceof Error ? err.message : String(err);
+      step1Error = err instanceof Error ? err.message : String(err);
+    }
+  }
+
+  async function handleAddManualPath() {
+    const clean = manualPathInput.trim();
+    if (!clean) return;
+    step1Error = '';
+    if (libraries.some((l) => l.path.trim() === clean)) {
+      step1Error = 'That folder is already selected.';
+      return;
+    }
+    const inspect = await api.inspectSetupDir(clean).catch(() => null);
+    libraries = [
+      ...libraries,
+      {
+        uid: nextUid(),
+        id: '',
+        name: suggestName(clean, libraries),
+        path: inspect?.ok && inspect.info.path ? inspect.info.path : clean,
+        modelCount: inspect?.ok ? inspect.info.model_count : undefined,
+      },
+    ];
+    manualPathInput = '';
+  }
+
+  function removeLibrary(uid: string) {
+    libraries = libraries.filter((l) => l.uid !== uid);
+  }
+
+  async function handleBrowseStarterDir() {
+    try {
+      const resp = await api.browseProject(starterDir);
+      if (!resp.cancelled && resp.path) {
+        handleStarterDirInput(resp.path);
+      }
+    } catch (err) {
+      step1Error = err instanceof Error ? err.message : String(err);
     }
   }
 
   async function handleBrowseExportDir() {
     try {
-      const resp = await api.browseExportDir(exportDir || projectDir);
+      const resp = await api.browseExportDir(exportDir || libraries[0]?.path || starterDir);
       if (!resp.cancelled && resp.path) {
         exportDir = resp.path;
-        exportDirTouched = resp.path.trim() !== joinExportDefault(projectDir);
       }
     } catch (err) {
-      downloadError = err instanceof Error ? err.message : String(err);
+      step1Error = err instanceof Error ? err.message : String(err);
     }
   }
 
   async function handleStep1Next() {
-    downloadError = '';
-    const trimmed = projectDir.trim();
-    if (!trimmed) {
-      downloadError = 'Please choose a project folder first.';
-      return;
-    }
+    step1Error = '';
+    if (step1Blocked) return;
 
-    if (mode === 'download' && !downloadCompleted) {
+    if (needsStarterDownload) {
       downloading = true;
       studio.clearSetupStream();
       try {
         const resp = await api.downloadStarterProject(
-          trimmed,
+          starterDir.trim(),
           defaults?.default_archive_url ?? '',
-          allowOverwriteExisting
+          allowOverwriteStarter
         );
         if (!resp.ok) {
           if (!resp.cancelled) {
-            downloadError = resp.error || 'Failed to download code-cad starter project.';
+            step1Error = resp.error || 'Failed to download code-cad starter library.';
           }
           return;
         }
-        downloadCompleted = true;
         if (resp.project_info) {
-          dirInfo = resp.project_info;
-          projectDir = resp.project_info.path;
-          if (!exportDirTouched) {
-            exportDir = joinExportDefault(projectDir);
-          }
+          starterDirInfo = resp.project_info;
+          starterDir = resp.project_info.path;
+          starterDownloadedPath = resp.project_info.path;
+        } else {
+          starterDownloadedPath = starterDir.trim();
         }
       } catch (err) {
-        downloadError = err instanceof Error ? err.message : String(err);
+        step1Error = err instanceof Error ? err.message : String(err);
         return;
       } finally {
         downloading = false;
@@ -350,7 +502,7 @@
     probing = true;
     probeError = '';
     try {
-      const resp = await api.probeSetup(projectDir, explicitPython);
+      const resp = await api.probeSetup(effectiveLibraryRoots(), explicitPython);
       probe = resp;
       if (resp.recommended) {
         selectedPythonPath = resp.recommended.path;
@@ -366,7 +518,7 @@
 
   async function handleBrowsePython() {
     try {
-      const resp = await api.browsePython(selectedPythonPath || projectDir);
+      const resp = await api.browsePython(selectedPythonPath || effectiveLibraryRoots()[0] || '');
       if (!resp.cancelled && resp.path) {
         selectedPythonPath = resp.path;
         await runProbe(resp.path);
@@ -390,7 +542,7 @@
 
     try {
       const resp = await api.installSetupEnv({
-        project_root: projectDir,
+        library_roots: effectiveLibraryRoots(),
         base_python: basePython,
         use_uv: Boolean(probe?.has_uv),
       });
@@ -424,7 +576,7 @@
     completing = true;
     try {
       const resp = await api.completeSetup({
-        project_root: projectDir.trim(),
+        libraries: finalLibrariesPayload(),
         export_dir: exportDir.trim(),
         python_path: selectedCandidate?.path ?? selectedPythonPath.trim(),
       });
@@ -467,19 +619,6 @@
       studio.onboardingOpen = false;
     }
   }
-
-  let step1Blocked = $derived.by(() => {
-    if (busy || !projectDir.trim()) return true;
-    if (mode === 'download' && !downloadCompleted) {
-      if (dirInfo?.exists && !dirInfo.is_dir) {
-        return true;
-      }
-      if (dirInfo?.exists && !dirInfo.is_empty && !allowOverwriteExisting) {
-        return true;
-      }
-    }
-    return false;
-  });
 </script>
 
 <dialog
@@ -492,7 +631,7 @@
   <div
     bind:this={dialogBodyEl}
     tabindex="-1"
-    class="bg-base-100 border border-base-300 rounded-box shadow-lg w-[38rem] max-w-[calc(100vw-2rem)] max-h-[calc(100vh-2rem)] overflow-y-auto p-6 space-y-5 focus:outline-none"
+    class="bg-base-100 border border-base-300 rounded-box shadow-lg w-[39rem] max-w-[calc(100vw-2rem)] max-h-[calc(100vh-2rem)] overflow-y-auto p-6 space-y-5 focus:outline-none"
   >
     <!-- Header -->
     <div class="flex items-start justify-between gap-4">
@@ -501,7 +640,7 @@
           Welcome to Code CAD Studio
         </h2>
         <p class="text-xs opacity-70">
-          Set up your build123d project folder, default exports, and Python CAD environment.
+          Choose your build123d model libraries and configure the shared Python CAD environment.
         </p>
       </div>
       <button
@@ -552,7 +691,7 @@
             1
           {/if}
         </span>
-        <span class="font-semibold">Workspace & Exports</span>
+        <span class="font-semibold">Model Libraries</span>
       </li>
       <li
         class="flex items-center gap-2 rounded-box border px-3 py-2"
@@ -577,7 +716,7 @@
             2
           {/if}
         </span>
-        <span class="font-semibold">Python & build123d</span>
+        <span class="font-semibold">Shared Python & build123d</span>
       </li>
     </ol>
 
@@ -586,94 +725,24 @@
     {/if}
 
     {#if step === 1}
-      <!-- STEP 1: Project & Export Directories -->
+      <!-- STEP 1: Multi-Library Selection -->
       <div class="space-y-4">
         {#if loadingDefaults}
           <div class="flex items-center gap-2 text-xs opacity-70 py-4">
             <span class="loading loading-spinner loading-xs"></span>
-            <span>Detecting default directories…</span>
+            <span>Detecting local model repositories…</span>
           </div>
         {:else}
-          <!-- Starter vs Existing choice -->
-          <div class="grid grid-cols-1 sm:grid-cols-2 gap-2.5" role="radiogroup" aria-label="Project source">
-            <button
-              type="button"
-              role="radio"
-              aria-checked={mode === 'download'}
-              class="text-left rounded-box border p-3 space-y-1 cursor-pointer transition-colors focus:outline-none focus-visible:outline-2 focus-visible:outline-primary focus-visible:outline-offset-1"
-              class:border-primary={mode === 'download'}
-              class:bg-base-200={mode === 'download'}
-              class:border-base-300={mode !== 'download'}
-              disabled={busy}
-              onclick={() => switchProjectMode('download')}
-            >
-              <div class="flex items-center justify-between gap-2">
-                <span class="font-semibold text-xs">Download starter library</span>
-                <span
-                  aria-hidden="true"
-                  class="w-4 h-4 rounded-full border-2 flex items-center justify-center shrink-0"
-                  class:border-primary={mode === 'download'}
-                  class:border-base-content={mode !== 'download'}
-                  class:opacity-40={mode !== 'download'}
-                >
-                  {#if mode === 'download'}
-                    <span class="w-2 h-2 rounded-full bg-primary"></span>
-                  {/if}
-                </span>
-              </div>
-              <p class="text-[11px] opacity-70 leading-snug">
-                Download the default <code>code-cad</code> models straight from GitHub (no git needed).
-              </p>
-            </button>
-
-            <button
-              type="button"
-              role="radio"
-              aria-checked={mode === 'existing'}
-              class="text-left rounded-box border p-3 space-y-1 cursor-pointer transition-colors focus:outline-none focus-visible:outline-2 focus-visible:outline-primary focus-visible:outline-offset-1"
-              class:border-primary={mode === 'existing'}
-              class:bg-base-200={mode === 'existing'}
-              class:border-base-300={mode !== 'existing'}
-              disabled={busy}
-              onclick={() => switchProjectMode('existing')}
-            >
-              <div class="flex items-center justify-between gap-2">
-                <span class="font-semibold text-xs">Use existing project folder</span>
-                <span
-                  aria-hidden="true"
-                  class="w-4 h-4 rounded-full border-2 flex items-center justify-center shrink-0"
-                  class:border-primary={mode === 'existing'}
-                  class:border-base-content={mode !== 'existing'}
-                  class:opacity-40={mode !== 'existing'}
-                >
-                  {#if mode === 'existing'}
-                    <span class="w-2 h-2 rounded-full bg-primary"></span>
-                  {/if}
-                </span>
-              </div>
-              <p class="text-[11px] opacity-70 leading-snug">
-                Open a local folder containing <code>build123d</code> models or scripts.
-              </p>
-            </button>
-          </div>
-
-          {#if detectedProjects.length > 0 && mode === 'existing'}
+          <!-- Unadded detected local projects -->
+          {#if unaddedDetectedProjects.length > 0}
             <div class="space-y-1.5">
               <div class="text-[11px] font-semibold opacity-75">
-                Detected existing project{detectedProjects.length > 1 ? 's' : ''}
+                Detected local model folder{unaddedDetectedProjects.length > 1 ? 's' : ''}
               </div>
               <div class="space-y-1.5">
-                {#each detectedProjects as proj (proj.path)}
-                  {@const isSelected = projectDir === proj.path}
-                  <button
-                    type="button"
-                    class="w-full text-left rounded-field border px-3 py-2 flex items-center justify-between gap-2 cursor-pointer transition-colors focus:outline-none focus-visible:outline-2 focus-visible:outline-primary focus-visible:outline-offset-1"
-                    class:border-primary={isSelected}
-                    class:bg-base-200={isSelected}
-                    class:border-base-300={!isSelected}
-                    class:bg-base-100={!isSelected}
-                    disabled={busy}
-                    onclick={() => selectDetectedProject(proj)}
+                {#each unaddedDetectedProjects as proj (proj.path)}
+                  <div
+                    class="w-full rounded-field border border-base-300 bg-base-100 px-3 py-2 flex items-center justify-between gap-2"
                   >
                     <div class="flex items-center gap-2 min-w-0">
                       <span class="font-mono text-xs truncate">{proj.path}</span>
@@ -681,148 +750,203 @@
                         {proj.model_count} model{proj.model_count === 1 ? '' : 's'}
                       </span>
                     </div>
-                    <span
-                      aria-hidden="true"
-                      class="w-4 h-4 rounded-full border-2 flex items-center justify-center shrink-0"
-                      class:border-primary={isSelected}
-                      class:border-base-content={!isSelected}
-                      class:opacity-40={!isSelected}
+                    <button
+                      type="button"
+                      class="btn btn-xs btn-ghost shrink-0"
+                      disabled={busy}
+                      onclick={() => addDetectedProject(proj)}
                     >
-                      {#if isSelected}
-                        <span class="w-2 h-2 rounded-full bg-primary"></span>
-                      {/if}
-                    </span>
-                  </button>
+                      + Add
+                    </button>
+                  </div>
                 {/each}
               </div>
             </div>
           {/if}
 
-          <!-- Project Directory -->
-          <div class="form-control">
-            <label class="label py-1" for="onboarding-project-dir">
-              <span class="label-text text-xs font-semibold">
-                {mode === 'download' ? 'Download Destination Folder' : 'Project Root Folder'}
-              </span>
-            </label>
-            <div class="join w-full">
+          <!-- Starter Library Option (can be added alongside existing folders!) -->
+          <div
+            class="rounded-box border p-3 space-y-2.5 transition-colors {includeStarter
+              ? 'border-primary bg-base-200/50'
+              : 'border-base-300'}"
+          >
+            <label class="flex items-start gap-2.5 cursor-pointer">
               <input
-                id="onboarding-project-dir"
-                type="text"
-                value={projectDir}
-                oninput={(e) => handleProjectDirInput((e.currentTarget as HTMLInputElement).value)}
+                type="checkbox"
+                class="checkbox checkbox-xs checkbox-primary mt-0.5 shrink-0"
+                checked={includeStarter}
                 disabled={busy}
-                class="input input-bordered input-sm join-item w-full font-mono text-xs"
-                placeholder="/path/to/code-cad"
+                onchange={toggleIncludeStarter}
               />
+              <div class="space-y-0.5 min-w-0">
+                <div class="font-semibold text-xs">
+                  Download <code>code-cad</code> starter library
+                </div>
+                <p class="text-[11px] opacity-70 leading-snug">
+                  Download the official starter models from GitHub into their own dedicated library folder (no git required, never modifies your own repos).
+                </p>
+              </div>
+            </label>
+
+            {#if includeStarter}
+              <div class="pl-6 space-y-1.5">
+                <div class="join w-full">
+                  <input
+                    id="onboarding-starter-dir"
+                    type="text"
+                    value={starterDir}
+                    oninput={(e) => handleStarterDirInput((e.currentTarget as HTMLInputElement).value)}
+                    disabled={busy}
+                    class="input input-bordered input-xs join-item w-full font-mono text-[11px]"
+                    placeholder="/path/to/code-cad"
+                  />
+                  {#if studio.hasDesktop}
+                    <button
+                      type="button"
+                      class="btn btn-xs btn-neutral join-item"
+                      disabled={busy}
+                      onclick={handleBrowseStarterDir}
+                    >
+                      Browse
+                    </button>
+                  {/if}
+                </div>
+
+                <div class="min-h-[1rem] text-[11px]">
+                  {#if inspectingStarter}
+                    <span class="opacity-60">Checking destination folder…</span>
+                  {:else if starterDownloadedPath && starterDownloadedPath === starterDir.trim()}
+                    <span class="text-success font-medium">
+                      ✓ Starter library downloaded ({starterDirInfo?.model_count ?? 0} models found).
+                    </span>
+                  {:else if starterDirInfo?.exists && !starterDirInfo.is_dir}
+                    <span class="text-error">Path exists and is a file, not a folder.</span>
+                  {:else if starterDirInfo?.exists && !starterDirInfo.is_empty}
+                    <Alert variant="warning" title="Folder is not empty" class="mt-1">
+                      <p>
+                        {#if starterDirInfo.has_models}
+                          This folder already has {starterDirInfo.model_count} model{starterDirInfo.model_count === 1 ? '' : 's'}.
+                        {:else}
+                          This folder is not empty.
+                        {/if}
+                        Choose an empty folder name (e.g., <code>code-cad-starter</code>) or confirm overwriting matching files in <code>models/</code> and <code>utils/</code>.
+                      </p>
+                      <label class="flex items-start gap-2 cursor-pointer pt-0.5 text-xs">
+                        <input
+                          type="checkbox"
+                          class="checkbox checkbox-xs checkbox-warning mt-0.5"
+                          disabled={busy}
+                          bind:checked={allowOverwriteStarter}
+                        />
+                        <span>Allow overwriting matching files in this folder</span>
+                      </label>
+                    </Alert>
+                  {:else if starterDir.trim()}
+                    <span class="text-success/90">
+                      ✓ Ready — Studio will download <code>code-cad</code> here.
+                    </span>
+                  {/if}
+                </div>
+              </div>
+            {/if}
+          </div>
+
+          <!-- Selected Local Libraries List -->
+          <div class="space-y-2">
+            <div class="flex items-center justify-between gap-2">
+              <span class="text-xs font-semibold">
+                Your Local Libraries ({libraries.length})
+              </span>
               {#if studio.hasDesktop}
                 <button
                   type="button"
-                  class="btn btn-sm btn-neutral join-item"
+                  class="btn btn-xs btn-neutral"
                   disabled={busy}
-                  onclick={handleBrowseProject}
+                  onclick={handleAddFolder}
                 >
-                  Browse
+                  + Add Folder…
                 </button>
               {/if}
             </div>
 
-            <!-- Live Directory Feedback -->
-            <div class="mt-1.5 min-h-[1.1rem] text-[11px]">
-              {#if inspectingDir}
-                <span class="opacity-60">Checking folder…</span>
-              {:else if mode === 'download'}
-                {#if downloadCompleted}
-                  <span class="text-success font-medium">
-                    ✓ Starter library downloaded ({dirInfo?.model_count ?? 0} models found).
-                  </span>
-                {:else if dirInfo?.exists && !dirInfo.is_dir}
-                  <span class="text-error">Path exists and is a file, not a folder.</span>
-                {:else if dirInfo?.exists && !dirInfo.is_empty}
-                  <Alert variant="warning" title="Existing files will be overwritten" class="mt-1">
-                    <p>
-                      {#if dirInfo.has_models}
-                        This folder already contains {dirInfo.model_count} model{dirInfo.model_count === 1 ? '' : 's'}.
-                      {:else}
-                        This folder is not empty.
-                      {/if}
-                      Downloading here will overwrite matching files in <code>models/</code> and <code>utils/</code>.
-                      {#if dirInfo.has_models}
-                        <button
-                          type="button"
-                          class="link font-semibold ml-1"
-                          onclick={() => switchProjectMode('existing')}
-                        >
-                          Use existing folder instead
-                        </button>
-                      {/if}
-                    </p>
-                    <label class="flex items-start gap-2 cursor-pointer pt-0.5 text-xs">
-                      <input
-                        type="checkbox"
-                        class="checkbox checkbox-xs checkbox-warning mt-0.5"
-                        disabled={busy}
-                        bind:checked={allowOverwriteExisting}
-                      />
-                      <span>I understand — download and overwrite matching files in this folder</span>
-                    </label>
-                  </Alert>
-                {:else if projectDir.trim()}
-                  <span class="text-success/90">
-                    ✓ Ready — Studio will download <code>code-cad</code> into this folder.
-                  </span>
-                {/if}
-              {:else if dirInfo?.exists && dirInfo.is_dir}
-                {#if dirInfo.has_models}
-                  <span class="text-success font-medium">
-                    ✓ Found {dirInfo.model_count} model{dirInfo.model_count === 1 ? '' : 's'}{#if dirInfo.has_venv} and a project <code>.venv</code>{/if}.
-                  </span>
-                {:else}
-                  <span class="opacity-70">
-                    Folder exists (no model scripts detected yet — you can add <code>.py</code> models anytime).
-                  </span>
-                {/if}
-              {:else if projectDir.trim()}
-                <span class="text-warning">
-                  Folder does not exist yet.
-                  <button
-                    type="button"
-                    class="link link-primary ml-1"
-                    onclick={() => (mode = 'download')}
-                  >
-                    Download starter library here
-                  </button>
-                </span>
-              {/if}
-            </div>
-          </div>
+            {#if libraries.length > 0}
+              <div class="space-y-1.5">
+                {#each libraries as lib (lib.uid)}
+                  <div class="rounded-field border border-base-300 bg-base-200/40 px-2.5 py-2 flex items-center gap-2">
+                    <input
+                      type="text"
+                      bind:value={lib.name}
+                      disabled={busy}
+                      aria-label="Library name"
+                      class="input input-bordered input-xs w-36 font-medium text-xs shrink-0"
+                    />
+                    <span class="font-mono text-[11px] opacity-75 truncate flex-1" title={lib.path}>
+                      {lib.path}
+                    </span>
+                    {#if lib.modelCount !== undefined}
+                      <span class="badge badge-xs badge-ghost shrink-0">
+                        {lib.modelCount}
+                      </span>
+                    {/if}
+                    <button
+                      type="button"
+                      class="btn btn-ghost btn-xs btn-square hover:text-error shrink-0"
+                      title="Remove library"
+                      aria-label="Remove library"
+                      disabled={busy}
+                      onclick={() => removeLibrary(lib.uid)}
+                    >
+                      <svg xmlns="http://www.w3.org/2000/svg" class="h-3.5 w-3.5" fill="none" viewBox="0 0 24 24" stroke="currentColor" stroke-width="2">
+                        <line x1="6" y1="6" x2="18" y2="18" />
+                        <line x1="18" y1="6" x2="6" y2="18" />
+                      </svg>
+                    </button>
+                  </div>
+                {/each}
+              </div>
+            {/if}
 
-          <!-- Export Directory -->
-          <div class="form-control">
-            <div class="flex items-center justify-between py-1">
-              <label class="label-text text-xs font-semibold" for="onboarding-export-dir">
-                Default Export Folder
-              </label>
-              {#if exportDirTouched}
+            {#if !studio.hasDesktop}
+              <!-- Fallback text entry for standalone browser mode without native folder dialogs -->
+              <div class="join w-full">
+                <input
+                  type="text"
+                  bind:value={manualPathInput}
+                  disabled={busy}
+                  onkeydown={(e) => {
+                    if (e.key === 'Enter') {
+                      e.preventDefault();
+                      void handleAddManualPath();
+                    }
+                  }}
+                  placeholder="Enter folder location (e.g. ~/repos/my-cad-models)..."
+                  class="input input-bordered input-xs join-item w-full font-mono text-[11px]"
+                />
                 <button
                   type="button"
-                  class="link link-primary text-[11px]"
-                  disabled={busy}
-                  onclick={resetExportDir}
+                  class="btn btn-xs btn-neutral join-item"
+                  disabled={busy || !manualPathInput.trim()}
+                  onclick={handleAddManualPath}
                 >
-                  Reset to &lt;project&gt;/exports
+                  Add
                 </button>
-              {/if}
-            </div>
+              </div>
+            {/if}
+          </div>
+
+          <!-- Optional Global Export Folder -->
+          <div class="form-control">
+            <label class="label py-1" for="onboarding-export-dir">
+              <span class="label-text text-xs font-semibold">Global Export Folder (optional)</span>
+            </label>
             <div class="join w-full">
               <input
                 id="onboarding-export-dir"
                 type="text"
-                value={exportDir}
-                oninput={(e) => handleExportDirInput((e.currentTarget as HTMLInputElement).value)}
+                bind:value={exportDir}
                 disabled={busy}
                 class="input input-bordered input-sm join-item w-full font-mono text-xs"
-                placeholder="<project_root>/exports"
+                placeholder="Per-library default (<library>/exports)"
               />
               {#if studio.hasDesktop}
                 <button
@@ -836,7 +960,7 @@
               {/if}
             </div>
             <span class="text-[11px] opacity-60 mt-1">
-              Initial folder opened when exporting <code>.STEP</code>, <code>.STL</code>, or <code>.3MF</code> files.
+              Leave blank to default each export to its library's <code>exports/</code> folder.
             </span>
           </div>
 
@@ -875,8 +999,8 @@
             </div>
           {/if}
 
-          {#if downloadError}
-            <Alert variant="error">{downloadError}</Alert>
+          {#if step1Error}
+            <Alert variant="error">{step1Error}</Alert>
           {/if}
         {/if}
       </div>
@@ -900,7 +1024,7 @@
           {#if downloading}
             <span class="loading loading-spinner loading-xs"></span>
             Downloading…
-          {:else if mode === 'download' && !downloadCompleted}
+          {:else if needsStarterDownload}
             Download & Continue
           {:else}
             Continue
@@ -908,12 +1032,12 @@
         </button>
       </div>
     {:else}
-      <!-- STEP 2: Python & build123d Environment -->
+      <!-- STEP 2: Shared Python & build123d Environment -->
       <div class="space-y-4">
         <div class="rounded-box bg-base-200 border border-base-300 p-4 space-y-3">
           <div class="flex items-center justify-between gap-2">
             <span class="text-xs font-semibold uppercase tracking-wider opacity-75">
-              Environment Check
+              Shared Python Environment Check
             </span>
             <div class="flex items-center gap-1.5">
               <button
@@ -971,7 +1095,7 @@
                   {#if selectedCandidate && !selectedCandidate.error}
                     <span class="font-semibold">Python {selectedCandidate.version}</span>
                     <span class="badge badge-xs badge-outline">
-                      {sourceLabel(selectedCandidate.source)}
+                      {sourceLabel(selectedCandidate)}
                     </span>
                   {:else}
                     <span class="font-semibold">Python</span>
@@ -1034,11 +1158,11 @@
                 </div>
                 {#if envReady}
                   <div class="text-[11px] opacity-75">
-                    Existing environment detected — no additional installation needed.
+                    Ready — this single Python environment will be shared across all of your libraries.
                   </div>
                 {:else if pythonOk}
                   <div class="text-[11px] opacity-75">
-                    Studio can create an isolated <code>.venv</code> inside your project folder and install
+                    Studio can create a shared isolated virtual environment and install
                     <code>build123d</code> + <code>ocp_tessellate</code> automatically.
                   </div>
                 {/if}
@@ -1105,7 +1229,7 @@
                 >
                   {#each probe.candidates as cand (cand.path)}
                     <option value={cand.path}>
-                      {sourceLabel(cand.source)} — Python {cand.version || '?'}
+                      {sourceLabel(cand)} — Python {cand.version || '?'}
                       {cand.has_build123d ? ' ✓ build123d' : ''} ({cand.path})
                     </option>
                   {/each}
@@ -1118,18 +1242,18 @@
         <!-- Ready Banner -->
         {#if envReady && !installing}
           <Alert variant="success">
-            Everything is ready! Click <strong>Finish &amp; Launch Studio</strong> to load your models.
+            Everything is ready! Click <strong>Finish &amp; Launch Studio</strong> to load your libraries.
           </Alert>
         {/if}
 
-        <!-- One-click Venv Installer -->
+        <!-- One-click Shared Studio Venv Installer -->
         {#if !envReady && canInstallEnv}
           <div class="rounded-box border border-primary/40 bg-base-200/50 p-3.5 space-y-2.5">
             <div class="flex items-start justify-between gap-3">
               <div class="space-y-0.5 text-xs">
-                <div class="font-semibold">Automatic Python Environment Setup</div>
+                <div class="font-semibold">Automatic Shared Python Setup</div>
                 <p class="text-[11px] opacity-75">
-                  Creates <code class="font-mono">{projectDir}/.venv</code>
+                  Creates <code class="font-mono break-all">{probe?.studio_venv_dir || defaults?.studio_venv_dir || 'Studio venv'}</code>
                   {#if selectedCandidate?.version}
                     using <strong>Python {selectedCandidate.version}</strong>
                   {/if}
@@ -1139,8 +1263,8 @@
                   {:else}
                     via <code>venv</code> + <code>pip</code>.
                   {/if}
-                  {#if probe?.project_info.has_requirements}
-                    Also installs <code>requirements.txt</code>.
+                  {#if (probe?.requirements_files?.length ?? 0) > 0}
+                    Also installs dependencies from {probe?.requirements_files.length} <code>requirements.txt</code> file{(probe?.requirements_files.length ?? 0) === 1 ? '' : 's'}.
                   {/if}
                 </p>
               </div>
@@ -1194,7 +1318,6 @@
             {/if}
           </div>
         {:else if !probing && !envReady && selectedCandidate?.version_ok && !selectedCandidate.has_venv && !probe?.has_uv}
-          <!-- Python found, but venv module missing (common on Debian/Ubuntu) -->
           <div class="rounded-box border border-warning/40 bg-base-200/50 p-3.5 space-y-2 text-xs">
             <div class="font-semibold">Python <code>venv</code> module is missing</div>
             <p class="text-[11px] opacity-80 leading-relaxed">
@@ -1204,7 +1327,6 @@
             </p>
           </div>
         {:else if !probing && !envReady && (!selectedCandidate || !selectedCandidate.version_ok)}
-          <!-- Missing Python Guidance -->
           <div class="rounded-box border border-warning/40 bg-base-200/50 p-3.5 space-y-2 text-xs">
             <div class="font-semibold">Python 3.10+ is required</div>
             <p class="text-[11px] opacity-80 leading-relaxed">

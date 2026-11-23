@@ -36,7 +36,7 @@ func (s *Server) handleGetConfig(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusOK, configResponse{
 		Config:            cfg,
 		ResolvedPython:    cfg.ResolvePython(),
-		ResolvedExportDir: cfg.ResolveExportDir(),
+		ResolvedExportDir: cfg.ResolveExportDir(""),
 		NeedsOnboarding:   cfg.NeedsOnboarding(),
 		HasDesktop:        s.dialogs != nil,
 		WorkerRunning:     running,
@@ -47,24 +47,24 @@ func (s *Server) handleGetConfig(w http.ResponseWriter, r *http.Request) {
 
 func (s *Server) handleSaveConfig(w http.ResponseWriter, r *http.Request) {
 	var req struct {
-		ProjectRoot string `json:"project_root"`
-		PythonPath  string `json:"python_path"`
-		ExportDir   string `json:"export_dir"`
+		Libraries  []config.Library `json:"libraries"`
+		PythonPath string           `json:"python_path"`
+		ExportDir  string           `json:"export_dir"`
 	}
 	if err := decodeJSON(r, &req); err != nil {
 		writeJSON(w, http.StatusBadRequest, map[string]any{"ok": false, "error": "invalid JSON body"})
 		return
 	}
 
-	projectRoot := setup.ExpandPath(req.ProjectRoot)
+	libraries := config.NormalizeLibraries(req.Libraries)
 	pythonPath := setup.ExpandPath(req.PythonPath)
 	exportDir := setup.ExpandPath(req.ExportDir)
 
 	cfg, err := s.cfgStore.Update(func(c *config.Config) {
-		c.ProjectRoot = projectRoot
+		c.Libraries = libraries
 		c.PythonPath = pythonPath
 		c.ExportDir = exportDir
-		if projectRoot != "" {
+		if len(libraries) > 0 {
 			c.OnboardingCompleted = true
 		}
 	})
@@ -73,10 +73,15 @@ func (s *Server) handleSaveConfig(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	workerErr := s.worker.ConfigureOrRestart(r.Context(), cfg.ResolvePython(), cfg.ProjectRoot)
-	if cfg.ProjectRoot != "" {
-		_ = s.watcher.Watch(cfg.ProjectRoot)
+	var workerErr error
+	if roots := cfg.LibraryRoots(); len(roots) > 0 {
+		workerErr = s.worker.ConfigureOrRestart(r.Context(), cfg.ResolvePython(), librarySpecs(cfg))
+		_ = s.watcher.Watch(roots)
 	} else {
+		// Keep warm worker synced to empty library list if already running
+		if running, _ := s.worker.Status(); running {
+			_, _ = s.worker.Configure(r.Context(), []worker.LibrarySpec{})
+		}
 		s.watcher.Stop()
 	}
 
@@ -93,7 +98,7 @@ func (s *Server) handleSaveConfig(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusOK, configResponse{
 		Config:            cfg,
 		ResolvedPython:    cfg.ResolvePython(),
-		ResolvedExportDir: cfg.ResolveExportDir(),
+		ResolvedExportDir: cfg.ResolveExportDir(""),
 		NeedsOnboarding:   cfg.NeedsOnboarding(),
 		HasDesktop:        s.dialogs != nil,
 		WorkerRunning:     running,
@@ -172,6 +177,13 @@ func nearestExistingDir(p string) string {
 	return ""
 }
 
+func firstLibraryPath(cfg config.Config) string {
+	if len(cfg.Libraries) > 0 {
+		return cfg.Libraries[0].Path
+	}
+	return ""
+}
+
 func (s *Server) handleDialogProject(w http.ResponseWriter, r *http.Request) {
 	if s.dialogs == nil {
 		writeJSON(w, http.StatusBadRequest, map[string]any{"error": "native dialogs unavailable"})
@@ -186,10 +198,10 @@ func (s *Server) handleDialogProject(w http.ResponseWriter, r *http.Request) {
 	}
 	startDir := strings.TrimSpace(req.Current)
 	if startDir == "" {
-		startDir = s.cfgStore.Get().ProjectRoot
+		startDir = firstLibraryPath(s.cfgStore.Get())
 	}
 	startDir = nearestExistingDir(startDir)
-	dir, err := s.dialogs.ChooseDirectory("Select build123d Project Folder", startDir)
+	dir, err := s.dialogs.ChooseDirectory("Select Model Library Folder", startDir)
 	if err != nil {
 		writeJSON(w, http.StatusInternalServerError, map[string]any{"error": err.Error()})
 		return
@@ -214,7 +226,7 @@ func (s *Server) handleDialogPython(w http.ResponseWriter, r *http.Request) {
 	}
 	startDir := strings.TrimSpace(req.Current)
 	if startDir == "" {
-		startDir = s.cfgStore.Get().ProjectRoot
+		startDir = firstLibraryPath(s.cfgStore.Get())
 	}
 	startDir = nearestExistingDir(startDir)
 	p, err := s.dialogs.ChooseFile("Select Python Interpreter", startDir)
@@ -243,7 +255,7 @@ func (s *Server) handleDialogExportDir(w http.ResponseWriter, r *http.Request) {
 	cfg := s.cfgStore.Get()
 	startDir := strings.TrimSpace(req.Current)
 	if startDir == "" {
-		startDir = cfg.ResolveExportDir()
+		startDir = cfg.ResolveExportDir("")
 	}
 	startDir = nearestExistingDir(startDir)
 	dir, err := s.dialogs.ChooseDirectory("Select Default Export Folder", startDir)
@@ -289,21 +301,23 @@ func (s *Server) handleWindowClose(w http.ResponseWriter, r *http.Request) {
 
 func (s *Server) handleListModels(w http.ResponseWriter, r *http.Request) {
 	cfg := s.cfgStore.Get()
-	if cfg.ProjectRoot == "" {
+	if len(cfg.Libraries) == 0 {
 		writeJSON(w, http.StatusOK, map[string]any{
-			"ok":           true,
-			"project_root": "",
-			"models":       []worker.ModelInfo{},
+			"ok":             true,
+			"libraries":      []config.Library{},
+			"models":         []worker.ModelInfo{},
+			"library_errors": map[string]string{},
 		})
 		return
 	}
 
 	if err := s.ensureWorkerRunning(r.Context()); err != nil {
 		writeJSON(w, http.StatusOK, map[string]any{
-			"ok":           false,
-			"project_root": cfg.ProjectRoot,
-			"models":       []worker.ModelInfo{},
-			"error":        err.Error(),
+			"ok":             false,
+			"libraries":      cfg.Libraries,
+			"models":         []worker.ModelInfo{},
+			"library_errors": map[string]string{},
+			"error":          err.Error(),
 		})
 		return
 	}
@@ -311,19 +325,21 @@ func (s *Server) handleListModels(w http.ResponseWriter, r *http.Request) {
 	resp, err := s.worker.ListModels(r.Context())
 	if err != nil {
 		writeJSON(w, http.StatusOK, map[string]any{
-			"ok":           false,
-			"project_root": cfg.ProjectRoot,
-			"models":       []worker.ModelInfo{},
-			"error":        err.Error(),
+			"ok":             false,
+			"libraries":      cfg.Libraries,
+			"models":         []worker.ModelInfo{},
+			"library_errors": map[string]string{},
+			"error":          err.Error(),
 		})
 		return
 	}
 	if !resp.OK {
 		writeJSON(w, http.StatusOK, map[string]any{
-			"ok":           false,
-			"project_root": cfg.ProjectRoot,
-			"models":       []worker.ModelInfo{},
-			"error":        resp.Error,
+			"ok":             false,
+			"libraries":      cfg.Libraries,
+			"models":         []worker.ModelInfo{},
+			"library_errors": map[string]string{},
+			"error":          resp.Error,
 		})
 		return
 	}
@@ -332,10 +348,15 @@ func (s *Server) handleListModels(w http.ResponseWriter, r *http.Request) {
 	if models == nil {
 		models = []worker.ModelInfo{}
 	}
+	libErrors := resp.LibraryErrors
+	if libErrors == nil {
+		libErrors = map[string]string{}
+	}
 	writeJSON(w, http.StatusOK, map[string]any{
-		"ok":           true,
-		"project_root": cfg.ProjectRoot,
-		"models":       models,
+		"ok":             true,
+		"libraries":      cfg.Libraries,
+		"models":         models,
+		"library_errors": libErrors,
 	})
 }
 
@@ -439,7 +460,7 @@ func (s *Server) handleExportModel(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	stem, err := s.worker.ExportName(r.Context(), modelID, req.Params)
+	stem, libraryID, err := s.worker.ExportName(r.Context(), modelID, req.Params)
 	if err != nil || strings.TrimSpace(stem) == "" {
 		stem = modelID
 	}
@@ -460,7 +481,7 @@ func (s *Server) handleExportModel(w http.ResponseWriter, r *http.Request) {
 	filterName := strings.ToUpper(fmtName) + " Files"
 	filterPattern := "*." + fmtName
 
-	exportDir := s.cfgStore.Get().ResolveExportDir()
+	exportDir := s.cfgStore.Get().ResolveExportDir(libraryID)
 	if exportDir != "" {
 		_ = os.MkdirAll(exportDir, 0o755)
 	}

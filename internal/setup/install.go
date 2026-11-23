@@ -10,13 +10,15 @@ import (
 	"os/exec"
 	"path/filepath"
 	"strings"
+
+	"github.com/ltcovalt/code-cad-studio/internal/config"
 )
 
-// InstallOptions configures automated virtual environment creation and package setup.
+// InstallOptions configures automated shared Studio virtual environment creation and package setup.
 type InstallOptions struct {
-	ProjectRoot   string
+	LibraryRoots  []string
 	BasePython    string
-	TargetVenvDir string // defaults to <ProjectRoot>/.venv
+	TargetVenvDir string // defaults to config.StudioVenvDir()
 	UseUV         bool
 }
 
@@ -35,26 +37,27 @@ type InstallResult struct {
 	UsedUV     bool            `json:"used_uv"`
 }
 
-// InstallEnvironment creates <ProjectRoot>/.venv and installs build123d + ocp_tessellate
-// (plus project requirements.txt if present), streaming live output via onEvent.
+// InstallEnvironment creates Studio's shared managed virtual environment (or TargetVenvDir)
+// and installs build123d + ocp_tessellate (plus any library requirements.txt files),
+// streaming live output via onEvent.
 func InstallEnvironment(
 	ctx context.Context,
 	opts InstallOptions,
 	onEvent func(InstallEvent),
 ) (InstallResult, error) {
-	projectRoot := ExpandPath(opts.ProjectRoot)
-	if projectRoot == "" {
-		return InstallResult{}, errors.New("project directory is required")
-	}
-
 	venvDir := ExpandPath(opts.TargetVenvDir)
 	if venvDir == "" {
-		venvDir = filepath.Join(projectRoot, ".venv")
+		defaultVenv, err := config.StudioVenvDir()
+		if err != nil {
+			return InstallResult{}, fmt.Errorf("resolve studio venv directory: %w", err)
+		}
+		venvDir = defaultVenv
 	}
 	if err := os.MkdirAll(filepath.Dir(venvDir), 0o755); err != nil {
-		return InstallResult{}, fmt.Errorf("create project directory: %w", err)
+		return InstallResult{}, fmt.Errorf("create venv parent directory: %w", err)
 	}
 
+	workDir := filepath.Dir(venvDir)
 	emit := func(ev InstallEvent) {
 		if onEvent != nil {
 			onEvent(ev)
@@ -77,18 +80,18 @@ func InstallEnvironment(
 	if _, err := os.Stat(venvPython); err != nil {
 		emit(InstallEvent{
 			Stage:   "creating_venv",
-			Message: fmt.Sprintf("Creating virtual environment at %s...", venvDir),
+			Message: fmt.Sprintf("Creating shared Studio virtual environment at %s...", venvDir),
 		})
 		if uvPath != "" {
 			args := []string{"venv", venvDir}
 			if basePython != "" {
 				args = append(args, "--python", basePython)
 			}
-			if err := runStreamingCmd(ctx, projectRoot, uvPath, args, "creating_venv", emit); err != nil {
+			if err := runStreamingCmd(ctx, workDir, uvPath, args, "creating_venv", emit); err != nil {
 				return InstallResult{}, fmt.Errorf("create virtual environment with uv: %w", err)
 			}
 		} else {
-			if err := runStreamingCmd(ctx, projectRoot, basePython, []string{"-m", "venv", venvDir}, "creating_venv", emit); err != nil {
+			if err := runStreamingCmd(ctx, workDir, basePython, []string{"-m", "venv", venvDir}, "creating_venv", emit); err != nil {
 				return InstallResult{}, fmt.Errorf("create virtual environment: %w", err)
 			}
 		}
@@ -112,32 +115,33 @@ func InstallEnvironment(
 	packages := []string{"build123d", "ocp_tessellate"}
 	if uvPath != "" {
 		args := append([]string{"pip", "install", "--python", venvPython}, packages...)
-		if err := runStreamingCmd(ctx, projectRoot, uvPath, args, "installing_packages", emit); err != nil {
+		if err := runStreamingCmd(ctx, workDir, uvPath, args, "installing_packages", emit); err != nil {
 			return InstallResult{}, fmt.Errorf("install packages with uv: %w", err)
 		}
 	} else {
 		args := append([]string{"-m", "pip", "install", "--disable-pip-version-check", "--progress-bar", "off"}, packages...)
-		if err := runStreamingCmd(ctx, projectRoot, venvPython, args, "installing_packages", emit); err != nil {
+		if err := runStreamingCmd(ctx, workDir, venvPython, args, "installing_packages", emit); err != nil {
 			return InstallResult{}, fmt.Errorf("install packages with pip: %w", err)
 		}
 	}
 
-	// Optional: install project requirements.txt if present
-	reqFile := filepath.Join(projectRoot, "requirements.txt")
-	if st, err := os.Stat(reqFile); err == nil && !st.IsDir() {
+	// Optional: install requirements.txt from any configured library
+	for _, reqFile := range FindRequirementsFiles(opts.LibraryRoots) {
+		libName := filepath.Base(filepath.Dir(reqFile))
 		emit(InstallEvent{
 			Stage:   "installing_packages",
-			Message: "Installing additional dependencies from requirements.txt...",
+			Message: fmt.Sprintf("Installing dependencies from %s/requirements.txt...", libName),
 		})
+		reqWorkDir := filepath.Dir(reqFile)
 		if uvPath != "" {
 			args := []string{"pip", "install", "--python", venvPython, "-r", reqFile}
-			if err := runStreamingCmd(ctx, projectRoot, uvPath, args, "installing_packages", emit); err != nil {
-				return InstallResult{}, fmt.Errorf("install requirements.txt with uv: %w", err)
+			if err := runStreamingCmd(ctx, reqWorkDir, uvPath, args, "installing_packages", emit); err != nil {
+				return InstallResult{}, fmt.Errorf("install %s/requirements.txt with uv: %w", libName, err)
 			}
 		} else {
 			args := []string{"-m", "pip", "install", "--disable-pip-version-check", "--progress-bar", "off", "-r", reqFile}
-			if err := runStreamingCmd(ctx, projectRoot, venvPython, args, "installing_packages", emit); err != nil {
-				return InstallResult{}, fmt.Errorf("install requirements.txt with pip: %w", err)
+			if err := runStreamingCmd(ctx, reqWorkDir, venvPython, args, "installing_packages", emit); err != nil {
+				return InstallResult{}, fmt.Errorf("install %s/requirements.txt with pip: %w", libName, err)
 			}
 		}
 	}
@@ -147,7 +151,7 @@ func InstallEnvironment(
 		Stage:   "verifying",
 		Message: "Verifying build123d installation...",
 	})
-	cand := ProbeExecutable(ctx, venvPython, "project_venv")
+	cand := ProbeExecutable(ctx, venvPython, "studio_venv", "")
 	if cand.Error != "" {
 		return InstallResult{}, fmt.Errorf("verify installed python: %s", cand.Error)
 	}

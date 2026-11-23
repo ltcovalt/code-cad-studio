@@ -67,18 +67,30 @@ func New(cfgStore *config.Store, workerMgr *worker.Manager, dialogs DesktopDialo
 	return s
 }
 
-// StartServices boots the Python worker and project watcher using persisted config.
+func librarySpecs(cfg config.Config) []worker.LibrarySpec {
+	specs := make([]worker.LibrarySpec, 0, len(cfg.Libraries))
+	for _, lib := range cfg.Libraries {
+		specs = append(specs, worker.LibrarySpec{
+			ID:   lib.ID,
+			Name: lib.Name,
+			Path: lib.Path,
+		})
+	}
+	return specs
+}
+
+// StartServices boots the Python worker and library watcher using persisted config.
 func (s *Server) StartServices() {
 	cfg := s.cfgStore.Get()
 	if cfg.NeedsOnboarding() {
 		return
 	}
 	pyPath := cfg.ResolvePython()
-	if err := s.worker.EnsureStarted(pyPath, cfg.ProjectRoot); err != nil {
+	if err := s.worker.EnsureStarted(pyPath, librarySpecs(cfg)); err != nil {
 		log.Printf("Worker startup warning: %v", err)
 	}
-	if cfg.ProjectRoot != "" {
-		if err := s.watcher.Watch(cfg.ProjectRoot); err != nil {
+	if roots := cfg.LibraryRoots(); len(roots) > 0 {
+		if err := s.watcher.Watch(roots); err != nil {
 			log.Printf("Watcher startup warning: %v", err)
 		}
 	}
@@ -203,7 +215,7 @@ func (s *Server) handlePyFileChanged(path string) {
 
 	log.Printf("Python file changed (%s) -> restarting worker", path)
 	cfg := s.cfgStore.Get()
-	if err := s.worker.Restart(cfg.ResolvePython(), cfg.ProjectRoot); err != nil {
+	if err := s.worker.Restart(cfg.ResolvePython(), librarySpecs(cfg)); err != nil {
 		log.Printf("Worker restart failed: %v", err)
 		s.broadcastSSE("worker-error", map[string]string{"error": err.Error()})
 		return
@@ -259,5 +271,5 @@ func (s *Server) ensureWorkerRunning(ctx context.Context) error {
 		return nil
 	}
 	cfg := s.cfgStore.Get()
-	return s.worker.EnsureStarted(cfg.ResolvePython(), cfg.ProjectRoot)
+	return s.worker.EnsureStarted(cfg.ResolvePython(), librarySpecs(cfg))
 }

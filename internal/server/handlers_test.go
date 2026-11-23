@@ -185,9 +185,9 @@ def create_demo_box(params: DemoBoxParams):
 	srv := newTestServer(t, dialogs)
 
 	// Save project config to start worker
-	saveBody, _ := json.Marshal(map[string]string{
-		"project_root": projectDir,
-		"python_path":  "python3",
+	saveBody, _ := json.Marshal(map[string]any{
+		"libraries":   []config.Library{{ID: "test-lib", Name: "Test Lib", Path: projectDir}},
+		"python_path": "python3",
 	})
 	rec := httptest.NewRecorder()
 	srv.Handler().ServeHTTP(rec, httptest.NewRequest(http.MethodPost, "/api/config", bytes.NewReader(saveBody)))
@@ -205,13 +205,13 @@ def create_demo_box(params: DemoBoxParams):
 	if err := json.Unmarshal(rec.Body.Bytes(), &listResp); err != nil {
 		t.Fatalf("decode models: %v", err)
 	}
-	if !listResp.OK || len(listResp.Models) != 1 || listResp.Models[0].ID != "demo_box" {
+	if !listResp.OK || len(listResp.Models) != 1 || listResp.Models[0].ID != "test-lib::demo_box" {
 		t.Fatalf("unexpected models list: %+v", listResp)
 	}
 
-	// GET /api/models/demo_box
+	// GET /api/models/test-lib::demo_box
 	rec = httptest.NewRecorder()
-	srv.Handler().ServeHTTP(rec, httptest.NewRequest(http.MethodGet, "/api/models/demo_box", nil))
+	srv.Handler().ServeHTTP(rec, httptest.NewRequest(http.MethodGet, "/api/models/test-lib::demo_box", nil))
 	var modelResp struct {
 		OK       bool                `json:"ok"`
 		Fields   []worker.ParamField `json:"fields"`
@@ -272,12 +272,12 @@ def create_demo_box(params: DemoBoxParams):
 		t.Fatalf("expected extra.enabled nullable=true, got %+v", extraGroup.Children)
 	}
 
-	// Verify export_filename & default export dir (<project_root>/exports) via SaveFile
+	// Verify export_filename & default export dir (<library>/exports) via SaveFile
 	rec = httptest.NewRecorder()
 	exportBody := bytes.NewBufferString(`{"format":"stl","params":{"core":{"mode":"rect"}}}`)
-	srv.Handler().ServeHTTP(rec, httptest.NewRequest(http.MethodPost, "/api/models/demo_box/export", exportBody))
+	srv.Handler().ServeHTTP(rec, httptest.NewRequest(http.MethodPost, "/api/models/test-lib::demo_box/export", exportBody))
 	if rec.Code != http.StatusOK {
-		t.Fatalf("POST /api/models/demo_box/export status = %d", rec.Code)
+		t.Fatalf("POST /api/models/test-lib::demo_box/export status = %d", rec.Code)
 	}
 	if dialogs.lastSave != "demo_box_rect.stl" {
 		t.Fatalf("expected SaveFile default filename 'demo_box_rect.stl', got %q", dialogs.lastSave)
@@ -289,10 +289,10 @@ def create_demo_box(params: DemoBoxParams):
 
 	// Configure a custom export_dir and verify SaveFile uses it
 	customExportDir := filepath.Join(t.TempDir(), "custom-exports")
-	saveBody, _ = json.Marshal(map[string]string{
-		"project_root": projectDir,
-		"python_path":  "python3",
-		"export_dir":   customExportDir,
+	saveBody, _ = json.Marshal(map[string]any{
+		"libraries":   []config.Library{{ID: "test-lib", Name: "Test Lib", Path: projectDir}},
+		"python_path": "python3",
+		"export_dir":  customExportDir,
 	})
 	rec = httptest.NewRecorder()
 	srv.Handler().ServeHTTP(rec, httptest.NewRequest(http.MethodPost, "/api/config", bytes.NewReader(saveBody)))
@@ -309,9 +309,9 @@ def create_demo_box(params: DemoBoxParams):
 
 	rec = httptest.NewRecorder()
 	exportBody = bytes.NewBufferString(`{"format":"step","params":{"core":{"mode":"round"}}}`)
-	srv.Handler().ServeHTTP(rec, httptest.NewRequest(http.MethodPost, "/api/models/demo_box/export", exportBody))
+	srv.Handler().ServeHTTP(rec, httptest.NewRequest(http.MethodPost, "/api/models/test-lib::demo_box/export", exportBody))
 	if rec.Code != http.StatusOK {
-		t.Fatalf("POST /api/models/demo_box/export (custom dir) status = %d", rec.Code)
+		t.Fatalf("POST /api/models/test-lib::demo_box/export (custom dir) status = %d", rec.Code)
 	}
 	if dialogs.lastSaveDir != customExportDir {
 		t.Fatalf("expected SaveFile custom defaultDir %q, got %q", customExportDir, dialogs.lastSaveDir)
@@ -353,9 +353,9 @@ def create_list_demo(params: ListDemoParams):
 
 	dialogs := &stubDialogs{}
 	srv := newTestServer(t, dialogs)
-	saveBody, _ := json.Marshal(map[string]string{
-		"project_root": projectDir,
-		"python_path":  "python3",
+	saveBody, _ := json.Marshal(map[string]any{
+		"libraries":   []config.Library{{ID: "test-lib", Name: "Test Lib", Path: projectDir}},
+		"python_path": "python3",
 	})
 	rec := httptest.NewRecorder()
 	srv.Handler().ServeHTTP(rec, httptest.NewRequest(http.MethodPost, "/api/config", bytes.NewReader(saveBody)))
@@ -365,14 +365,14 @@ def create_list_demo(params: ListDemoParams):
 
 	// Empty string must coerce to None (not empty string)
 	rec = httptest.NewRecorder()
-	srv.Handler().ServeHTTP(rec, httptest.NewRequest(http.MethodPost, "/api/models/list_demo/export", bytes.NewBufferString(`{"format":"stl","params":{"slots":{"z_positions":""}}}`)))
+	srv.Handler().ServeHTTP(rec, httptest.NewRequest(http.MethodPost, "/api/models/test-lib::list_demo/export", bytes.NewBufferString(`{"format":"stl","params":{"slots":{"z_positions":""}}}`)))
 	if dialogs.lastSave != "list_demo_auto.stl" {
 		t.Fatalf("expected empty string to coerce to None -> 'list_demo_auto.stl', got %q", dialogs.lastSave)
 	}
 
 	// Comma-separated string must coerce to List[float]
 	rec = httptest.NewRecorder()
-	srv.Handler().ServeHTTP(rec, httptest.NewRequest(http.MethodPost, "/api/models/list_demo/export", bytes.NewBufferString(`{"format":"stl","params":{"slots":{"z_positions":"10, 25.0, 40"}}}`)))
+	srv.Handler().ServeHTTP(rec, httptest.NewRequest(http.MethodPost, "/api/models/test-lib::list_demo/export", bytes.NewBufferString(`{"format":"stl","params":{"slots":{"z_positions":"10, 25.0, 40"}}}`)))
 	if dialogs.lastSave != "list_demo_10_25_40.stl" {
 		t.Fatalf("expected CSV list coercion -> 'list_demo_10_25_40.stl', got %q", dialogs.lastSave)
 	}
@@ -402,7 +402,7 @@ def create_list_demo(params: ListDemoParams):
 		t.Fatalf("warm Reload failed: %v", err)
 	}
 	rec = httptest.NewRecorder()
-	srv.Handler().ServeHTTP(rec, httptest.NewRequest(http.MethodPost, "/api/models/list_demo/export", bytes.NewBufferString(`{"format":"stl","params":{}}`)))
+	srv.Handler().ServeHTTP(rec, httptest.NewRequest(http.MethodPost, "/api/models/test-lib::list_demo/export", bytes.NewBufferString(`{"format":"stl","params":{}}`)))
 	if dialogs.lastSave != "list_demo_reloaded.stl" {
 		t.Fatalf("expected warm reload to update module -> 'list_demo_reloaded.stl', got %q", dialogs.lastSave)
 	}
@@ -451,9 +451,9 @@ def create_clip_demo(params: ClipDemoParams):
 
 	dialogs := &stubDialogs{}
 	srv := newTestServer(t, dialogs)
-	saveBody, _ := json.Marshal(map[string]string{
-		"project_root": projectDir,
-		"python_path":  "python3",
+	saveBody, _ := json.Marshal(map[string]any{
+		"libraries":   []config.Library{{ID: "test-lib", Name: "Test Lib", Path: projectDir}},
+		"python_path": "python3",
 	})
 	rec := httptest.NewRecorder()
 	srv.Handler().ServeHTTP(rec, httptest.NewRequest(http.MethodPost, "/api/config", bytes.NewReader(saveBody)))
@@ -464,20 +464,20 @@ def create_clip_demo(params: ClipDemoParams):
 	// 1. Save a local preset, pin as startup default, promote to project, then delete
 	rec = httptest.NewRecorder()
 	savePresetReq := `{"label":"Thin Clip","description":"6mm","scope":"user","full_snapshot":false,"params":{"core":{"thickness":6.0,"angle":95.0}}}`
-	srv.Handler().ServeHTTP(rec, httptest.NewRequest(http.MethodPost, "/api/models/clip_demo/presets", bytes.NewBufferString(savePresetReq)))
+	srv.Handler().ServeHTTP(rec, httptest.NewRequest(http.MethodPost, "/api/models/test-lib::clip_demo/presets", bytes.NewBufferString(savePresetReq)))
 	if rec.Code != http.StatusOK {
 		t.Fatalf("POST presets status = %d, body = %s", rec.Code, rec.Body.String())
 	}
 
 	rec = httptest.NewRecorder()
-	srv.Handler().ServeHTTP(rec, httptest.NewRequest(http.MethodPost, "/api/models/clip_demo/presets/default", bytes.NewBufferString(`{"key":"thin_clip"}`)))
+	srv.Handler().ServeHTTP(rec, httptest.NewRequest(http.MethodPost, "/api/models/test-lib::clip_demo/presets/default", bytes.NewBufferString(`{"key":"thin_clip"}`)))
 	if rec.Code != http.StatusOK {
 		t.Fatalf("POST presets/default status = %d", rec.Code)
 	}
 
-	// GET /api/models/clip_demo should return pinned default_preset_key
+	// GET /api/models/test-lib::clip_demo should return pinned default_preset_key
 	rec = httptest.NewRecorder()
-	srv.Handler().ServeHTTP(rec, httptest.NewRequest(http.MethodGet, "/api/models/clip_demo", nil))
+	srv.Handler().ServeHTTP(rec, httptest.NewRequest(http.MethodGet, "/api/models/test-lib::clip_demo", nil))
 	var detailResp struct {
 		OK               bool   `json:"ok"`
 		DefaultPresetKey string `json:"default_preset_key"`
@@ -489,7 +489,7 @@ def create_clip_demo(params: ClipDemoParams):
 	// Save same preset to project scope (replaces/clears shadowed user copy)
 	rec = httptest.NewRecorder()
 	saveProjReq := `{"label":"Thin Clip","description":"6mm shared","scope":"project","full_snapshot":true,"params":{"core":{"thickness":6.0,"angle":95.0}}}`
-	srv.Handler().ServeHTTP(rec, httptest.NewRequest(http.MethodPost, "/api/models/clip_demo/presets", bytes.NewBufferString(saveProjReq)))
+	srv.Handler().ServeHTTP(rec, httptest.NewRequest(http.MethodPost, "/api/models/test-lib::clip_demo/presets", bytes.NewBufferString(saveProjReq)))
 	if rec.Code != http.StatusOK {
 		t.Fatalf("POST project preset status = %d, body = %s", rec.Code, rec.Body.String())
 	}
@@ -497,7 +497,7 @@ def create_clip_demo(params: ClipDemoParams):
 	// Rename pinned project preset and verify startup default pin follows the new key
 	rec = httptest.NewRecorder()
 	renameReq := `{"scope":"project","label":"Slim Clip","description":"6mm renamed"}`
-	srv.Handler().ServeHTTP(rec, httptest.NewRequest(http.MethodPatch, "/api/models/clip_demo/presets/thin_clip", bytes.NewBufferString(renameReq)))
+	srv.Handler().ServeHTTP(rec, httptest.NewRequest(http.MethodPatch, "/api/models/test-lib::clip_demo/presets/thin_clip", bytes.NewBufferString(renameReq)))
 	if rec.Code != http.StatusOK {
 		t.Fatalf("PATCH rename preset status = %d, body = %s", rec.Code, rec.Body.String())
 	}
@@ -512,7 +512,7 @@ def create_clip_demo(params: ClipDemoParams):
 
 	// Delete project preset clears pinned default_preset_key
 	rec = httptest.NewRecorder()
-	srv.Handler().ServeHTTP(rec, httptest.NewRequest(http.MethodDelete, "/api/models/clip_demo/presets/slim_clip?scope=project", nil))
+	srv.Handler().ServeHTTP(rec, httptest.NewRequest(http.MethodDelete, "/api/models/test-lib::clip_demo/presets/slim_clip?scope=project", nil))
 	if rec.Code != http.StatusOK {
 		t.Fatalf("DELETE preset status = %d, body = %s", rec.Code, rec.Body.String())
 	}
@@ -527,7 +527,7 @@ def create_clip_demo(params: ClipDemoParams):
 	// 2. Fail-closed test: attempting to update computed_gap (non-literal expression) must report unsupported and not write file
 	rec = httptest.NewRecorder()
 	badApply := `{"dry_run":false,"params":{"core":{"thickness":8.0,"computed_gap":5.0}}}`
-	srv.Handler().ServeHTTP(rec, httptest.NewRequest(http.MethodPost, "/api/models/clip_demo/update-defaults", bytes.NewBufferString(badApply)))
+	srv.Handler().ServeHTTP(rec, httptest.NewRequest(http.MethodPost, "/api/models/test-lib::clip_demo/update-defaults", bytes.NewBufferString(badApply)))
 	var badResp worker.UpdateDefaultsResponse
 	if err := json.Unmarshal(rec.Body.Bytes(), &badResp); err != nil {
 		t.Fatalf("decode badResp: %v", err)
@@ -543,7 +543,7 @@ def create_clip_demo(params: ClipDemoParams):
 	// 3. Dry-run preview on safe literal changes
 	rec = httptest.NewRecorder()
 	previewReq := `{"dry_run":true,"params":{"core":{"thickness":10.5,"angle":110.0,"label_text":"prusa","enabled":false,"override":4.2}}}`
-	srv.Handler().ServeHTTP(rec, httptest.NewRequest(http.MethodPost, "/api/models/clip_demo/update-defaults", bytes.NewBufferString(previewReq)))
+	srv.Handler().ServeHTTP(rec, httptest.NewRequest(http.MethodPost, "/api/models/test-lib::clip_demo/update-defaults", bytes.NewBufferString(previewReq)))
 	var previewResp worker.UpdateDefaultsResponse
 	if err := json.Unmarshal(rec.Body.Bytes(), &previewResp); err != nil {
 		t.Fatalf("decode previewResp: %v", err)
@@ -555,7 +555,7 @@ def create_clip_demo(params: ClipDemoParams):
 	// 4. Stale SHA-256 must abort without modifying file
 	rec = httptest.NewRecorder()
 	staleReq := `{"dry_run":false,"expected_sha256":"deadbeef","params":{"core":{"thickness":10.5}}}`
-	srv.Handler().ServeHTTP(rec, httptest.NewRequest(http.MethodPost, "/api/models/clip_demo/update-defaults", bytes.NewBufferString(staleReq)))
+	srv.Handler().ServeHTTP(rec, httptest.NewRequest(http.MethodPost, "/api/models/test-lib::clip_demo/update-defaults", bytes.NewBufferString(staleReq)))
 	var staleResp worker.UpdateDefaultsResponse
 	if err := json.Unmarshal(rec.Body.Bytes(), &staleResp); err != nil || staleResp.OK {
 		t.Fatalf("expected stale sha256 to fail, got %+v", staleResp)
@@ -576,7 +576,7 @@ def create_clip_demo(params: ClipDemoParams):
 		},
 	})
 	rec = httptest.NewRecorder()
-	srv.Handler().ServeHTTP(rec, httptest.NewRequest(http.MethodPost, "/api/models/clip_demo/update-defaults", bytes.NewReader(applyPayload)))
+	srv.Handler().ServeHTTP(rec, httptest.NewRequest(http.MethodPost, "/api/models/test-lib::clip_demo/update-defaults", bytes.NewReader(applyPayload)))
 	var applyResp worker.UpdateDefaultsResponse
 	if err := json.Unmarshal(rec.Body.Bytes(), &applyResp); err != nil {
 		t.Fatalf("decode applyResp: %v", err)
@@ -605,9 +605,9 @@ def create_clip_demo(params: ClipDemoParams):
 		}
 	}
 
-	// Subsequent GET /api/models/clip_demo must reflect new canonical defaults immediately
+	// Subsequent GET /api/models/test-lib::clip_demo must reflect new canonical defaults immediately
 	rec = httptest.NewRecorder()
-	srv.Handler().ServeHTTP(rec, httptest.NewRequest(http.MethodGet, "/api/models/clip_demo", nil))
+	srv.Handler().ServeHTTP(rec, httptest.NewRequest(http.MethodGet, "/api/models/test-lib::clip_demo", nil))
 	var refreshed struct {
 		OK       bool           `json:"ok"`
 		Defaults map[string]any `json:"defaults"`
@@ -668,9 +668,9 @@ def create_cutout_demo(params: CutoutDemoParams):
 
 	dialogs := &stubDialogs{}
 	srv := newTestServer(t, dialogs)
-	saveBody, _ := json.Marshal(map[string]string{
-		"project_root": projectDir,
-		"python_path":  "python3",
+	saveBody, _ := json.Marshal(map[string]any{
+		"libraries":   []config.Library{{ID: "test-lib", Name: "Test Lib", Path: projectDir}},
+		"python_path": "python3",
 	})
 	rec := httptest.NewRecorder()
 	srv.Handler().ServeHTTP(rec, httptest.NewRequest(http.MethodPost, "/api/config", bytes.NewReader(saveBody)))
@@ -678,9 +678,9 @@ def create_cutout_demo(params: CutoutDemoParams):
 		t.Fatalf("POST /api/config status = %d", rec.Code)
 	}
 
-	// GET /api/models/cutout_demo -> verify list schema introspection
+	// GET /api/models/test-lib::cutout_demo -> verify list schema introspection
 	rec = httptest.NewRecorder()
-	srv.Handler().ServeHTTP(rec, httptest.NewRequest(http.MethodGet, "/api/models/cutout_demo", nil))
+	srv.Handler().ServeHTTP(rec, httptest.NewRequest(http.MethodGet, "/api/models/test-lib::cutout_demo", nil))
 	var modelResp struct {
 		OK       bool                `json:"ok"`
 		Fields   []worker.ParamField `json:"fields"`
@@ -730,7 +730,7 @@ def create_cutout_demo(params: CutoutDemoParams):
 	rec = httptest.NewRecorder()
 	srv.Handler().ServeHTTP(rec, httptest.NewRequest(
 		http.MethodPost,
-		"/api/models/cutout_demo/export",
+		"/api/models/test-lib::cutout_demo/export",
 		bytes.NewBufferString(`{"format":"stl","params":{"cutouts":{"enabled":true,"items":[{"leg":"x","length":20},{"leg":"y","length":55,"depth":5}]}}}`),
 	))
 	if dialogs.lastSave != "cutout_demo_2_x20_y55.stl" {
@@ -740,7 +740,7 @@ def create_cutout_demo(params: CutoutDemoParams):
 	rec = httptest.NewRecorder()
 	srv.Handler().ServeHTTP(rec, httptest.NewRequest(
 		http.MethodPost,
-		"/api/models/cutout_demo/export",
+		"/api/models/test-lib::cutout_demo/export",
 		bytes.NewBufferString(`{"format":"stl","params":{"cutouts":{"enabled":true,"items":[]}}}`),
 	))
 	if dialogs.lastSave != "cutout_demo_0_none.stl" {
@@ -773,14 +773,14 @@ func TestSetupOnboardingHandlers(t *testing.T) {
 		t.Fatalf("GET /api/setup/defaults status = %d", rec.Code)
 	}
 	var defResp struct {
-		SuggestedProjectDir string `json:"suggested_project_dir"`
-		SuggestedExportDir  string `json:"suggested_export_dir"`
-		DefaultArchiveURL   string `json:"default_archive_url"`
+		DefaultDownloadDir string `json:"default_download_dir"`
+		StudioVenvDir      string `json:"studio_venv_dir"`
+		DefaultArchiveURL  string `json:"default_archive_url"`
 	}
 	if err := json.Unmarshal(rec.Body.Bytes(), &defResp); err != nil {
 		t.Fatalf("decode defaults: %v", err)
 	}
-	if defResp.SuggestedProjectDir == "" || defResp.SuggestedExportDir == "" || defResp.DefaultArchiveURL == "" {
+	if defResp.DefaultDownloadDir == "" || defResp.StudioVenvDir == "" || defResp.DefaultArchiveURL == "" {
 		t.Fatalf("unexpected defaults response: %+v", defResp)
 	}
 
@@ -815,17 +815,16 @@ func TestSetupOnboardingHandlers(t *testing.T) {
 	}
 
 	// POST /api/setup/probe
-	probeBody, _ := json.Marshal(map[string]any{"project_root": projDir})
+	probeBody, _ := json.Marshal(map[string]any{"library_roots": []string{projDir}})
 	rec = httptest.NewRecorder()
 	srv.Handler().ServeHTTP(rec, httptest.NewRequest(http.MethodPost, "/api/setup/probe", bytes.NewReader(probeBody)))
 	if rec.Code != http.StatusOK {
 		t.Fatalf("POST /api/setup/probe status = %d", rec.Code)
 	}
 
-	// POST /api/setup/complete marks onboarding completed and persists project_root
+	// POST /api/setup/complete marks onboarding completed and persists libraries
 	completeBody, _ := json.Marshal(map[string]any{
-		"project_root": projDir,
-		"export_dir":   filepath.Join(projDir, "exports"),
+		"libraries": []config.Library{{Name: "Sample Proj", Path: projDir}},
 	})
 	rec = httptest.NewRecorder()
 	srv.Handler().ServeHTTP(rec, httptest.NewRequest(http.MethodPost, "/api/setup/complete", bytes.NewReader(completeBody)))
@@ -838,10 +837,9 @@ func TestSetupOnboardingHandlers(t *testing.T) {
 	if cfgResp.NeedsOnboarding || !cfgResp.Config.OnboardingCompleted {
 		t.Fatalf("expected onboarding_completed=true and needs_onboarding=false after complete, got %+v", cfgResp)
 	}
-	if cfgResp.Config.ProjectRoot != projDir {
-		t.Fatalf("expected project_root=%q, got %q", projDir, cfgResp.Config.ProjectRoot)
+	if len(cfgResp.Config.Libraries) != 1 || cfgResp.Config.Libraries[0].Path != projDir {
+		t.Fatalf("expected persisted library %q, got %+v", projDir, cfgResp.Config.Libraries)
 	}
-	// Default <project_root>/exports should normalize to empty export_dir while resolving cleanly
 	if cfgResp.Config.ExportDir != "" || cfgResp.ResolvedExportDir != filepath.Join(projDir, "exports") {
 		t.Fatalf("unexpected export dir config=%q resolved=%q", cfgResp.Config.ExportDir, cfgResp.ResolvedExportDir)
 	}
@@ -873,9 +871,9 @@ def create_ver_demo(params: VerDemoParams):
 	}
 
 	srv := newTestServer(t, &stubDialogs{})
-	saveBody, _ := json.Marshal(map[string]string{
-		"project_root": projectDir,
-		"python_path":  "python3",
+	saveBody, _ := json.Marshal(map[string]any{
+		"libraries":   []config.Library{{ID: "test-lib", Name: "Test Lib", Path: projectDir}},
+		"python_path": "python3",
 	})
 	rec := httptest.NewRecorder()
 	srv.Handler().ServeHTTP(rec, httptest.NewRequest(http.MethodPost, "/api/config", bytes.NewReader(saveBody)))
@@ -897,7 +895,7 @@ def create_ver_demo(params: VerDemoParams):
 	rec = httptest.NewRecorder()
 	srv.Handler().ServeHTTP(rec, httptest.NewRequest(
 		http.MethodPut,
-		"/api/models/ver_demo/presets/default/verification",
+		"/api/models/test-lib::ver_demo/presets/default/verification",
 		bytes.NewBufferString(`{"scope":"default","status":"verified","note":"Printed in PETG, exact fit"}`),
 	))
 	if rec.Code != http.StatusOK {
@@ -918,7 +916,7 @@ def create_ver_demo(params: VerDemoParams):
 	rec = httptest.NewRecorder()
 	srv.Handler().ServeHTTP(rec, httptest.NewRequest(
 		http.MethodPut,
-		"/api/models/ver_demo/presets/default/verification",
+		"/api/models/test-lib::ver_demo/presets/default/verification",
 		bytes.NewBufferString(`{"scope":"default","status":"bogus","note":""}`),
 	))
 	if rec.Code != http.StatusBadRequest {
@@ -929,7 +927,7 @@ def create_ver_demo(params: VerDemoParams):
 	rec = httptest.NewRecorder()
 	srv.Handler().ServeHTTP(rec, httptest.NewRequest(
 		http.MethodPost,
-		"/api/models/ver_demo/presets",
+		"/api/models/test-lib::ver_demo/presets",
 		bytes.NewBufferString(`{"label":"Wide Block","description":"60mm","scope":"project","params":{"core":{"width":60.0}},"verification":{"status":"usable","note":"Slightly tight on first layer"}}`),
 	))
 	if rec.Code != http.StatusOK {
@@ -950,7 +948,7 @@ def create_ver_demo(params: VerDemoParams):
 	rec = httptest.NewRecorder()
 	srv.Handler().ServeHTTP(rec, httptest.NewRequest(
 		http.MethodPut,
-		"/api/models/ver_demo/presets/wide_block/verification",
+		"/api/models/test-lib::ver_demo/presets/wide_block/verification",
 		bytes.NewBufferString(`{"scope":"project","status":"unusable","note":"Interferes with bracket"}`),
 	))
 	if rec.Code != http.StatusOK {
@@ -961,7 +959,7 @@ def create_ver_demo(params: VerDemoParams):
 	rec = httptest.NewRecorder()
 	srv.Handler().ServeHTTP(rec, httptest.NewRequest(
 		http.MethodPost,
-		"/api/models/ver_demo/update-defaults",
+		"/api/models/test-lib::ver_demo/update-defaults",
 		bytes.NewBufferString(`{"dry_run":true,"params":{"core":{"width":45.0}}}`),
 	))
 	var previewResp worker.UpdateDefaultsResponse
@@ -975,13 +973,13 @@ def create_ver_demo(params: VerDemoParams):
 		"params":          map[string]any{"core": map[string]any{"width": 45.0}},
 	})
 	rec = httptest.NewRecorder()
-	srv.Handler().ServeHTTP(rec, httptest.NewRequest(http.MethodPost, "/api/models/ver_demo/update-defaults", bytes.NewReader(applyBody)))
+	srv.Handler().ServeHTTP(rec, httptest.NewRequest(http.MethodPost, "/api/models/test-lib::ver_demo/update-defaults", bytes.NewReader(applyBody)))
 	if rec.Code != http.StatusOK {
 		t.Fatalf("apply update-defaults status = %d, body = %s", rec.Code, rec.Body.String())
 	}
 
 	rec = httptest.NewRecorder()
-	srv.Handler().ServeHTTP(rec, httptest.NewRequest(http.MethodGet, "/api/models/ver_demo/presets", nil))
+	srv.Handler().ServeHTTP(rec, httptest.NewRequest(http.MethodGet, "/api/models/test-lib::ver_demo/presets", nil))
 	var afterUpdate struct {
 		OK      bool         `json:"ok"`
 		Presets []presetWire `json:"presets"`
@@ -1038,9 +1036,9 @@ def create_lid_demo(params: LidDemoParams):
 	}
 
 	srv := newTestServer(t, &stubDialogs{})
-	saveBody, _ := json.Marshal(map[string]string{
-		"project_root": projectDir,
-		"python_path":  "python3",
+	saveBody, _ := json.Marshal(map[string]any{
+		"libraries":   []config.Library{{ID: "test-lib", Name: "Test Lib", Path: projectDir}},
+		"python_path": "python3",
 	})
 	rec := httptest.NewRecorder()
 	srv.Handler().ServeHTTP(rec, httptest.NewRequest(http.MethodPost, "/api/config", bytes.NewReader(saveBody)))
@@ -1052,7 +1050,7 @@ def create_lid_demo(params: LidDemoParams):
 	rec = httptest.NewRecorder()
 	srv.Handler().ServeHTTP(rec, httptest.NewRequest(
 		http.MethodPost,
-		"/api/models/lid_demo/presets/default",
+		"/api/models/test-lib::lid_demo/presets/default",
 		bytes.NewBufferString(`{"key":"anchor_round_6_cup"}`),
 	))
 	if rec.Code != http.StatusOK {
@@ -1063,7 +1061,7 @@ def create_lid_demo(params: LidDemoParams):
 	rec = httptest.NewRecorder()
 	srv.Handler().ServeHTTP(rec, httptest.NewRequest(
 		http.MethodPost,
-		"/api/models/lid_demo/presets",
+		"/api/models/test-lib::lid_demo/presets",
 		bytes.NewBufferString(`{"label":"Anchor Hocking Round 6-Cup (1.5 qt)","description":"Tighter fit","scope":"project","params":{"core":{"diameter":186.2}}}`),
 	))
 	if rec.Code != http.StatusOK {
@@ -1097,7 +1095,7 @@ def create_lid_demo(params: LidDemoParams):
 	rec = httptest.NewRecorder()
 	srv.Handler().ServeHTTP(rec, httptest.NewRequest(
 		http.MethodPost,
-		"/api/models/lid_demo/presets",
+		"/api/models/test-lib::lid_demo/presets",
 		bytes.NewBufferString(`{"label":"Anchor Hocking Round 6-Cup (Loose)","description":"Loose variant","scope":"project","params":{"core":{"diameter":188.0}}}`),
 	))
 	if rec.Code != http.StatusOK {
@@ -1108,5 +1106,154 @@ def create_lid_demo(params: LidDemoParams):
 	}
 	if !saveResp.OK || saveResp.SelectedKey != "anchor_hocking_round_6_cup_loose" || len(saveResp.Presets) != 3 {
 		t.Fatalf("expected 3 presets with new key, got %+v", saveResp)
+	}
+}
+
+func TestMultiLibraryNestedFoldersIsolationAndExports(t *testing.T) {
+	base := t.TempDir()
+	// Two libraries with the SAME folder basename ("code-cad") in different parent dirs
+	libA := filepath.Join(base, "repos", "code-cad")
+	libB := filepath.Join(base, "downloads", "code-cad")
+	missingLib := filepath.Join(base, "offline", "unplugged")
+
+	// Library A: root model, flat canonical model, nested canonical model, deep non-matching model + its own components/tag.py
+	for _, dir := range []string{
+		filepath.Join(libA, "components"),
+		filepath.Join(libA, "models", "c_clip"),
+		filepath.Join(libA, "models", "gridfinity", "bin"),
+		filepath.Join(libA, "models", "gridfinity", "spacers"),
+	} {
+		if err := os.MkdirAll(dir, 0o755); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if err := os.WriteFile(filepath.Join(libA, "components", "tag.py"), []byte("TAG = 'lib_a'\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	clipSrc := `from dataclasses import dataclass
+from components.tag import TAG
+
+@dataclass
+class CClipParams:
+    width: float = 10.0
+
+def export_filename(params: CClipParams) -> str:
+    return f"c_clip_{TAG}_{int(params.width)}"
+
+def create_c_clip(params: CClipParams):
+    return None
+`
+	if err := os.WriteFile(filepath.Join(libA, "models", "c_clip", "c_clip.py"), []byte(clipSrc), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(libA, "root_part.py"), []byte("def create_root_part(): return None\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(libA, "models", "gridfinity", "bin", "bin.py"), []byte("def create_bin(): return None\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(libA, "models", "gridfinity", "spacers", "corner.py"), []byte("def create_corner(): return None\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	// Library B: same c_clip model name, DIFFERENT components/tag.py (tests namespace package isolation!)
+	for _, dir := range []string{
+		filepath.Join(libB, "components"),
+		filepath.Join(libB, "models", "c_clip"),
+	} {
+		if err := os.MkdirAll(dir, 0o755); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if err := os.WriteFile(filepath.Join(libB, "components", "tag.py"), []byte("TAG = 'lib_b'\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(libB, "models", "c_clip", "c_clip.py"), []byte(clipSrc), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	dialogs := &stubDialogs{}
+	srv := newTestServer(t, dialogs)
+
+	saveBody, _ := json.Marshal(map[string]any{
+		"libraries": []config.Library{
+			{Path: libA},
+			{Path: libB},
+			{ID: "offline", Name: "Offline", Path: missingLib},
+		},
+		"python_path": "python3",
+	})
+	rec := httptest.NewRecorder()
+	srv.Handler().ServeHTTP(rec, httptest.NewRequest(http.MethodPost, "/api/config", bytes.NewReader(saveBody)))
+	if rec.Code != http.StatusOK {
+		t.Fatalf("POST /api/config status = %d, body = %s", rec.Code, rec.Body.String())
+	}
+	var cfgResp configResponse
+	if err := json.Unmarshal(rec.Body.Bytes(), &cfgResp); err != nil {
+		t.Fatal(err)
+	}
+	if len(cfgResp.Config.Libraries) != 3 {
+		t.Fatalf("expected 3 libraries, got %+v", cfgResp.Config.Libraries)
+	}
+	libAID := cfgResp.Config.Libraries[0].ID
+	libBID := cfgResp.Config.Libraries[1].ID
+	if libAID == libBID {
+		t.Fatalf("expected distinct IDs for same-named folders, got %+v", cfgResp.Config.Libraries)
+	}
+
+	// GET /api/models -> verify all models, clean folder extraction, and non-fatal library_errors
+	rec = httptest.NewRecorder()
+	srv.Handler().ServeHTTP(rec, httptest.NewRequest(http.MethodGet, "/api/models", nil))
+	var listResp struct {
+		OK            bool               `json:"ok"`
+		Models        []worker.ModelInfo `json:"models"`
+		LibraryErrors map[string]string  `json:"library_errors"`
+	}
+	if err := json.Unmarshal(rec.Body.Bytes(), &listResp); err != nil {
+		t.Fatal(err)
+	}
+	if !listResp.OK || len(listResp.Models) != 5 {
+		t.Fatalf("expected 5 discovered models across 2 valid libs, got %+v", listResp)
+	}
+	if listResp.LibraryErrors["offline"] == "" {
+		t.Fatalf("expected library_errors entry for missing 'offline' library, got %+v", listResp.LibraryErrors)
+	}
+
+	byID := map[string]worker.ModelInfo{}
+	for _, m := range listResp.Models {
+		byID[m.ID] = m
+	}
+
+	rootPart, ok := byID[libAID+"::root_part"]
+	if !ok || len(rootPart.Folders) != 0 || rootPart.LocalID != "root_part" {
+		t.Fatalf("unexpected root_part metadata: %+v", rootPart)
+	}
+	binModel, ok := byID[libAID+"::gridfinity__bin"]
+	if !ok || len(binModel.Folders) != 1 || binModel.Folders[0] != "gridfinity" || binModel.FolderLabels[0] != "Gridfinity" || binModel.LocalID != "gridfinity/bin" {
+		t.Fatalf("unexpected nested canonical bin metadata: %+v", binModel)
+	}
+	cornerModel, ok := byID[libAID+"::gridfinity__spacers__corner"]
+	if !ok || len(cornerModel.Folders) != 2 || cornerModel.LocalID != "gridfinity/spacers/corner" {
+		t.Fatalf("unexpected deep corner metadata: %+v", cornerModel)
+	}
+
+	// Verify per-library components/ import isolation AND per-library default export folders
+	rec = httptest.NewRecorder()
+	srv.Handler().ServeHTTP(rec, httptest.NewRequest(http.MethodPost, "/api/models/"+libAID+"::c_clip/export", bytes.NewBufferString(`{"format":"stl","params":{"width":12}}`)))
+	if dialogs.lastSave != "c_clip_lib_a_12.stl" || dialogs.lastSaveDir != filepath.Join(libA, "exports") {
+		t.Fatalf("lib A export mismatch: file=%q dir=%q", dialogs.lastSave, dialogs.lastSaveDir)
+	}
+
+	rec = httptest.NewRecorder()
+	srv.Handler().ServeHTTP(rec, httptest.NewRequest(http.MethodPost, "/api/models/"+libBID+"::c_clip/export", bytes.NewBufferString(`{"format":"stl","params":{"width":14}}`)))
+	if dialogs.lastSave != "c_clip_lib_b_14.stl" || dialogs.lastSaveDir != filepath.Join(libB, "exports") {
+		t.Fatalf("lib B export mismatch (components isolation failed?): file=%q dir=%q", dialogs.lastSave, dialogs.lastSaveDir)
+	}
+
+	// Switch back to lib A to ensure module snapshot restoration stays isolated
+	rec = httptest.NewRecorder()
+	srv.Handler().ServeHTTP(rec, httptest.NewRequest(http.MethodPost, "/api/models/"+libAID+"::c_clip/export", bytes.NewBufferString(`{"format":"stl","params":{"width":16}}`)))
+	if dialogs.lastSave != "c_clip_lib_a_16.stl" || dialogs.lastSaveDir != filepath.Join(libA, "exports") {
+		t.Fatalf("lib A second export mismatch: file=%q dir=%q", dialogs.lastSave, dialogs.lastSaveDir)
 	}
 }

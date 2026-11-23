@@ -28,7 +28,7 @@ type Manager struct {
 	workerScript []byte
 	scriptPath   string
 	pythonPath   string
-	projectRoot  string
+	libraries    []LibrarySpec
 	cmd          *exec.Cmd
 	baseURL      string
 	starting     bool
@@ -47,6 +47,12 @@ func NewManager(workerScript []byte) *Manager {
 			},
 		},
 	}
+}
+
+func cloneLibraries(libs []LibrarySpec) []LibrarySpec {
+	out := make([]LibrarySpec, len(libs))
+	copy(out, libs)
+	return out
 }
 
 func (m *Manager) ensureScriptPath() (string, error) {
@@ -68,15 +74,15 @@ func (m *Manager) ensureScriptPath() (string, error) {
 }
 
 // Start launches the persistent Python worker subprocess and waits for READY <port>.
-func (m *Manager) Start(pythonPath, projectRoot string) error {
+func (m *Manager) Start(pythonPath string, libraries []LibrarySpec) error {
 	m.lifecycleMu.Lock()
 	defer m.lifecycleMu.Unlock()
-	return m.startLocked(pythonPath, projectRoot)
+	return m.startLocked(pythonPath, libraries)
 }
 
 // EnsureStarted guarantees a single running worker without killing an in-flight
 // startup. Concurrent callers wait for an active Start to finish and reuse it.
-func (m *Manager) EnsureStarted(pythonPath, projectRoot string) error {
+func (m *Manager) EnsureStarted(pythonPath string, libraries []LibrarySpec) error {
 	m.stateMu.RLock()
 	if m.baseURL != "" {
 		m.stateMu.RUnlock()
@@ -93,15 +99,16 @@ func (m *Manager) EnsureStarted(pythonPath, projectRoot string) error {
 	if alreadyRunning {
 		return nil
 	}
-	return m.startLocked(pythonPath, projectRoot)
+	return m.startLocked(pythonPath, libraries)
 }
 
-func (m *Manager) startLocked(pythonPath, projectRoot string) error {
+func (m *Manager) startLocked(pythonPath string, libraries []LibrarySpec) error {
 	m.stopLocked()
 
+	libsCopy := cloneLibraries(libraries)
 	m.stateMu.Lock()
 	m.pythonPath = pythonPath
-	m.projectRoot = projectRoot
+	m.libraries = libsCopy
 	m.starting = true
 	m.lastErr = ""
 	m.stateMu.Unlock()
@@ -119,8 +126,10 @@ func (m *Manager) startLocked(pythonPath, projectRoot string) error {
 	}
 
 	args := []string{"-u", scriptPath, "--port", "0"}
-	if projectRoot != "" {
-		args = append(args, "--project-root", projectRoot)
+	if len(libsCopy) > 0 {
+		if b, merr := json.Marshal(libsCopy); merr == nil {
+			args = append(args, "--libraries-json", string(b))
+		}
 	}
 
 	cmd := exec.Command(pythonPath, args...)
@@ -209,43 +218,43 @@ func (m *Manager) setErr(msg string) {
 }
 
 // Restart kills and restarts the Python worker (e.g. on Python interpreter change).
-func (m *Manager) Restart(pythonPath, projectRoot string) error {
+func (m *Manager) Restart(pythonPath string, libraries []LibrarySpec) error {
 	m.lifecycleMu.Lock()
 	defer m.lifecycleMu.Unlock()
 
 	m.stateMu.RLock()
 	curPy := m.pythonPath
-	curRoot := m.projectRoot
+	curLibs := cloneLibraries(m.libraries)
 	m.stateMu.RUnlock()
 
 	if pythonPath == "" {
 		pythonPath = curPy
 	}
-	if projectRoot == "" {
-		projectRoot = curRoot
+	if libraries == nil {
+		libraries = curLibs
 	}
-	return m.startLocked(pythonPath, projectRoot)
+	return m.startLocked(pythonPath, libraries)
 }
 
-// ConfigureOrRestart updates the project root on the warm worker when the Python interpreter
+// ConfigureOrRestart updates libraries on the warm worker when the Python interpreter
 // is unchanged, avoiding a ~4s cold build123d re-import. Falls back to Restart otherwise.
-func (m *Manager) ConfigureOrRestart(ctx context.Context, pythonPath, projectRoot string) error {
+func (m *Manager) ConfigureOrRestart(ctx context.Context, pythonPath string, libraries []LibrarySpec) error {
 	m.stateMu.RLock()
 	running := m.baseURL != ""
 	curPy := m.pythonPath
 	m.stateMu.RUnlock()
 
-	if running && curPy == pythonPath && projectRoot != "" {
-		resp, err := m.Configure(ctx, projectRoot)
+	if running && curPy == pythonPath {
+		resp, err := m.Configure(ctx, libraries)
 		if err == nil && resp.OK {
 			m.stateMu.Lock()
-			m.projectRoot = projectRoot
+			m.libraries = cloneLibraries(libraries)
 			m.lastErr = ""
 			m.stateMu.Unlock()
 			return nil
 		}
 	}
-	return m.Restart(pythonPath, projectRoot)
+	return m.Restart(pythonPath, libraries)
 }
 
 // Stop terminates the Python worker cleanly.
@@ -344,10 +353,13 @@ func (m *Manager) Health(ctx context.Context) (*HealthResponse, error) {
 	return &out, nil
 }
 
-func (m *Manager) Configure(ctx context.Context, projectRoot string) (*ModelsResponse, error) {
+func (m *Manager) Configure(ctx context.Context, libraries []LibrarySpec) (*ModelsResponse, error) {
+	if libraries == nil {
+		libraries = []LibrarySpec{}
+	}
 	var out ModelsResponse
-	err := m.doJSON(ctx, http.MethodPost, "/configure", map[string]string{
-		"project_root": projectRoot,
+	err := m.doJSON(ctx, http.MethodPost, "/configure", map[string]any{
+		"libraries": libraries,
 	}, &out)
 	if err != nil {
 		return nil, err
@@ -396,16 +408,28 @@ func (m *Manager) Render(ctx context.Context, modelID string, params map[string]
 	return &out, nil
 }
 
-func (m *Manager) ExportName(ctx context.Context, modelID string, params map[string]any) (string, error) {
+func fallbackStemFromID(modelID string) string {
+	s := modelID
+	if idx := strings.Index(s, "::"); idx >= 0 {
+		s = s[idx+2:]
+	}
+	if idx := strings.LastIndex(s, "__"); idx >= 0 {
+		s = s[idx+2:]
+	}
+	return strings.TrimSpace(s)
+}
+
+func (m *Manager) ExportName(ctx context.Context, modelID string, params map[string]any) (string, string, error) {
 	var out ExportNameResponse
 	p := "/models/" + url.PathEscape(modelID) + "/export-name"
 	if err := m.doJSON(ctx, http.MethodPost, p, map[string]any{"params": params}, &out); err != nil {
-		return "", err
+		return fallbackStemFromID(modelID), "", err
 	}
-	if !out.OK || strings.TrimSpace(out.ExportFilename) == "" {
-		return modelID, nil
+	stem := strings.TrimSpace(out.ExportFilename)
+	if !out.OK || stem == "" {
+		stem = fallbackStemFromID(modelID)
 	}
-	return out.ExportFilename, nil
+	return stem, strings.TrimSpace(out.LibraryID), nil
 }
 
 func (m *Manager) UpdateDefaults(ctx context.Context, modelID string, params map[string]any, dryRun bool, expectedSHA256 string) (*UpdateDefaultsResponse, error) {

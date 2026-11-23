@@ -103,17 +103,34 @@ func Slugify(label string) string {
 	return s
 }
 
+func sanitizePresetFilenameSegment(s string) string {
+	r := strings.NewReplacer("/", "__", `\`, "__", ":", "__")
+	cleaned := strings.TrimSpace(r.Replace(s))
+	if cleaned == "" || cleaned == "." || cleaned == ".." {
+		return "model"
+	}
+	return cleaned
+}
+
 func userPresetPath(modelID string) (string, error) {
 	cfgDir, err := config.ConfigDir()
 	if err != nil {
 		return "", err
 	}
-	pDir := filepath.Join(cfgDir, "presets")
-	if err := os.MkdirAll(pDir, 0o755); err != nil {
+	baseDir := filepath.Join(cfgDir, "presets")
+
+	if libID, localKey, ok := strings.Cut(modelID, "::"); ok {
+		libDir := filepath.Join(baseDir, sanitizePresetFilenameSegment(libID))
+		if err := os.MkdirAll(libDir, 0o755); err != nil {
+			return "", err
+		}
+		return filepath.Join(libDir, sanitizePresetFilenameSegment(localKey)+".json"), nil
+	}
+
+	if err := os.MkdirAll(baseDir, 0o755); err != nil {
 		return "", err
 	}
-	safeID := strings.ReplaceAll(modelID, "/", "__")
-	return filepath.Join(pDir, safeID+".json"), nil
+	return filepath.Join(baseDir, sanitizePresetFilenameSegment(modelID)+".json"), nil
 }
 
 func readPresetFile(path string) map[string]PresetEntry {

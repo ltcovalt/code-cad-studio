@@ -446,3 +446,37 @@ func TestSaveOverwritesHandKeyedAndCrossScopePresetsWithoutDuplicates(t *testing
 		t.Fatalf("expected Rename to duplicate existing label to fail")
 	}
 }
+
+func TestUserPresetsIsolatedAcrossLibrariesWithNamespacedIDs(t *testing.T) {
+	t.Setenv("XDG_CONFIG_HOME", t.TempDir())
+	dirA := t.TempDir()
+	dirB := t.TempDir()
+	defaults := map[string]any{"width": 42.0}
+
+	idA := "code-cad::gridfinity__bin"
+	idB := "personal::gridfinity__bin"
+
+	if _, err := Save(idA, dirA, "Wide", "Lib A wide", "user", false, map[string]any{"width": 84.0}, defaults, nil); err != nil {
+		t.Fatalf("Save lib A failed: %v", err)
+	}
+	if _, err := Save(idB, dirB, "Wide", "Lib B wide", "user", false, map[string]any{"width": 126.0}, defaults, nil); err != nil {
+		t.Fatalf("Save lib B failed: %v", err)
+	}
+
+	listA := List(idA, dirA, defaults, nil)
+	listB := List(idB, dirB, defaults, nil)
+	if len(listA) != 2 || listA[1].Params["width"] != 84.0 {
+		t.Fatalf("unexpected lib A presets: %#v", listA)
+	}
+	if len(listB) != 2 || listB[1].Params["width"] != 126.0 {
+		t.Fatalf("unexpected lib B presets: %#v", listB)
+	}
+
+	pathA, err := userPresetPath(idA)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if filepath.Base(filepath.Dir(pathA)) != "code-cad" || filepath.Base(pathA) != "gridfinity__bin.json" {
+		t.Fatalf("expected partitioned OS-safe preset path, got %q", pathA)
+	}
+}

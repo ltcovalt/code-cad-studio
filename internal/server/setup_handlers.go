@@ -61,15 +61,15 @@ func (s *Server) handleSetupInspectDir(w http.ResponseWriter, r *http.Request) {
 
 func (s *Server) handleSetupProbe(w http.ResponseWriter, r *http.Request) {
 	var req struct {
-		ProjectRoot string `json:"project_root"`
-		PythonPath  string `json:"python_path"`
+		LibraryRoots []string `json:"library_roots"`
+		PythonPath   string   `json:"python_path"`
 	}
 	if err := decodeJSON(r, &req); err != nil && err != io.EOF {
 		writeJSON(w, http.StatusBadRequest, map[string]any{"ok": false, "error": "invalid JSON body"})
 		return
 	}
 
-	res := setup.Probe(r.Context(), req.ProjectRoot, req.PythonPath)
+	res := setup.Probe(r.Context(), req.LibraryRoots, req.PythonPath)
 	writeJSON(w, http.StatusOK, res)
 }
 
@@ -126,9 +126,9 @@ func (s *Server) handleSetupDownloadProject(w http.ResponseWriter, r *http.Reque
 
 func (s *Server) handleSetupInstallEnv(w http.ResponseWriter, r *http.Request) {
 	var req struct {
-		ProjectRoot string `json:"project_root"`
-		BasePython  string `json:"base_python"`
-		UseUV       *bool  `json:"use_uv"`
+		LibraryRoots []string `json:"library_roots"`
+		BasePython   string   `json:"base_python"`
+		UseUV        *bool    `json:"use_uv"`
 	}
 	if err := decodeJSON(r, &req); err != nil {
 		writeJSON(w, http.StatusBadRequest, map[string]any{"ok": false, "error": "invalid JSON body"})
@@ -148,9 +148,9 @@ func (s *Server) handleSetupInstallEnv(w http.ResponseWriter, r *http.Request) {
 	defer cleanup()
 
 	res, err := setup.InstallEnvironment(ctx, setup.InstallOptions{
-		ProjectRoot: req.ProjectRoot,
-		BasePython:  req.BasePython,
-		UseUV:       useUV,
+		LibraryRoots: req.LibraryRoots,
+		BasePython:   req.BasePython,
+		UseUV:        useUV,
 	}, func(ev setup.InstallEvent) {
 		if ev.Message != "" {
 			s.broadcastSSE("setup-progress", map[string]any{
@@ -195,34 +195,30 @@ func (s *Server) handleSetupCancel(w http.ResponseWriter, r *http.Request) {
 
 func (s *Server) handleSetupComplete(w http.ResponseWriter, r *http.Request) {
 	var req struct {
-		ProjectRoot string `json:"project_root"`
-		ExportDir   string `json:"export_dir"`
-		PythonPath  string `json:"python_path"`
+		Libraries  []config.Library `json:"libraries"`
+		ExportDir  string           `json:"export_dir"`
+		PythonPath string           `json:"python_path"`
 	}
 	if err := decodeJSON(r, &req); err != nil && err != io.EOF {
 		writeJSON(w, http.StatusBadRequest, map[string]any{"ok": false, "error": "invalid JSON body"})
 		return
 	}
 
-	projectRoot := setup.ExpandPath(req.ProjectRoot)
+	libraries := config.NormalizeLibraries(req.Libraries)
 	exportDir := setup.ExpandPath(req.ExportDir)
 	pythonPath := setup.ExpandPath(req.PythonPath)
 
-	// Keep export_dir empty when it matches the default <project_root>/exports
-	// so future project switches inherit their own exports folder automatically.
-	if projectRoot != "" && exportDir != "" && filepath.Clean(exportDir) == filepath.Join(projectRoot, "exports") {
-		exportDir = ""
-	}
-	// Keep python_path empty when it matches the auto-detected project .venv python
-	// so future project switches automatically pick up each project's .venv.
-	if projectRoot != "" && pythonPath != "" {
-		if venvPy := setup.FindProjectVenvPython(projectRoot); venvPy != "" && strings.EqualFold(filepath.Clean(pythonPath), filepath.Clean(venvPy)) {
+	// Keep python_path empty when it matches Studio's auto-detected shared venv.
+	// Explicit choices (such as a specific library .venv or conda env) are persisted so
+	// reordering or removing libraries later never silently swaps the interpreter.
+	if pythonPath != "" {
+		if studioPy := setup.FindStudioVenvPython(); studioPy != "" && strings.EqualFold(filepath.Clean(pythonPath), filepath.Clean(studioPy)) {
 			pythonPath = ""
 		}
 	}
 
 	cfg, err := s.cfgStore.Update(func(c *config.Config) {
-		c.ProjectRoot = projectRoot
+		c.Libraries = libraries
 		c.ExportDir = exportDir
 		c.PythonPath = pythonPath
 		c.OnboardingCompleted = true
@@ -233,9 +229,9 @@ func (s *Server) handleSetupComplete(w http.ResponseWriter, r *http.Request) {
 	}
 
 	var workerErr error
-	if cfg.ProjectRoot != "" {
-		workerErr = s.worker.ConfigureOrRestart(r.Context(), cfg.ResolvePython(), cfg.ProjectRoot)
-		_ = s.watcher.Watch(cfg.ProjectRoot)
+	if roots := cfg.LibraryRoots(); len(roots) > 0 {
+		workerErr = s.worker.ConfigureOrRestart(r.Context(), cfg.ResolvePython(), librarySpecs(cfg))
+		_ = s.watcher.Watch(roots)
 	} else {
 		s.watcher.Stop()
 	}
@@ -253,7 +249,7 @@ func (s *Server) handleSetupComplete(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusOK, configResponse{
 		Config:            cfg,
 		ResolvedPython:    cfg.ResolvePython(),
-		ResolvedExportDir: cfg.ResolveExportDir(),
+		ResolvedExportDir: cfg.ResolveExportDir(""),
 		NeedsOnboarding:   cfg.NeedsOnboarding(),
 		HasDesktop:        s.dialogs != nil,
 		WorkerRunning:     running,

@@ -87,7 +87,7 @@ def _wait_for_cad_warmup() -> None:
     _CAD_WARMUP_DONE.wait()
 
 
-SKIP_DIRS = {
+ALWAYS_SKIP_DIRS = {
     ".git",
     ".venv",
     "venv",
@@ -98,9 +98,12 @@ SKIP_DIRS = {
     ".ruff_cache",
     "build",
     "dist",
-    "exports",
+}
+
+ROOT_ONLY_SKIP_DIRS = {
     "components",
     "utils",
+    "exports",
     "tests",
     "test",
 }
@@ -118,7 +121,7 @@ DEFAULT_COLORS = [
 
 
 def humanize_name(name: str) -> str:
-    return name.replace("_", " ").strip().title()
+    return re.sub(r"[_-]+", " ", name).strip().title()
 
 
 def humanize_class_name(name: str) -> str:
@@ -128,7 +131,12 @@ def humanize_class_name(name: str) -> str:
     return spaced or "Item"
 
 
-def _discover_script_metadata(py_file: Path, project_root: Path) -> dict[str, Any] | None:
+def _discover_script_metadata(
+    py_file: Path,
+    library_id: str,
+    library_name: str,
+    library_root: Path,
+) -> dict[str, Any] | None:
     """Statically inspect a .py file via AST to see if it looks like a CAD model."""
     try:
         source = py_file.read_text(encoding="utf-8")
@@ -153,20 +161,27 @@ def _discover_script_metadata(py_file: Path, project_root: Path) -> dict[str, An
     if not create_funcs and not fallback_funcs:
         return None
 
-    rel = py_file.relative_to(project_root)
-    # Model ID: for models/<name>/<name>.py use <name>, else relative path without .py
-    parts = rel.parts
-    if len(parts) == 3 and parts[0] == "models" and parts[2] == f"{parts[1]}.py":
-        model_id = parts[1]
-    elif len(parts) == 2 and parts[0] == "models":
-        model_id = py_file.stem
+    rel = py_file.relative_to(library_root)
+    parts = list(rel.parts)
+    if parts and parts[0] == "models":
+        parts = parts[1:]
+
+    stem = py_file.stem
+    parent_dirs = parts[:-1]
+    # Deduplicate canonical <name>/<name>.py directory wrapper at any depth
+    if parent_dirs and parent_dirs[-1] == stem:
+        category_folders = parent_dirs[:-1]
     else:
-        model_id = rel.with_suffix("").as_posix().replace("/", "__")
+        category_folders = parent_dirs
+
+    local_segments = [*category_folders, stem]
+    local_id = "/".join(local_segments)
+    model_id = f"{library_id}::{'__'.join(local_segments)}"
 
     docstring = ast.get_docstring(tree) or ""
     first_line = docstring.splitlines()[0].strip() if docstring else ""
 
-    expected_fn = f"create_{py_file.stem}"
+    expected_fn = f"create_{stem}"
     if expected_fn in create_funcs:
         entrypoint = expected_fn
     elif create_funcs:
@@ -174,7 +189,7 @@ def _discover_script_metadata(py_file: Path, project_root: Path) -> dict[str, An
     else:
         entrypoint = fallback_funcs[0]
     # Prefer the class matching <ModelName>Params, else the last *Params class (since sub-dataclasses precede the root)
-    expected_cls = "".join(part.capitalize() for part in py_file.stem.split("_")) + "Params"
+    expected_cls = "".join(part.capitalize() for part in stem.split("_")) + "Params"
     if expected_cls in params_classes:
         params_class = expected_cls
     elif params_classes:
@@ -184,7 +199,12 @@ def _discover_script_metadata(py_file: Path, project_root: Path) -> dict[str, An
 
     return {
         "id": model_id,
-        "name": humanize_name(py_file.stem),
+        "local_id": local_id,
+        "library_id": library_id,
+        "library_name": library_name,
+        "folders": category_folders,
+        "folder_labels": [humanize_name(seg) for seg in category_folders],
+        "name": humanize_name(stem),
         "path": str(py_file),
         "rel_path": rel.as_posix(),
         "description": first_line,
@@ -1287,18 +1307,77 @@ def export_shape_to_file(result: Any, fmt: str, out_path: Path) -> None:
 MAX_RENDER_CACHE = 24
 
 
+def _library_import_roots(root: Path) -> list[Path]:
+    """Return sys.path roots for a library (including parent if user selected models/ directly)."""
+    roots = [root]
+    if root.name == "models" and (
+        (root.parent / "components").is_dir() or (root.parent / "utils").is_dir()
+    ):
+        roots.append(root.parent)
+    return roots
+
+
+def _path_is_within(candidate: Path, roots: list[Path]) -> bool:
+    for root in roots:
+        try:
+            candidate.relative_to(root)
+            return True
+        except ValueError:
+            continue
+    return False
+
+
+def _module_belongs_to_roots(mod: Any, roots: list[Path]) -> bool:
+    """Detect whether a loaded module or namespace package originates under any of `roots`."""
+    if not roots:
+        return False
+    mod_file = getattr(mod, "__file__", None)
+    if mod_file:
+        try:
+            if _path_is_within(Path(mod_file).resolve(), roots):
+                return True
+        except Exception:
+            pass
+
+    # Handle PEP 420 namespace packages (e.g. utils/ or components/ without __init__.py)
+    mod_path = getattr(mod, "__path__", None)
+    if mod_path is not None:
+        try:
+            for entry in list(mod_path):
+                if _path_is_within(Path(str(entry)).resolve(), roots):
+                    return True
+        except Exception:
+            pass
+
+    spec = getattr(mod, "__spec__", None)
+    locs = getattr(spec, "submodule_search_locations", None) if spec is not None else None
+    if locs is not None:
+        try:
+            for entry in list(locs):
+                if _path_is_within(Path(str(entry)).resolve(), roots):
+                    return True
+        except Exception:
+            pass
+
+    return False
+
+
 class WorkerState:
-    def __init__(self, project_root: str = "") -> None:
+    def __init__(self, libraries: list[dict[str, Any]] | None = None) -> None:
         self.lock = threading.RLock()
         self._seq_lock = threading.Lock()
         self._render_seq = 0
-        self.project_root: Path | None = None
+        self.libraries: list[dict[str, Any]] = []
+        self.libraries_by_id: dict[str, dict[str, Any]] = {}
+        self.library_errors: dict[str, str] = {}
         self.models: dict[str, dict[str, Any]] = {}
         self.loaded_modules: dict[str, Any] = {}
         self.last_build: dict[str, Any] = {}
         self._render_cache: OrderedDict[tuple[str, str], dict[str, Any]] = OrderedDict()
-        if project_root:
-            self.configure(project_root)
+        self._active_library_id: str | None = None
+        self._library_local_modules: dict[str, dict[str, Any]] = {}
+        if libraries:
+            self.configure(libraries)
 
     def _next_render_seq(self) -> int:
         with self._seq_lock:
@@ -1309,104 +1388,187 @@ class WorkerState:
         with self._seq_lock:
             return self._render_seq
 
+    def _all_import_roots(self) -> list[Path]:
+        roots: list[Path] = []
+        seen: set[Path] = set()
+        for lib in self.libraries:
+            for r in lib["import_roots"]:
+                if r not in seen:
+                    seen.add(r)
+                    roots.append(r)
+        return roots
+
+    def _remove_roots_from_sys_path(self, roots: list[Path]) -> None:
+        root_strs = {str(r) for r in roots}
+        sys.path[:] = [p for p in sys.path if p not in root_strs]
+
+    def _activate_library(self, library_id: str) -> None:
+        """Isolate sys.path and library-local modules (utils/, components/) for `library_id`."""
+        lib = self.libraries_by_id.get(library_id)
+        if lib is None:
+            return
+
+        if self._active_library_id == library_id:
+            # Ensure incoming import roots stay at the front of sys.path
+            for r in reversed(lib["import_roots"]):
+                r_str = str(r)
+                if r_str in sys.path:
+                    sys.path.remove(r_str)
+                sys.path.insert(0, r_str)
+            return
+
+        # 1. Snapshot and pop outgoing library-local modules
+        if self._active_library_id is not None:
+            out_lib = self.libraries_by_id.get(self._active_library_id)
+            if out_lib is not None:
+                out_roots = out_lib["import_roots"]
+                snapshot = self._library_local_modules.setdefault(self._active_library_id, {})
+                for mod_name, mod in list(sys.modules.items()):
+                    if mod_name.startswith("code_cad_model_"):
+                        continue
+                    if _module_belongs_to_roots(mod, out_roots):
+                        snapshot[mod_name] = mod
+                        sys.modules.pop(mod_name, None)
+                self._remove_roots_from_sys_path(out_roots)
+
+        # 2. Clear any stray local modules belonging to other libraries
+        other_roots: list[Path] = []
+        for other_id, other_lib in self.libraries_by_id.items():
+            if other_id != library_id:
+                other_roots.extend(other_lib["import_roots"])
+        if other_roots:
+            for mod_name, mod in list(sys.modules.items()):
+                if mod_name.startswith("code_cad_model_"):
+                    continue
+                if _module_belongs_to_roots(mod, other_roots):
+                    sys.modules.pop(mod_name, None)
+            self._remove_roots_from_sys_path(other_roots)
+
+        # 3. Install incoming library roots at the front of sys.path & restore its local modules
+        for r in reversed(lib["import_roots"]):
+            r_str = str(r)
+            if r_str in sys.path:
+                sys.path.remove(r_str)
+            sys.path.insert(0, r_str)
+
+        cached_local = self._library_local_modules.get(library_id)
+        if cached_local:
+            for mod_name, mod in cached_local.items():
+                sys.modules[mod_name] = mod
+
+        importlib.invalidate_caches()
+        self._active_library_id = library_id
+
     def _evict_project_modules(self) -> None:
         """Evict loaded model and project helper modules from sys.modules for warm reload."""
-        roots: list[Path] = []
-        if self.project_root is not None:
-            roots.append(self.project_root)
-            if self.project_root.name == "models":
-                for sibling in ("components", "utils"):
-                    sibling_dir = self.project_root.parent / sibling
-                    if sibling_dir.is_dir():
-                        roots.append(sibling_dir)
+        roots = self._all_import_roots()
 
         to_delete: list[str] = []
         for mod_name, mod in list(sys.modules.items()):
             if mod_name.startswith("code_cad_model_"):
                 to_delete.append(mod_name)
                 continue
-            mod_file = getattr(mod, "__file__", None)
-            if not mod_file or not roots:
-                continue
-            try:
-                resolved = Path(mod_file).resolve()
-            except Exception:
-                continue
-            for root in roots:
-                try:
-                    resolved.relative_to(root)
-                    to_delete.append(mod_name)
-                    break
-                except ValueError:
-                    continue
+            if _module_belongs_to_roots(mod, roots):
+                to_delete.append(mod_name)
 
         for mod_name in to_delete:
             sys.modules.pop(mod_name, None)
 
+        self._remove_roots_from_sys_path(roots)
+        self._library_local_modules.clear()
+        self._active_library_id = None
         self.loaded_modules.clear()
         self.last_build.clear()
         self._render_cache.clear()
         importlib.invalidate_caches()
 
-    def reload_project(self) -> list[dict[str, Any]]:
+    def reload_project(self) -> tuple[list[dict[str, Any]], dict[str, str]]:
         """Warm-reload project scripts without restarting Python or re-importing build123d."""
         with self.lock:
             self._evict_project_modules()
             return self.discover_models()
 
-    def configure(self, project_root: str) -> list[dict[str, Any]]:
+    def configure(self, libraries: list[dict[str, Any]]) -> tuple[list[dict[str, Any]], dict[str, str]]:
         with self.lock:
-            root = Path(project_root).expanduser().resolve()
-            if not root.exists() or not root.is_dir():
-                raise FileNotFoundError(f"Project root does not exist: {root}")
-
             self._evict_project_modules()
 
-            # Remove previous project root from sys.path
-            if self.project_root is not None:
-                old_str = str(self.project_root)
-                if old_str in sys.path:
-                    sys.path.remove(old_str)
+            next_libs: list[dict[str, Any]] = []
+            next_by_id: dict[str, dict[str, Any]] = {}
+            for raw in libraries or []:
+                if not isinstance(raw, dict):
+                    continue
+                raw_path = str(raw.get("path") or "").strip()
+                if not raw_path:
+                    continue
+                root = Path(raw_path).expanduser().resolve()
+                lib_id = str(raw.get("id") or "").strip() or re.sub(r"[^a-z0-9]+", "-", root.name.lower()).strip("-") or "library"
+                lib_name = str(raw.get("name") or "").strip() or root.name or lib_id
+                if lib_id in next_by_id:
+                    continue
+                entry = {
+                    "id": lib_id,
+                    "name": lib_name,
+                    "path": str(root),
+                    "root": root,
+                    "import_roots": _library_import_roots(root),
+                }
+                next_libs.append(entry)
+                next_by_id[lib_id] = entry
 
-            self.project_root = root
-            root_str = str(root)
-            if root_str not in sys.path:
-                sys.path.insert(0, root_str)
-            # If user selected the models/ subdirectory directly, also add its parent
-            # to sys.path when a sibling components/ or utils/ directory exists.
-            if root.name == "models" and (
-                (root.parent / "components").is_dir() or (root.parent / "utils").is_dir()
-            ):
-                parent_str = str(root.parent)
-                if parent_str not in sys.path:
-                    sys.path.insert(0, parent_str)
-
+            self.libraries = next_libs
+            self.libraries_by_id = next_by_id
             return self.discover_models()
 
-    def discover_models(self) -> list[dict[str, Any]]:
+    def discover_models(self) -> tuple[list[dict[str, Any]], dict[str, str]]:
         with self.lock:
             self.models.clear()
-            if self.project_root is None:
-                return []
+            self.library_errors.clear()
+            if not self.libraries:
+                return [], {}
 
             found: list[dict[str, Any]] = []
-            for dirpath, dirnames, filenames in os.walk(self.project_root):
-                dirnames[:] = sorted(
-                    d for d in dirnames if d not in SKIP_DIRS and not d.startswith(".")
-                )
-                for fname in sorted(filenames):
-                    if not fname.endswith(".py"):
-                        continue
-                    if fname.startswith("_") or fname.startswith("test_") or fname == "setup.py":
-                        continue
-                    py_file = Path(dirpath) / fname
-                    meta = _discover_script_metadata(py_file, self.project_root)
-                    if meta is not None:
-                        self.models[meta["id"]] = meta
-                        found.append(meta)
+            for lib in self.libraries:
+                lib_id: str = lib["id"]
+                lib_name: str = lib["name"]
+                root: Path = lib["root"]
+                if not root.exists() or not root.is_dir():
+                    self.library_errors[lib_id] = f"Folder not found: {root}"
+                    continue
 
-            found.sort(key=lambda m: m["name"].lower())
-            return found
+                # Refresh import_roots in case components/ or utils/ was newly created
+                lib["import_roots"] = _library_import_roots(root)
+
+                lib_models: list[dict[str, Any]] = []
+                for dirpath, dirnames, filenames in os.walk(root):
+                    is_root = Path(dirpath) == root
+                    skip = (ALWAYS_SKIP_DIRS | ROOT_ONLY_SKIP_DIRS) if is_root else ALWAYS_SKIP_DIRS
+                    dirnames[:] = sorted(
+                        d for d in dirnames if d not in skip and not d.startswith(".")
+                    )
+                    for fname in sorted(filenames):
+                        if not fname.endswith(".py"):
+                            continue
+                        if fname.startswith("_") or fname.startswith("test_") or fname == "setup.py":
+                            continue
+                        py_file = Path(dirpath) / fname
+                        meta = _discover_script_metadata(py_file, lib_id, lib_name, root)
+                        if meta is None:
+                            continue
+                        # Guard against rare intra-library ID collision (e.g. a__b vs a/b)
+                        base_id = meta["id"]
+                        unique_id = base_id
+                        suffix = 2
+                        while unique_id in self.models:
+                            unique_id = f"{base_id}_{suffix}"
+                            suffix += 1
+                        meta["id"] = unique_id
+                        self.models[unique_id] = meta
+                        lib_models.append(meta)
+
+                lib_models.sort(key=lambda m: ([f.lower() for f in m["folders"]], m["name"].lower()))
+                found.extend(lib_models)
+
+            return found, dict(self.library_errors)
 
     def _load_model_module(self, model_id: str) -> tuple[dict[str, Any], Any]:
         if model_id not in self.models:
@@ -1415,12 +1577,14 @@ class WorkerState:
             raise KeyError(f"Unknown model: {model_id}")
 
         meta = self.models[model_id]
+        self._activate_library(meta["library_id"])
         if model_id in self.loaded_modules:
             return meta, self.loaded_modules[model_id]
 
         py_path = Path(meta["path"])
         _wait_for_cad_warmup()
-        mod_name = f"code_cad_model_{re.sub(r'[^a-zA-Z0-9_]', '_', model_id)}"
+        mod_hash = hashlib.sha1(model_id.encode("utf-8")).hexdigest()[:8]
+        mod_name = f"code_cad_model_{re.sub(r'[^a-zA-Z0-9_]', '_', model_id)}_{mod_hash}"
         spec = importlib.util.spec_from_file_location(mod_name, str(py_path))
         if spec is None or spec.loader is None:
             raise ImportError(f"Could not load module spec for {py_path}")
@@ -1616,15 +1780,16 @@ class WorkerState:
 
     def _resolve_export_filename(
         self,
-        model_id: str,
+        meta: dict[str, Any],
         module: Any,
         params_cls: type | None,
         params_dict: dict[str, Any],
         params_obj: Any = None,
     ) -> str:
+        fallback = _sanitize_filename_stem(Path(meta["path"]).stem, "model")
         hook = getattr(module, "export_filename", None)
         if not callable(hook):
-            return model_id
+            return fallback
         try:
             if params_obj is None and params_cls is not None:
                 params_obj = _instantiate_dataclass(params_cls, params_dict)
@@ -1633,17 +1798,21 @@ class WorkerState:
             else:
                 raw = hook(params_dict)
             if isinstance(raw, str) and raw.strip():
-                return _sanitize_filename_stem(raw, model_id)
+                return _sanitize_filename_stem(raw, fallback)
         except Exception:
             pass
-        return model_id
+        return fallback
 
     def get_export_filename(self, model_id: str, params_dict: dict[str, Any]) -> dict[str, Any]:
         with self.lock:
             meta, module = self._load_model_module(model_id)
             params_cls, _ = self._resolve_entrypoints(meta, module)
-            stem = self._resolve_export_filename(model_id, module, params_cls, params_dict)
-            return {"ok": True, "export_filename": stem}
+            stem = self._resolve_export_filename(meta, module, params_cls, params_dict)
+            return {
+                "ok": True,
+                "export_filename": stem,
+                "library_id": meta["library_id"],
+            }
 
     def _build_shape(self, model_id: str, params_dict: dict[str, Any]) -> tuple[dict[str, Any], Any, float, str]:
         _wait_for_cad_warmup()
@@ -1672,7 +1841,7 @@ class WorkerState:
             result = func(**kwargs)
 
         build_ms = (time.perf_counter() - t0) * 1000.0
-        export_stem = self._resolve_export_filename(model_id, module, params_cls, params_dict, params_obj)
+        export_stem = self._resolve_export_filename(meta, module, params_cls, params_dict, params_obj)
         self.last_build = {
             "model_id": model_id,
             "params_json": json.dumps(params_dict, sort_keys=True),
@@ -1732,8 +1901,9 @@ class WorkerState:
                 and self.last_build.get("result") is not None
             ):
                 result = self.last_build["result"]
+                export_stem = self.last_build.get("export_filename") or "model"
             else:
-                _, result, _, _ = self._build_shape(model_id, params_dict)
+                _, result, _, export_stem = self._build_shape(model_id, params_dict)
 
             if output_path:
                 out = Path(output_path).expanduser().resolve()
@@ -1741,8 +1911,9 @@ class WorkerState:
                 export_shape_to_file(result, fmt, out)
                 return {"ok": True, "path": str(out), "size": out.stat().st_size}, None
 
+            safe_stem = _sanitize_filename_stem(export_stem, "model")
             with tempfile.TemporaryDirectory() as tmpdir:
-                out = Path(tmpdir) / f"{model_id}.{fmt.lower().lstrip('.')}"
+                out = Path(tmpdir) / f"{safe_stem}.{fmt.lower().lstrip('.')}"
                 export_shape_to_file(result, fmt, out)
                 return None, out.read_bytes()
 
@@ -1779,6 +1950,11 @@ def make_handler(state: WorkerState) -> type[BaseHTTPRequestHandler]:
             try:
                 if path == "/health":
                     _wait_for_cad_warmup()
+                    with state.lock:
+                        libs = [
+                            {"id": lib["id"], "name": lib["name"], "path": lib["path"]}
+                            for lib in state.libraries
+                        ]
                     self._send_json(
                         {
                             "ok": True,
@@ -1786,14 +1962,14 @@ def make_handler(state: WorkerState) -> type[BaseHTTPRequestHandler]:
                             "build123d": HAS_BUILD123D,
                             "build123d_error": BUILD123D_ERROR,
                             "ocp_tessellate": HAS_OCP_TESSELLATE,
-                            "project_root": str(state.project_root) if state.project_root else "",
+                            "libraries": libs,
                         }
                     )
                     return
 
                 if path == "/models":
-                    models = state.discover_models()
-                    self._send_json({"ok": True, "models": models})
+                    models, lib_errors = state.discover_models()
+                    self._send_json({"ok": True, "models": models, "library_errors": lib_errors})
                     return
 
                 m = re.match(r"^/models/([^/]+)/schema$", path)
@@ -1820,14 +1996,14 @@ def make_handler(state: WorkerState) -> type[BaseHTTPRequestHandler]:
                 body = self._read_json()
 
                 if path == "/configure":
-                    project_root = body.get("project_root", "")
-                    models = state.configure(project_root)
-                    self._send_json({"ok": True, "project_root": str(state.project_root), "models": models})
+                    libraries = body.get("libraries", [])
+                    models, lib_errors = state.configure(libraries)
+                    self._send_json({"ok": True, "models": models, "library_errors": lib_errors})
                     return
 
                 if path == "/reload":
-                    models = state.reload_project()
-                    self._send_json({"ok": True, "models": models})
+                    models, lib_errors = state.reload_project()
+                    self._send_json({"ok": True, "models": models, "library_errors": lib_errors})
                     return
 
                 m_render = re.match(r"^/models/([^/]+)/render$", path)
@@ -1895,11 +2071,20 @@ def make_handler(state: WorkerState) -> type[BaseHTTPRequestHandler]:
 def main() -> None:
     sys.dont_write_bytecode = True
     parser = argparse.ArgumentParser(description="Code CAD Studio Python worker")
-    parser.add_argument("--project-root", default="", help="Path to build123d project root")
+    parser.add_argument("--libraries-json", default="", help="JSON array of configured libraries")
     parser.add_argument("--port", type=int, default=0, help="Port to bind (0 for ephemeral)")
     args = parser.parse_args()
 
-    state = WorkerState(args.project_root)
+    libraries: list[dict[str, Any]] = []
+    if args.libraries_json:
+        try:
+            parsed = json.loads(args.libraries_json)
+            if isinstance(parsed, list):
+                libraries = parsed
+        except Exception:
+            libraries = []
+
+    state = WorkerState(libraries)
     server = ThreadingHTTPServer(("127.0.0.1", args.port), make_handler(state))
     actual_port = server.server_address[1]
 

@@ -14,12 +14,15 @@ import (
 	"strings"
 	"sync"
 	"time"
+
+	"github.com/ltcovalt/code-cad-studio/internal/config"
 )
 
 // PythonCandidate describes a discovered Python interpreter and its CAD readiness.
 type PythonCandidate struct {
 	Path             string `json:"path"`
-	Source           string `json:"source"` // configured, project_venv, path, conda, pyenv, system
+	Source           string `json:"source"` // configured, studio_venv, library_venv, path, conda, pyenv, system
+	SourceDetail     string `json:"source_detail,omitempty"`
 	Version          string `json:"version"`
 	VersionOK        bool   `json:"version_ok"`
 	HasBuild123d     bool   `json:"has_build123d"`
@@ -31,14 +34,15 @@ type PythonCandidate struct {
 	Error            string `json:"error,omitempty"`
 }
 
-// ProbeResult summarizes Python, uv, and project directory readiness.
+// ProbeResult summarizes Python, uv, and shared Studio venv readiness across libraries.
 type ProbeResult struct {
-	Candidates  []PythonCandidate `json:"candidates"`
-	Recommended *PythonCandidate  `json:"recommended,omitempty"`
-	HasUV       bool              `json:"has_uv"`
-	UVPath      string            `json:"uv_path,omitempty"`
-	OS          string            `json:"os"`
-	ProjectInfo ProjectDirInfo    `json:"project_info"`
+	Candidates        []PythonCandidate `json:"candidates"`
+	Recommended       *PythonCandidate  `json:"recommended,omitempty"`
+	HasUV             bool              `json:"has_uv"`
+	UVPath            string            `json:"uv_path,omitempty"`
+	OS                string            `json:"os"`
+	StudioVenvDir     string            `json:"studio_venv_dir"`
+	RequirementsFiles []string          `json:"requirements_files"`
 }
 
 const probeSnippet = `import importlib.metadata, importlib.util, json, sys
@@ -74,15 +78,42 @@ type probeJSON struct {
 type rawCandidate struct {
 	path   string
 	source string
+	detail string
 }
 
-// Probe inspects the project directory and discovers candidate Python interpreters
-// plus uv availability.
-func Probe(ctx context.Context, projectRoot, explicitPython string) ProbeResult {
+// FindRequirementsFiles returns deduplicated requirements.txt files present in libraryRoots.
+func FindRequirementsFiles(libraryRoots []string) []string {
+	out := []string{}
+	seen := map[string]struct{}{}
+	for _, root := range libraryRoots {
+		clean := ExpandPath(root)
+		if clean == "" {
+			continue
+		}
+		reqFile := filepath.Join(clean, "requirements.txt")
+		key := reqFile
+		if runtime.GOOS == "windows" {
+			key = strings.ToLower(key)
+		}
+		if _, dup := seen[key]; dup {
+			continue
+		}
+		if st, err := os.Stat(reqFile); err == nil && !st.IsDir() {
+			seen[key] = struct{}{}
+			out = append(out, reqFile)
+		}
+	}
+	return out
+}
+
+// Probe inspects library roots and discovers candidate Python interpreters plus uv availability.
+func Probe(ctx context.Context, libraryRoots []string, explicitPython string) ProbeResult {
+	studioVenv, _ := config.StudioVenvDir()
 	res := ProbeResult{
-		Candidates:  []PythonCandidate{},
-		OS:          runtime.GOOS,
-		ProjectInfo: InspectProjectDir(projectRoot),
+		Candidates:        []PythonCandidate{},
+		OS:                runtime.GOOS,
+		StudioVenvDir:     studioVenv,
+		RequirementsFiles: FindRequirementsFiles(libraryRoots),
 	}
 
 	if uvPath, err := exec.LookPath("uv"); err == nil && uvPath != "" {
@@ -90,7 +121,7 @@ func Probe(ctx context.Context, projectRoot, explicitPython string) ProbeResult 
 		res.UVPath = uvPath
 	}
 
-	raw := collectCandidatePaths(projectRoot, explicitPython)
+	raw := collectCandidatePaths(libraryRoots, explicitPython)
 	if len(raw) == 0 {
 		return res
 	}
@@ -101,7 +132,7 @@ func Probe(ctx context.Context, projectRoot, explicitPython string) ProbeResult 
 		wg.Add(1)
 		go func(idx int, c rawCandidate) {
 			defer wg.Done()
-			probed[idx] = ProbeExecutable(ctx, c.path, c.source)
+			probed[idx] = ProbeExecutable(ctx, c.path, c.source, c.detail)
 		}(i, rc)
 	}
 	wg.Wait()
@@ -131,11 +162,12 @@ func Probe(ctx context.Context, projectRoot, explicitPython string) ProbeResult 
 }
 
 // ProbeExecutable runs a fast metadata probe against a single Python executable.
-func ProbeExecutable(ctx context.Context, pythonPath, source string) PythonCandidate {
+func ProbeExecutable(ctx context.Context, pythonPath, source, sourceDetail string) PythonCandidate {
 	cleanPath := ExpandPath(pythonPath)
 	cand := PythonCandidate{
-		Path:   cleanPath,
-		Source: source,
+		Path:         cleanPath,
+		Source:       source,
+		SourceDetail: sourceDetail,
 	}
 	if cleanPath == "" {
 		cand.Error = "empty python path"
@@ -230,11 +262,11 @@ func findVersionedPythons(dirs []string) []string {
 	return out
 }
 
-func collectCandidatePaths(projectRoot, explicitPython string) []rawCandidate {
+func collectCandidatePaths(libraryRoots []string, explicitPython string) []rawCandidate {
 	var out []rawCandidate
 	seenPath := map[string]struct{}{}
 
-	add := func(p, source string) {
+	add := func(p, source, detail string) {
 		p = ExpandPath(p)
 		if p == "" {
 			return
@@ -243,8 +275,7 @@ func collectCandidatePaths(projectRoot, explicitPython string) []rawCandidate {
 			resolved, err := exec.LookPath(p)
 			if err != nil {
 				if source == "configured" {
-					// Preserve invalid explicit path so we can surface an error to the user.
-					out = append(out, rawCandidate{path: p, source: source})
+					out = append(out, rawCandidate{path: p, source: source, detail: detail})
 				}
 				return
 			}
@@ -253,7 +284,7 @@ func collectCandidatePaths(projectRoot, explicitPython string) []rawCandidate {
 			st, err := os.Stat(p)
 			if err != nil || st.IsDir() {
 				if source == "configured" {
-					out = append(out, rawCandidate{path: p, source: source})
+					out = append(out, rawCandidate{path: p, source: source, detail: detail})
 				}
 				return
 			}
@@ -266,42 +297,53 @@ func collectCandidatePaths(projectRoot, explicitPython string) []rawCandidate {
 			return
 		}
 		seenPath[key] = struct{}{}
-		out = append(out, rawCandidate{path: p, source: source})
+		out = append(out, rawCandidate{path: p, source: source, detail: detail})
 	}
 
 	// 1. Explicitly configured interpreter
 	if strings.TrimSpace(explicitPython) != "" {
-		add(explicitPython, "configured")
+		add(explicitPython, "configured", "")
 	}
 
-	// 2. Project virtual environment
-	if venvPy := FindProjectVenvPython(projectRoot); venvPy != "" {
-		add(venvPy, "project_venv")
+	// 2. Shared Studio-managed virtual environment
+	if studioPy := FindStudioVenvPython(); studioPy != "" {
+		add(studioPy, "studio_venv", "")
 	}
 
-	// 3. PATH lookups (default python3/python plus any versioned python3.X binaries)
+	// 3. Existing virtual environments inside configured libraries
+	for _, root := range libraryRoots {
+		cleanRoot := ExpandPath(root)
+		if cleanRoot == "" {
+			continue
+		}
+		if venvPy := FindProjectVenvPython(cleanRoot); venvPy != "" {
+			add(venvPy, "library_venv", filepath.Base(cleanRoot))
+		}
+	}
+
+	// 4. PATH lookups (default python3/python plus any versioned python3.X binaries)
 	pathNames := []string{"python3", "python"}
 	if runtime.GOOS == "windows" {
 		pathNames = []string{"python", "python3"}
 	}
 	for _, name := range pathNames {
 		if p, err := exec.LookPath(name); err == nil {
-			add(p, "path")
+			add(p, "path", "")
 		}
 	}
 	if runtime.GOOS != "windows" {
 		for _, p := range findVersionedPythons(filepath.SplitList(os.Getenv("PATH"))) {
-			add(p, "path")
+			add(p, "path", "")
 		}
 	}
 
-	// 4. Conda, pyenv, uv-managed, and standard OS install locations
+	// 5. Conda, pyenv, uv-managed, and standard OS install locations
 	home, _ := os.UserHomeDir()
 	if condaPrefix := strings.TrimSpace(os.Getenv("CONDA_PREFIX")); condaPrefix != "" {
 		if runtime.GOOS == "windows" {
-			add(filepath.Join(condaPrefix, "python.exe"), "conda")
+			add(filepath.Join(condaPrefix, "python.exe"), "conda", "")
 		} else {
-			add(filepath.Join(condaPrefix, "bin", "python"), "conda")
+			add(filepath.Join(condaPrefix, "bin", "python"), "conda", "")
 		}
 	}
 
@@ -310,37 +352,37 @@ func collectCandidatePaths(projectRoot, explicitPython string) []rawCandidate {
 			matches, _ := filepath.Glob(filepath.Join(localAppData, "Programs", "Python", "Python3*", "python.exe"))
 			sort.Sort(sort.Reverse(sort.StringSlice(matches)))
 			for _, m := range matches {
-				add(m, "system")
+				add(m, "system", "")
 			}
 		}
 		if home != "" {
 			for _, dir := range []string{"miniconda3", "anaconda3", "miniforge3", "mambaforge"} {
-				add(filepath.Join(home, dir, "python.exe"), "conda")
+				add(filepath.Join(home, dir, "python.exe"), "conda", "")
 			}
 		}
 	} else {
 		if home != "" {
-			add(filepath.Join(home, ".pyenv", "shims", "python3"), "pyenv")
+			add(filepath.Join(home, ".pyenv", "shims", "python3"), "pyenv", "")
 			pyenvMatches, _ := filepath.Glob(filepath.Join(home, ".pyenv", "versions", "*", "bin", "python3"))
 			sort.Sort(sort.Reverse(sort.StringSlice(pyenvMatches)))
 			for _, m := range pyenvMatches {
-				add(m, "pyenv")
+				add(m, "pyenv", "")
 			}
 			uvMatches, _ := filepath.Glob(filepath.Join(home, ".local", "share", "uv", "python", "*", "bin", "python3"))
 			sort.Sort(sort.Reverse(sort.StringSlice(uvMatches)))
 			for _, m := range uvMatches {
-				add(m, "system")
+				add(m, "system", "")
 			}
 			for _, dir := range []string{"miniconda3", "anaconda3", "miniforge3", "mambaforge"} {
-				add(filepath.Join(home, dir, "bin", "python"), "conda")
+				add(filepath.Join(home, dir, "bin", "python"), "conda", "")
 			}
 		}
 		sysDirs := []string{"/opt/homebrew/bin", "/usr/local/bin", "/usr/bin"}
 		for _, dir := range sysDirs {
-			add(filepath.Join(dir, "python3"), "system")
+			add(filepath.Join(dir, "python3"), "system", "")
 		}
 		for _, p := range findVersionedPythons(sysDirs) {
-			add(p, "system")
+			add(p, "system", "")
 		}
 	}
 
@@ -351,16 +393,18 @@ func sourcePriority(source string) int {
 	switch source {
 	case "configured":
 		return 0
-	case "project_venv":
+	case "studio_venv":
 		return 1
-	case "path":
+	case "library_venv":
 		return 2
-	case "conda":
+	case "path":
 		return 3
-	case "pyenv":
+	case "conda":
 		return 4
-	default:
+	case "pyenv":
 		return 5
+	default:
+		return 6
 	}
 }
 

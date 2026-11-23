@@ -5,6 +5,7 @@ import type {
   ExportFormat,
   ExportResult,
   HealthCheckResponse,
+  Library,
   ModelDetailResponse,
   ModelsResponse,
   ParamsRecord,
@@ -62,14 +63,14 @@ export function getConfig(): Promise<ConfigResponse> {
 }
 
 export function saveConfig(
-  projectRoot: string,
+  libraries: Library[],
   pythonPath: string,
   exportDir: string
 ): Promise<ConfigResponse> {
   return fetchJSON<ConfigResponse>('/api/config', {
     method: 'POST',
     body: JSON.stringify({
-      project_root: projectRoot,
+      libraries,
       python_path: pythonPath,
       export_dir: exportDir,
     }),
@@ -100,13 +101,13 @@ export function inspectSetupDir(path: string): Promise<SetupInspectDirResponse> 
 }
 
 export function probeSetup(
-  projectRoot: string,
+  libraryRoots: string[],
   pythonPath = ''
 ): Promise<SetupProbeResponse> {
   return fetchJSON<SetupProbeResponse>('/api/setup/probe', {
     method: 'POST',
     body: JSON.stringify({
-      project_root: projectRoot,
+      library_roots: libraryRoots,
       python_path: pythonPath,
     }),
   });
@@ -128,7 +129,7 @@ export function downloadStarterProject(
 }
 
 export function installSetupEnv(payload: {
-  project_root: string;
+  library_roots: string[];
   base_python: string;
   use_uv?: boolean;
 }): Promise<SetupInstallEnvResponse> {
@@ -145,7 +146,7 @@ export function cancelSetupTask(): Promise<{ ok: boolean; cancelled: boolean }> 
 }
 
 export function completeSetup(payload: {
-  project_root: string;
+  libraries: Library[];
   export_dir?: string;
   python_path?: string;
 }): Promise<ConfigResponse> {
