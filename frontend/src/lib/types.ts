@@ -4,7 +4,10 @@ export interface Library {
   path: string;
 }
 
+export type ExportQuality = 'draft' | 'standard' | 'fine' | 'custom';
+
 export interface Config {
+  schema_version?: number;
   libraries: Library[];
   python_path: string;
   export_dir?: string;
@@ -12,6 +15,10 @@ export interface Config {
   preset_save_scope?: 'user' | 'project' | string;
   default_presets?: Record<string, string>;
   onboarding_completed?: boolean;
+  onboarding_skipped?: boolean;
+  editor_command?: string;
+  slicer_command?: string;
+  export_quality?: ExportQuality;
 }
 
 export interface HealthResponse {
@@ -29,6 +36,7 @@ export interface ConfigResponse {
   resolved_export_dir: string;
   needs_onboarding?: boolean;
   has_desktop: boolean;
+  os?: string;
   worker_running: boolean;
   worker_starting?: boolean;
   worker_error: string;
@@ -145,6 +153,8 @@ export interface DialogResponse {
   error?: string;
 }
 
+export type ModelKind = 'parametric' | 'script' | 'error';
+
 export interface ModelInfo {
   id: string;
   local_id: string;
@@ -155,6 +165,10 @@ export interface ModelInfo {
   name: string;
   path: string;
   rel_path: string;
+  py_path?: string;
+  presets_path?: string;
+  kind?: ModelKind;
+  parse_error?: string;
   description: string;
   params_class: string;
   entrypoint: string;
@@ -218,6 +232,7 @@ export interface ModelDetailResponse {
   presets?: Preset[];
   default_preset_key?: string;
   error?: string;
+  code?: string;
   traceback?: string;
 }
 
@@ -244,7 +259,15 @@ export interface RenderResponse {
   shapes?: unknown;
   export_filename?: string;
   error?: string;
+  code?: string;
   traceback?: string;
+}
+
+export interface CancelRenderResponse {
+  ok: boolean;
+  cancelled?: boolean;
+  error?: string;
+  code?: string;
 }
 
 export interface ExportResult {
@@ -253,7 +276,33 @@ export interface ExportResult {
   path?: string;
   size?: number;
   error?: string;
+  code?: string;
   traceback?: string;
+}
+
+export interface ScaffoldRequest {
+  mode: 'demo' | 'new';
+  target_dir?: string;
+  library_id?: string;
+  name?: string;
+  template?: string;
+}
+
+export interface ScaffoldResponse {
+  ok: boolean;
+  target_dir?: string;
+  library_id?: string;
+  model_id?: string;
+  py_path?: string;
+  config?: ConfigResponse;
+  error?: string;
+  code?: string;
+}
+
+export interface DesktopActionResponse {
+  ok: boolean;
+  error?: string;
+  code?: string;
 }
 
 export interface PresetsResponse {
@@ -321,6 +370,7 @@ export interface UpdateDefaultsResponse {
   changes: DefaultChange[];
   unsupported: UnsupportedDefaultChange[];
   error?: string;
+  code?: string;
   traceback?: string;
 }
 

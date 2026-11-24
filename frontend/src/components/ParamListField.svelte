@@ -66,18 +66,37 @@
   let itemKeys = $state<number[]>([]);
   let openKeys = $state<Record<number, boolean>>({});
   let initialized = false;
+  let internalUpdatePending = false;
+  let lastItemsRef: unknown[] | null = null;
+  let lastPresetDefaultsRef: ParamsRecord | null = null;
+
+  function resetKeysForCount(count: number) {
+    const freshKeys = Array.from({ length: count }, () => ++nextKey);
+    itemKeys = freshKeys;
+    openKeys = count === 1 ? { [freshKeys[0]]: true } : {};
+  }
 
   $effect(() => {
-    const count = items.length;
+    const currentItems = items;
+    const currentPresetDefaults = presetDefaults;
+    const count = currentItems.length;
+
     if (!initialized) {
       initialized = true;
-      const freshKeys = Array.from({ length: count }, () => ++nextKey);
-      itemKeys = freshKeys;
-      if (count === 1) {
-        openKeys = { [freshKeys[0]]: true };
-      } else {
-        openKeys = {};
-      }
+      lastItemsRef = currentItems;
+      lastPresetDefaultsRef = currentPresetDefaults;
+      resetKeysForCount(count);
+      return;
+    }
+
+    const presetChanged = currentPresetDefaults !== lastPresetDefaultsRef;
+    const itemsReplacedExternally = !internalUpdatePending && currentItems !== lastItemsRef;
+    internalUpdatePending = false;
+    lastItemsRef = currentItems;
+    lastPresetDefaultsRef = currentPresetDefaults;
+
+    if (presetChanged || itemsReplacedExternally) {
+      resetKeysForCount(count);
       return;
     }
 
@@ -99,11 +118,17 @@
     }
   });
 
+  function forwardUpdate(path: string, value: unknown, mode?: ParamUpdateMode) {
+    internalUpdatePending = true;
+    onUpdate(path, value, mode);
+  }
+
   function ensureKeysForCurrentItems(): number[] {
     return items.map((_, i) => itemKeys[i] ?? ++nextKey);
   }
 
   function handleAddItem() {
+    internalUpdatePending = true;
     const baseKeys = ensureKeysForCurrentItems();
     const key = ++nextKey;
     itemKeys = [...baseKeys, key];
@@ -113,6 +138,7 @@
   }
 
   function handleDuplicateItem(index: number) {
+    internalUpdatePending = true;
     const baseKeys = ensureKeysForCurrentItems();
     const key = ++nextKey;
     itemKeys = [...baseKeys.slice(0, index + 1), key, ...baseKeys.slice(index + 1)];
@@ -123,6 +149,7 @@
   }
 
   function handleRemoveItem(index: number) {
+    internalUpdatePending = true;
     const baseKeys = ensureKeysForCurrentItems();
     const removedKey = baseKeys[index];
     itemKeys = baseKeys.filter((_, i) => i !== index);
@@ -134,13 +161,17 @@
   }
 
   function handleSetAuto() {
+    internalUpdatePending = true;
     itemKeys = [];
     openKeys = {};
     onUpdate(field.path, null, 'immediate');
   }
 
   function handleResetList() {
-    onUpdate(field.path, deepClone(presetDefaultValue), 'immediate');
+    const next = deepClone(presetDefaultValue);
+    resetKeysForCount(Array.isArray(next) ? next.length : 0);
+    internalUpdatePending = false;
+    onUpdate(field.path, next, 'immediate');
   }
 
   function toggleItemOpen(key: number) {
@@ -402,7 +433,7 @@
                   groupParams={itemObj}
                   {presetDefaults}
                   {showDescriptions}
-                  {onUpdate}
+                  onUpdate={forwardUpdate}
                   {onPreviewCommit}
                 />
               {/each}
@@ -423,7 +454,7 @@
               {groupParams}
               {presetDefaults}
               {showDescriptions}
-              {onUpdate}
+              onUpdate={forwardUpdate}
               {onPreviewCommit}
             />
           </div>

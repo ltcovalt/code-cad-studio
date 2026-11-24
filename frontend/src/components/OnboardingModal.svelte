@@ -80,13 +80,16 @@
   let showInstallLogs = $state(true);
 
   let completing = $state(false);
+  let scaffoldingDemo = $state(false);
   let completeError = $state('');
   let busyNotice = $state('');
 
   let inspectTimer: ReturnType<typeof setTimeout> | null = null;
   let logContainerEl: HTMLPreElement | undefined = $state();
+  let pressedOutside = false;
 
-  let busy = $derived(downloading || installing || completing);
+  let busy = $derived(downloading || installing || completing || scaffoldingDemo);
+  let showSkipButton = $derived(studio.onboardingInitialStep !== 2 && studio.needsOnboarding);
   let detectedProjects = $derived<DetectedProject[]>(defaults?.detected_projects ?? []);
   let unaddedDetectedProjects = $derived(
     detectedProjects.filter((proj) => !libraries.some((l) => l.path.trim() === proj.path))
@@ -588,13 +591,47 @@
     }
   }
 
-  function handleSkip() {
+  async function handleTryOfflineDemo() {
+    if (busy) return;
+    step1Error = '';
+    scaffoldingDemo = true;
+    try {
+      await studio.scaffoldDemo();
+      libraries = (studio.config.libraries ?? []).map((lib) => ({
+        uid: nextUid(),
+        id: lib.id,
+        name: lib.name,
+        path: lib.path,
+      }));
+      includeStarter = false;
+      step = 2;
+      await runProbe(selectedPythonPath);
+    } catch (err) {
+      step1Error = err instanceof Error ? err.message : String(err);
+    } finally {
+      scaffoldingDemo = false;
+    }
+  }
+
+  function handleCloseWizard() {
     if (busy) {
       busyNotice = 'Please wait for the active setup step to finish or click Cancel first.';
       return;
     }
+    if (showSkipButton) {
+      void studio.skipOnboarding();
+      return;
+    }
     studio.clearSetupStream();
     studio.onboardingOpen = false;
+  }
+
+  async function handleSkip() {
+    if (busy) {
+      busyNotice = 'Please wait for the active setup step to finish or click Cancel first.';
+      return;
+    }
+    await studio.skipOnboarding();
   }
 
   function handleDialogCancel(e: Event) {
@@ -604,13 +641,15 @@
       return;
     }
     e.preventDefault();
-    handleSkip();
+    handleCloseWizard();
   }
 
   function handleDialogClose() {
     if (dialogEl) {
       dialogEl.returnValue = '';
     }
+    wasOpen = false;
+    pressedOutside = false;
     if (inspectTimer !== null) {
       clearTimeout(inspectTimer);
       inspectTimer = null;
@@ -619,14 +658,35 @@
       studio.onboardingOpen = false;
     }
   }
+
+  function isOutsideDialog(e: PointerEvent, el: HTMLDialogElement): boolean {
+    const r = el.getBoundingClientRect();
+    return e.clientX < r.left || e.clientX > r.right || e.clientY < r.top || e.clientY > r.bottom;
+  }
+
+  function handleDialogPointerDown(e: PointerEvent) {
+    if (!dialogEl || 'closedBy' in HTMLDialogElement.prototype) return;
+    pressedOutside = isOutsideDialog(e, dialogEl);
+  }
+
+  function handleDialogPointerUp(e: PointerEvent) {
+    if (!dialogEl || 'closedBy' in HTMLDialogElement.prototype) return;
+    if (pressedOutside && isOutsideDialog(e, dialogEl)) {
+      handleCloseWizard();
+    }
+    pressedOutside = false;
+  }
 </script>
 
 <dialog
   bind:this={dialogEl}
   class="studio-dialog"
   aria-labelledby="onboarding-modal-title"
+  {...({ closedby: busy ? 'none' : 'any' } as Record<string, unknown>)}
   oncancel={handleDialogCancel}
   onclose={handleDialogClose}
+  onpointerdown={handleDialogPointerDown}
+  onpointerup={handleDialogPointerUp}
 >
   <div
     bind:this={dialogBodyEl}
@@ -649,7 +709,7 @@
         title="Close"
         aria-label="Close setup wizard"
         disabled={busy}
-        onclick={handleSkip}
+        onclick={handleCloseWizard}
       >
         <svg
           xmlns="http://www.w3.org/2000/svg"
@@ -763,6 +823,29 @@
               </div>
             </div>
           {/if}
+
+          <!-- Offline Built-in Demo Option -->
+          <div class="rounded-box border border-base-300 bg-base-200/40 p-3 flex items-center justify-between gap-3">
+            <div class="space-y-0.5 min-w-0">
+              <div class="font-semibold text-xs">Try Offline Demo</div>
+              <p class="text-[11px] opacity-70 leading-snug">
+                Create the built-in parametric demo project locally (zero internet required).
+              </p>
+            </div>
+            <button
+              type="button"
+              class="btn btn-xs btn-secondary shrink-0"
+              disabled={busy}
+              onclick={handleTryOfflineDemo}
+            >
+              {#if scaffoldingDemo}
+                <span class="loading loading-spinner loading-xs"></span>
+                Creating…
+              {:else}
+                Try Offline Demo
+              {/if}
+            </button>
+          </div>
 
           <!-- Starter Library Option (can be added alongside existing folders!) -->
           <div
@@ -1007,14 +1090,18 @@
 
       <!-- Step 1 Footer -->
       <div class="flex items-center justify-between gap-2 pt-2 border-t border-base-300/70">
-        <button
-          type="button"
-          class="btn btn-sm btn-ghost"
-          disabled={busy}
-          onclick={handleSkip}
-        >
-          Skip for now
-        </button>
+        {#if showSkipButton}
+          <button
+            type="button"
+            class="btn btn-sm btn-ghost"
+            disabled={busy}
+            onclick={handleSkip}
+          >
+            Skip for now
+          </button>
+        {:else}
+          <div></div>
+        {/if}
         <button
           type="button"
           class="btn btn-sm btn-primary"
@@ -1061,6 +1148,34 @@
               {/if}
             </div>
           </div>
+
+          {#if !studio.hasDesktop}
+            <div class="join w-full">
+              <input
+                id="onboarding-manual-python"
+                type="text"
+                bind:value={selectedPythonPath}
+                disabled={probing || installing}
+                placeholder="/path/to/python3 (or venv/bin/python)"
+                aria-label="Python executable path"
+                class="input input-bordered input-xs join-item w-full font-mono text-[11px]"
+                onkeydown={(e) => {
+                  if (e.key === 'Enter') {
+                    e.preventDefault();
+                    void runProbe(selectedPythonPath);
+                  }
+                }}
+              />
+              <button
+                type="button"
+                class="btn btn-xs btn-neutral join-item"
+                disabled={probing || installing || !selectedPythonPath.trim()}
+                onclick={() => void runProbe(selectedPythonPath)}
+              >
+                Check
+              </button>
+            </div>
+          {/if}
 
           {#if probing && !probe}
             <div class="flex items-center gap-2 text-xs opacity-75 py-2">
@@ -1373,14 +1488,16 @@
           >
             Back
           </button>
-          <button
-            type="button"
-            class="btn btn-sm btn-ghost opacity-75"
-            disabled={busy}
-            onclick={handleSkip}
-          >
-            Skip for now
-          </button>
+          {#if showSkipButton}
+            <button
+              type="button"
+              class="btn btn-sm btn-ghost opacity-75"
+              disabled={busy}
+              onclick={handleSkip}
+            >
+              Skip for now
+            </button>
+          {/if}
         </div>
 
         <button

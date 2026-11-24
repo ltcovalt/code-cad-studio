@@ -1,7 +1,7 @@
 <script lang="ts">
   import { onMount } from 'svelte';
   import * as api from '../lib/api';
-  import { DAISY_THEMES } from '../lib/cadViewer';
+  import { DAISY_THEMES } from '../lib/themes';
   import { studio } from '../lib/studioState.svelte';
   import type { LayoutMode } from '../lib/types';
 
@@ -91,8 +91,10 @@
 
 <!-- svelte-ignore a11y_no_static_element_interactions -->
 <header
-  class="navbar bg-base-200 border-b border-base-300 min-h-10 py-1 px-3 gap-2 shrink-0 titlebar-drag"
-  ondblclick={handleTitlebarDblClick}
+  class="navbar bg-base-200 border-b border-base-300 min-h-10 py-1 px-3 gap-2 shrink-0"
+  class:titlebar-drag={studio.hasDesktop}
+  class:macos-traffic-lights={studio.hasDesktop && studio.os === 'darwin'}
+  ondblclick={studio.hasDesktop ? handleTitlebarDblClick : undefined}
 >
   <div class="flex-1 flex items-center gap-3 min-w-0">
     <div class="flex items-center gap-2 font-bold text-base tracking-tight pointer-events-none">
@@ -103,7 +105,7 @@
     {/if}
   </div>
 
-  <div class="flex-none flex items-center gap-1 titlebar-no-drag">
+  <div class="flex-none flex items-center gap-1" class:titlebar-no-drag={studio.hasDesktop}>
     <!-- Layout Switcher Dropdown -->
     <div class="dropdown dropdown-end">
       <div
@@ -293,7 +295,7 @@
       </svg>
     </button>
 
-    {#if studio.hasDesktop}
+    {#if studio.hasDesktop && studio.os !== 'darwin'}
       <div class="h-4 w-px bg-base-content/15 mx-1" aria-hidden="true"></div>
 
       <!-- Minimize Button -->

@@ -1,7 +1,13 @@
 @import "tailwindcss";
-@plugin "@tailwindcss/typography";
 @plugin "daisyui" {
-  themes: all;
+  themes: dark --default, light, dracula, night, corporate, emerald, cupcake, retro;
+  exclude: themecontroller;
+}
+
+@layer base {
+  :root {
+    color-scheme: light dark;
+  }
 }
 
 html, body {
@@ -9,10 +15,20 @@ html, body {
   overflow: hidden;
 }
 
-/* Override three-cad-viewer.css global body { user-select: none } so users can copy errors & info */
-body {
+/* Override three-cad-viewer.css global rules (body & input[type="radio"]) regardless of lazy CSS load order */
+html body {
   user-select: text !important;
   -webkit-user-select: text !important;
+  background-color: var(--color-base-100);
+}
+
+html body input[type="radio"] {
+  transform: none;
+}
+
+#cad-viewer-root input[type="radio"] {
+  vertical-align: middle;
+  transform: translateY(-2px);
 }
 
 /* Keep three-cad-viewer container filling its flex area cleanly with consistent padding,
@@ -96,6 +112,10 @@ input.no-spinner {
   --wails-draggable: no-drag;
   app-region: no-drag;
   -webkit-app-region: no-drag;
+}
+
+.macos-traffic-lights {
+  padding-left: 78px;
 }
 
 /* Resizable splitters */

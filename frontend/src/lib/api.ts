@@ -1,8 +1,11 @@
 import type {
+  CancelRenderResponse,
   ConfigResponse,
   DeletePresetResponse,
+  DesktopActionResponse,
   DialogResponse,
   ExportFormat,
+  ExportQuality,
   ExportResult,
   HealthCheckResponse,
   Library,
@@ -14,6 +17,8 @@ import type {
   RenamePresetResponse,
   RenderResponse,
   SavePresetResponse,
+  ScaffoldRequest,
+  ScaffoldResponse,
   SetDefaultPresetResponse,
   SetPresetVerificationResponse,
   SetupDefaultsResponse,
@@ -27,19 +32,38 @@ import type {
   VerificationStatus,
 } from './types';
 
+export class ApiRequestError extends Error {
+  status: number;
+  code?: string;
+  traceback?: string;
+
+  constructor(message: string, status: number, code?: string, traceback?: string) {
+    super(message);
+    this.name = 'ApiRequestError';
+    this.status = status;
+    this.code = code;
+    this.traceback = traceback;
+  }
+}
+
 async function fetchJSON<T>(url: string, init?: RequestInit): Promise<T> {
+  const method = (init?.method ?? 'GET').toUpperCase();
+  const needsJsonBody = method === 'POST' || method === 'PUT' || method === 'PATCH';
+  const body = needsJsonBody && init?.body === undefined ? '{}' : init?.body;
+
   const res = await fetch(url, {
     cache: 'no-store',
     ...init,
+    ...(body !== undefined ? { body } : {}),
     headers: {
-      ...(init?.body ? { 'Content-Type': 'application/json' } : {}),
+      ...(needsJsonBody || body !== undefined ? { 'Content-Type': 'application/json' } : {}),
       ...(init?.headers ?? {}),
     },
   });
   const text = await res.text();
   if (!text) {
     if (!res.ok) {
-      throw new Error(`Request failed (${res.status})`);
+      throw new ApiRequestError(`Request failed (${res.status})`, res.status);
     }
     return undefined as T;
   }
@@ -47,13 +71,23 @@ async function fetchJSON<T>(url: string, init?: RequestInit): Promise<T> {
   try {
     parsed = JSON.parse(text);
   } catch {
-    throw new Error(res.ok ? `Invalid JSON response from ${url}` : `HTTP ${res.status}: ${text}`);
+    throw new ApiRequestError(
+      res.ok ? `Invalid JSON response from ${url}` : `HTTP ${res.status}: ${text}`,
+      res.status
+    );
   }
-  if (!res.ok && typeof parsed === 'object' && parsed !== null && 'error' in parsed) {
-    throw new Error(String((parsed as { error: unknown }).error));
+  if (!res.ok && typeof parsed === 'object' && parsed !== null) {
+    const obj = parsed as Record<string, unknown>;
+    const errMsg =
+      'error' in obj && obj.error !== undefined && obj.error !== ''
+        ? String(obj.error)
+        : `HTTP ${res.status}: ${text}`;
+    const code = typeof obj.code === 'string' ? obj.code : undefined;
+    const traceback = typeof obj.traceback === 'string' ? obj.traceback : undefined;
+    throw new ApiRequestError(errMsg, res.status, code, traceback);
   }
   if (!res.ok) {
-    throw new Error(`HTTP ${res.status}: ${text}`);
+    throw new ApiRequestError(`HTTP ${res.status}: ${text}`, res.status);
   }
   return parsed as T;
 }
@@ -65,22 +99,34 @@ export function getConfig(): Promise<ConfigResponse> {
 export function saveConfig(
   libraries: Library[],
   pythonPath: string,
-  exportDir: string
+  exportDir: string,
+  extra?: {
+    onboarding_skipped?: boolean;
+    editor_command?: string;
+    slicer_command?: string;
+    export_quality?: ExportQuality;
+  }
 ): Promise<ConfigResponse> {
+  const body: Record<string, unknown> = {
+    libraries,
+    python_path: pythonPath,
+    export_dir: exportDir,
+  };
+  if (extra) {
+    if (extra.onboarding_skipped !== undefined) body.onboarding_skipped = extra.onboarding_skipped;
+    if (extra.editor_command !== undefined) body.editor_command = extra.editor_command;
+    if (extra.slicer_command !== undefined) body.slicer_command = extra.slicer_command;
+    if (extra.export_quality !== undefined) body.export_quality = extra.export_quality;
+  }
   return fetchJSON<ConfigResponse>('/api/config', {
     method: 'POST',
-    body: JSON.stringify({
-      libraries,
-      python_path: pythonPath,
-      export_dir: exportDir,
-    }),
+    body: JSON.stringify(body),
   });
 }
 
-export async function saveTheme(theme: string): Promise<void> {
-  await fetch('/api/config/theme', {
+export function saveTheme(theme: string): Promise<void> {
+  return fetchJSON<void>('/api/config/theme', {
     method: 'POST',
-    headers: { 'Content-Type': 'application/json' },
     body: JSON.stringify({ theme }),
   });
 }
@@ -177,8 +223,8 @@ export function browseExportDir(current?: string): Promise<DialogResponse> {
   });
 }
 
-export async function windowMinimize(): Promise<void> {
-  await fetch('/api/window/minimize', { method: 'POST' });
+export function windowMinimize(): Promise<void> {
+  return fetchJSON<void>('/api/window/minimize', { method: 'POST' });
 }
 
 export function windowToggleMaximize(): Promise<{ maximized: boolean }> {
@@ -191,8 +237,40 @@ export function windowState(): Promise<{ maximized: boolean }> {
   return fetchJSON<{ maximized: boolean }>('/api/window/state');
 }
 
-export async function windowClose(): Promise<void> {
-  await fetch('/api/window/close', { method: 'POST' });
+export function windowClose(): Promise<void> {
+  return fetchJSON<void>('/api/window/close', { method: 'POST' });
+}
+
+export function cancelRender(): Promise<CancelRenderResponse> {
+  return fetchJSON<CancelRenderResponse>('/api/render/cancel', { method: 'POST' });
+}
+
+export function scaffoldModel(payload: ScaffoldRequest): Promise<ScaffoldResponse> {
+  return fetchJSON<ScaffoldResponse>('/api/models/scaffold', {
+    method: 'POST',
+    body: JSON.stringify(payload),
+  });
+}
+
+export function openInEditor(path: string): Promise<DesktopActionResponse> {
+  return fetchJSON<DesktopActionResponse>('/api/desktop/open-editor', {
+    method: 'POST',
+    body: JSON.stringify({ path }),
+  });
+}
+
+export function revealFile(path: string): Promise<DesktopActionResponse> {
+  return fetchJSON<DesktopActionResponse>('/api/desktop/reveal-file', {
+    method: 'POST',
+    body: JSON.stringify({ path }),
+  });
+}
+
+export function openInSlicer(path: string): Promise<DesktopActionResponse> {
+  return fetchJSON<DesktopActionResponse>('/api/desktop/open-slicer', {
+    method: 'POST',
+    body: JSON.stringify({ path }),
+  });
 }
 
 export function listModels(): Promise<ModelsResponse> {
@@ -225,29 +303,60 @@ export async function exportModel(
   modelId: string,
   params: ParamsRecord,
   format: ExportFormat,
-  hasDesktop: boolean
+  hasDesktop: boolean,
+  options?: {
+    quality?: ExportQuality;
+    linear_deflection?: number;
+    angular_deflection?: number;
+    filename?: string;
+  }
 ): Promise<ExportResult> {
   const url = `/api/models/${encodeURIComponent(modelId)}/export`;
+  const payload = {
+    params,
+    format,
+    ...(options ?? {}),
+  };
+
   if (hasDesktop) {
     return fetchJSON<ExportResult>(url, {
       method: 'POST',
-      body: JSON.stringify({ params, format }),
+      body: JSON.stringify(payload),
     });
   }
 
   const res = await fetch(url, {
     method: 'POST',
+    cache: 'no-store',
     headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify({ params, format }),
+    body: JSON.stringify(payload),
   });
   if (!res.ok) {
     const errText = await res.text();
+    try {
+      const parsed: unknown = JSON.parse(errText);
+      if (typeof parsed === 'object' && parsed !== null) {
+        const obj = parsed as Record<string, unknown>;
+        return {
+          ok: false,
+          error:
+            'error' in obj && obj.error !== undefined
+              ? String(obj.error)
+              : errText || `Export failed (${res.status})`,
+          code: typeof obj.code === 'string' ? obj.code : undefined,
+          traceback: typeof obj.traceback === 'string' ? obj.traceback : undefined,
+        };
+      }
+    } catch {
+      // non-JSON error text
+    }
     return { ok: false, error: errText || `Export failed (${res.status})` };
   }
   const blob = await res.blob();
+  const safeStem = (options?.filename?.trim() || modelId).replace(/[/:\\]+/g, '_');
   const filename = parseContentDispositionFilename(
     res.headers.get('Content-Disposition'),
-    `${modelId}.${format}`
+    `${safeStem}.${format}`
   );
   const blobUrl = URL.createObjectURL(blob);
   const a = document.createElement('a');
@@ -256,7 +365,7 @@ export async function exportModel(
   document.body.appendChild(a);
   a.click();
   a.remove();
-  URL.revokeObjectURL(blobUrl);
+  setTimeout(() => URL.revokeObjectURL(blobUrl), 60_000);
   return { ok: true, cancelled: false, path: filename, size: blob.size };
 }
 
@@ -357,16 +466,35 @@ export interface SSEHandlers {
   onWorkerError: (error: string) => void;
   onSetupProgress?: (event: SetupProgressEvent) => void;
   onSetupLog?: (event: SetupLogEvent) => void;
+  onOpen?: () => void;
+  onReconnect?: () => void;
 }
 
 export function subscribeEvents(handlers: SSEHandlers): () => void {
   let closed = false;
   let es: EventSource | null = null;
   let reconnectTimer: ReturnType<typeof setTimeout> | null = null;
+  let hasConnectedOnce = false;
 
   const connect = () => {
     if (closed) return;
+    reconnectTimer = null;
+    let openedThisConn = false;
     es = new EventSource('/events');
+
+    const handleOpen = () => {
+      if (closed || openedThisConn) return;
+      openedThisConn = true;
+      const isReconnect = hasConnectedOnce;
+      hasConnectedOnce = true;
+      handlers.onOpen?.();
+      if (isReconnect) {
+        handlers.onReconnect?.();
+      }
+    };
+
+    es.onopen = handleOpen;
+    es.addEventListener('connected', handleOpen);
 
     es.addEventListener('file-changed', (evt) => {
       try {
@@ -416,7 +544,7 @@ export function subscribeEvents(handlers: SSEHandlers): () => void {
     es.onerror = () => {
       es?.close();
       es = null;
-      if (!closed) {
+      if (!closed && reconnectTimer === null) {
         reconnectTimer = setTimeout(connect, 3000);
       }
     };
@@ -426,7 +554,10 @@ export function subscribeEvents(handlers: SSEHandlers): () => void {
 
   return () => {
     closed = true;
-    if (reconnectTimer) clearTimeout(reconnectTimer);
+    if (reconnectTimer) {
+      clearTimeout(reconnectTimer);
+      reconnectTimer = null;
+    }
     es?.close();
     es = null;
   };

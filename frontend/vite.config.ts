@@ -1,4 +1,4 @@
-import { defineConfig } from 'vite';
+import { defineConfig } from 'vitest/config';
 import { svelte } from '@sveltejs/vite-plugin-svelte';
 import tailwindcss from '@tailwindcss/vite';
 
@@ -9,8 +9,13 @@ export default defineConfig({
     strictPort: true,
   },
   plugins: [svelte(), tailwindcss()],
+  resolve: process.env.VITEST ? { conditions: ['browser'] } : undefined,
   build: {
     outDir: 'dist',
     emptyOutDir: true,
+  },
+  test: {
+    environment: 'happy-dom',
+    include: ['src/**/*.test.ts'],
   },
 });

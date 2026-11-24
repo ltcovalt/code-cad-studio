@@ -1,4 +1,5 @@
 <script lang="ts">
+  import { untrack } from 'svelte';
   import { studio } from '../lib/studioState.svelte';
   import type { Preset, UpdateDefaultsResponse, VerificationStatus } from '../lib/types';
   import {
@@ -11,6 +12,9 @@
   import VerificationIcon from './VerificationIcon.svelte';
 
   type ManageTab = 'presets' | 'source';
+
+  let dialogEl: HTMLDialogElement | undefined = $state();
+  let pressedOutside = false;
 
   let activeTab = $state<ManageTab>('presets');
   let actionBusy = $state(false);
@@ -47,36 +51,112 @@
 
   const canonicalDefaultVer = $derived(getPresetVerification(canonicalDefault));
 
+  function initializeState() {
+    activeTab = 'presets';
+    editingKey = null;
+    verifyingKey = null;
+    deletingKey = null;
+    manageError = '';
+    manageSuccess = '';
+    previewData = null;
+    previewError = '';
+    defaultsSuccess = '';
+  }
+
+  let wasOpen = false;
   $effect(() => {
-    if (studio.managePresetsModalOpen) {
-      activeTab = 'presets';
-      editingKey = null;
-      verifyingKey = null;
-      deletingKey = null;
-      manageError = '';
-      manageSuccess = '';
-      previewData = null;
-      previewError = '';
-      defaultsSuccess = '';
+    const el = dialogEl;
+    const isOpen = studio.managePresetsModalOpen && Boolean(studio.activeModel);
+    if (!el) return;
+    if (isOpen && !wasOpen) {
+      wasOpen = true;
+      untrack(() => initializeState());
+      if (!el.open) {
+        el.showModal();
+      }
+    } else if (!isOpen && wasOpen) {
+      wasOpen = false;
+      if (el.open) {
+        el.close();
+      }
     }
   });
 
   function closeModal() {
+    if (actionBusy || applyingDefaults) return;
     studio.managePresetsModalOpen = false;
   }
 
-  function handleKeydown(e: KeyboardEvent) {
-    if (e.key === 'Escape' && studio.managePresetsModalOpen) {
+  function handleDialogKeydown(e: KeyboardEvent) {
+    if (e.key === 'Escape') {
       if (editingKey) {
+        e.preventDefault();
+        e.stopPropagation();
         editingKey = null;
         return;
       }
       if (verifyingKey) {
+        e.preventDefault();
+        e.stopPropagation();
         verifyingKey = null;
         return;
       }
+      if (deletingKey) {
+        e.preventDefault();
+        e.stopPropagation();
+        deletingKey = null;
+      }
+    }
+  }
+
+  function handleDialogCancel(e: Event) {
+    if (actionBusy || applyingDefaults) {
+      e.preventDefault();
+      return;
+    }
+    if (editingKey) {
+      e.preventDefault();
+      editingKey = null;
+      return;
+    }
+    if (verifyingKey) {
+      e.preventDefault();
+      verifyingKey = null;
+      return;
+    }
+    if (deletingKey) {
+      e.preventDefault();
+      deletingKey = null;
+    }
+  }
+
+  function handleDialogClose() {
+    if (dialogEl) {
+      dialogEl.returnValue = '';
+    }
+    wasOpen = false;
+    pressedOutside = false;
+    if (studio.managePresetsModalOpen) {
+      studio.managePresetsModalOpen = false;
+    }
+  }
+
+  function isOutsideDialog(e: PointerEvent, el: HTMLDialogElement): boolean {
+    const r = el.getBoundingClientRect();
+    return e.clientX < r.left || e.clientX > r.right || e.clientY < r.top || e.clientY > r.bottom;
+  }
+
+  function handleDialogPointerDown(e: PointerEvent) {
+    if (!dialogEl || 'closedBy' in HTMLDialogElement.prototype) return;
+    pressedOutside = isOutsideDialog(e, dialogEl);
+  }
+
+  function handleDialogPointerUp(e: PointerEvent) {
+    if (!dialogEl || 'closedBy' in HTMLDialogElement.prototype) return;
+    if (pressedOutside && isOutsideDialog(e, dialogEl)) {
       closeModal();
     }
+    pressedOutside = false;
   }
 
   async function loadDefaultsPreview() {
@@ -230,27 +310,24 @@
   }
 </script>
 
-<svelte:window onkeydown={handleKeydown} />
-
-{#if studio.managePresetsModalOpen && studio.activeModel}
-  <!-- Lightweight zero-transition overlay to avoid WebKitGTK/Wayland software-compositing lag over WebGL -->
-  <!-- svelte-ignore a11y_click_events_have_key_events -->
-  <!-- svelte-ignore a11y_no_static_element_interactions -->
-  <div
-    class="fixed inset-0 z-50 flex items-center justify-center bg-black/50 p-4"
-    onclick={closeModal}
-  >
+<dialog
+  bind:this={dialogEl}
+  class="studio-dialog"
+  aria-labelledby="manage-presets-modal-title"
+  {...({ closedby: actionBusy || applyingDefaults ? 'none' : 'any' } as Record<string, unknown>)}
+  onkeydown={handleDialogKeydown}
+  oncancel={handleDialogCancel}
+  onclose={handleDialogClose}
+  onpointerdown={handleDialogPointerDown}
+  onpointerup={handleDialogPointerUp}
+>
+  {#if studio.activeModel}
     <div
-      role="dialog"
-      aria-modal="true"
-      aria-labelledby="manage-presets-modal-title"
-      tabindex="-1"
-      class="bg-base-100 border border-base-300 rounded-box shadow-md w-full max-w-lg max-h-[90vh] overflow-y-auto p-6 space-y-4"
-      onclick={(e) => e.stopPropagation()}
+      class="bg-base-100 border border-base-300 rounded-box shadow-md w-[32rem] max-w-[calc(100vw-2rem)] max-h-[calc(100vh-2rem)] overflow-y-auto p-6 space-y-4"
     >
       <div class="flex items-center justify-between">
         <div>
-          <h3 id="manage-presets-modal-title" class="font-bold text-base">Manage Presets</h3>
+          <h2 id="manage-presets-modal-title" class="font-bold text-base">Manage Presets</h2>
           <p class="text-[11px] opacity-60">{studio.activeModel.name}</p>
         </div>
         <button
@@ -815,5 +892,5 @@
         </div>
       {/if}
     </div>
-  </div>
-{/if}
+  {/if}
+</dialog>

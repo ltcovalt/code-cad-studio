@@ -124,11 +124,37 @@
         type="button"
         class="btn btn-ghost btn-xs w-full justify-start text-left h-auto py-1.5 px-2 font-normal flex flex-col items-start gap-0.5"
         class:btn-active={studio.activeModelId === node.model.id}
-        title={node.model.rel_path}
+        title={node.model.kind === 'error' && node.model.parse_error
+          ? `${node.model.rel_path}\n${node.model.parse_error}`
+          : node.model.rel_path}
         onclick={() => studio.selectModel(node.model.id)}
       >
-        <span class="font-medium text-xs truncate w-full">{node.model.name}</span>
-        {#if node.model.description}
+        <div class="flex items-center gap-1.5 w-full min-w-0">
+          <span
+            class="font-medium text-xs truncate flex-1 min-w-0"
+            class:text-error={node.model.kind === 'error'}
+          >
+            {node.model.name}
+          </span>
+          {#if node.model.kind === 'error'}
+            <span
+              class="badge badge-xs badge-error shrink-0"
+              title={node.model.parse_error || 'Failed to parse model script'}
+            >
+              !
+            </span>
+          {:else if node.model.kind === 'script'}
+            <span
+              class="badge badge-xs badge-ghost opacity-70 shrink-0"
+              title="Standalone build123d script (no @dataclass parameters)"
+            >
+              Script
+            </span>
+          {/if}
+        </div>
+        {#if node.model.kind === 'error' && node.model.parse_error}
+          <span class="text-[11px] text-error/85 truncate w-full">{node.model.parse_error}</span>
+        {:else if node.model.description}
           <span class="text-[11px] opacity-60 truncate w-full">{node.model.description}</span>
         {/if}
       </button>

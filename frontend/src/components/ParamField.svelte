@@ -137,6 +137,44 @@
     onUpdate(field.path, parsed, 'debounced');
   }
 
+  function commitNormalizedNumber(
+    input: HTMLInputElement,
+    mode: ParamUpdateMode,
+    forceImmediate = false
+  ) {
+    const trimmed = input.value.trim();
+    if (trimmed === '') {
+      if (input.validity && !input.validity.valid) {
+        input.value = numValue === null ? '' : String(numValue);
+        return;
+      }
+      if (field.nullable) {
+        if (numValue !== null || forceImmediate) {
+          onUpdate(field.path, null, mode);
+        }
+        input.value = '';
+      } else {
+        input.value = numValue === null ? '' : String(numValue);
+      }
+      return;
+    }
+    let parsed = isInt ? Math.round(Number(trimmed)) : Number(trimmed);
+    if (!Number.isFinite(parsed)) {
+      input.value = numValue === null ? '' : String(numValue);
+      return;
+    }
+    if (field.min !== undefined && Number.isFinite(field.min)) {
+      parsed = Math.max(field.min, parsed);
+    }
+    if (field.max !== undefined && Number.isFinite(field.max)) {
+      parsed = Math.min(field.max, parsed);
+    }
+    input.value = String(parsed);
+    if (parsed !== numValue || forceImmediate) {
+      onUpdate(field.path, parsed, mode);
+    }
+  }
+
   function handleStep(direction: -1 | 1) {
     const next = stepNumber(numValue, direction, stepVal, isInt, field.min, field.max);
     onUpdate(field.path, next, 'debounced');
@@ -298,6 +336,7 @@
           <div
             class="space-y-2.5 pt-2 border-t border-base-300/70 transition-opacity min-w-0"
             class:opacity-45={toggleChild !== null && !toggleChecked}
+            inert={toggleChild !== null && !toggleChecked}
           >
             {#each bodyChildren as child (child.path)}
               <Self
@@ -497,6 +536,15 @@
               max={field.max}
               class="input input-bordered input-xs join-item h-7 flex-1 min-w-0 text-center font-mono text-xs px-1.5 no-spinner"
               oninput={(e) => handleNumberInput((e.currentTarget as HTMLInputElement).value)}
+              onblur={(e) => commitNormalizedNumber(e.currentTarget as HTMLInputElement, 'immediate')}
+              onkeydown={(e) => {
+                if (e.key === 'Enter') {
+                  e.preventDefault();
+                  const el = e.currentTarget as HTMLInputElement;
+                  commitNormalizedNumber(el, 'immediate', true);
+                  el.blur();
+                }
+              }}
             />
             <button
               type="button"

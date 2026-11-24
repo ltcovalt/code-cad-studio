@@ -1,4 +1,5 @@
 import * as api from './api';
+import { ApiRequestError } from './api';
 import type { CadViewportController } from './cadViewer';
 import { buildModelTree, collectFolderKeys, type TreeNode } from './modelTree';
 import {
@@ -12,12 +13,15 @@ import type {
   Config,
   ConfigResponse,
   ExportFormat,
+  ExportQuality,
   ModelInfo,
   ParamField,
   ParamsRecord,
   ParamUpdateMode,
   Preset,
   PresetVerification,
+  ScaffoldRequest,
+  ScaffoldResponse,
   SetupLogEvent,
   SetupProgressEvent,
   StatusState,
@@ -56,13 +60,46 @@ function loadCollapsedFolders(): Record<string, boolean> {
   return {};
 }
 
-class StudioState {
+function normalizeSlash(p: string): string {
+  return p.replace(/\\/g, '/');
+}
+
+function shouldReloadActiveModel(
+  changedPath: string,
+  activeModel: ModelInfo | null,
+  allModels: ModelInfo[]
+): boolean {
+  if (!changedPath) return true;
+  const target = normalizeSlash(changedPath);
+  if (!activeModel) return false;
+
+  if (activeModel.py_path && normalizeSlash(activeModel.py_path) === target) {
+    return true;
+  }
+  if (!activeModel.py_path && activeModel.rel_path && target.endsWith('/' + normalizeSlash(activeModel.rel_path))) {
+    return true;
+  }
+  if (target.includes('/utils/') || target.includes('/components/')) {
+    return true;
+  }
+
+  const matchesDifferentModel = allModels.some((m) => {
+    if (m.id === activeModel.id) return false;
+    if (m.py_path && normalizeSlash(m.py_path) === target) return true;
+    if (!m.py_path && m.rel_path && target.endsWith('/' + normalizeSlash(m.rel_path))) return true;
+    return false;
+  });
+  return !matchesDifferentModel;
+}
+
+export class StudioState {
   // Config & environment
   config = $state<Config>({ libraries: [], python_path: '', export_dir: '', theme: 'dark' });
   hasLibraries = $derived((this.config.libraries?.length ?? 0) > 0);
   resolvedPython = $state('');
   resolvedExportDir = $state('');
   hasDesktop = $state(false);
+  os = $state('');
   workerRunning = $state(false);
   workerError = $state('');
   theme = $state('dark');
@@ -151,6 +188,9 @@ class StudioState {
   selectedPresetKey = $state('default');
   defaultPresetKey = $state('');
   exportFilename = $state('');
+  exportFilenameEdited = $state(false);
+  exportQuality = $state<ExportQuality>('standard');
+  lastExportPath = $state('');
 
   selectedPreset = $derived(
     this.presets.find((p) => p.key === this.selectedPresetKey) ?? null
@@ -166,11 +206,14 @@ class StudioState {
 
   // Render & status
   rendering = $state(false);
+  buildStartedAt = $state<number | null>(null);
   exporting = $state(false);
   hasMesh = $state(false);
   status = $state<StatusState>({ kind: 'idle' });
 
   private viewport: CadViewportController | null = null;
+  private pendingRender: { modelId: string; shapes: unknown; resetCamera: boolean } | null = null;
+  private paramMemory = new Map<string, { params: ParamsRecord; selectedPresetKey: string }>();
   private latestRenderSeq = 0;
   private renderAbort: AbortController | null = null;
   private lastRenderedKey = '';
@@ -178,11 +221,20 @@ class StudioState {
   private reloadBadgeTimer: ReturnType<typeof setTimeout> | null = null;
   private unsubscribeSSE: (() => void) | null = null;
   private initialized = false;
+  private fileReloadSeq = 0;
+  private fileReloadInFlight: Promise<void> | null = null;
+  private queuedFileChangedPath: string | null = null;
 
   attachViewport(controller: CadViewportController | null): void {
     this.viewport = controller;
     if (controller) {
       controller.setTheme(this.theme);
+      if (this.pendingRender && this.activeModelId === this.pendingRender.modelId) {
+        const { modelId, shapes, resetCamera } = this.pendingRender;
+        this.pendingRender = null;
+        this.hasMesh = true;
+        controller.renderShapes(modelId, shapes, resetCamera);
+      }
     }
   }
 
@@ -200,8 +252,8 @@ class StudioState {
     }
 
     this.unsubscribeSSE = api.subscribeEvents({
-      onFileChanged: () => {
-        void this.handleFileChanged();
+      onFileChanged: (path) => {
+        void this.handleFileChanged(path);
       },
       onPresetsChanged: () => {
         void this.handlePresetsChanged();
@@ -220,6 +272,9 @@ class StudioState {
         const next = [...this.setupLogs, evt.line];
         this.setupLogs = next.length > 300 ? next.slice(next.length - 300) : next;
       },
+      onReconnect: () => {
+        void this.handleSSEReconnect();
+      },
     });
 
     await this.loadConfig();
@@ -231,12 +286,26 @@ class StudioState {
   }
 
   destroy(): void {
-    if (this.debounceTimer) clearTimeout(this.debounceTimer);
-    if (this.reloadBadgeTimer) clearTimeout(this.reloadBadgeTimer);
+    if (this.debounceTimer) {
+      clearTimeout(this.debounceTimer);
+      this.debounceTimer = null;
+    }
+    if (this.reloadBadgeTimer) {
+      clearTimeout(this.reloadBadgeTimer);
+      this.reloadBadgeTimer = null;
+    }
     this.renderAbort?.abort();
+    this.renderAbort = null;
     this.unsubscribeSSE?.();
     this.unsubscribeSSE = null;
     this.initialized = false;
+  }
+
+  private async handleSSEReconnect(): Promise<void> {
+    await this.loadConfig();
+    if (!this.needsOnboarding) {
+      await this.refreshModels();
+    }
   }
 
   private applyThemeDom(themeName: string): void {
@@ -271,6 +340,16 @@ class StudioState {
     this.setShowDescriptions(!this.showDescriptions);
   }
 
+  setExportFilename(name: string): void {
+    this.exportFilename = name;
+    this.exportFilenameEdited = true;
+  }
+
+  setExportQuality(quality: ExportQuality): void {
+    this.exportQuality = quality;
+    this.config = { ...this.config, export_quality: quality };
+  }
+
   async loadConfig(): Promise<void> {
     try {
       const resp = await api.getConfig();
@@ -282,8 +361,10 @@ class StudioState {
       this.resolvedExportDir = resp.resolved_export_dir;
       this.needsOnboarding = Boolean(resp.needs_onboarding);
       this.hasDesktop = resp.has_desktop;
+      this.os = resp.os ?? '';
       this.workerRunning = resp.worker_running;
       this.workerError = resp.worker_error;
+      this.exportQuality = resp.config.export_quality ?? 'standard';
       if (resp.config.theme) {
         this.applyThemeDom(resp.config.theme);
       }
@@ -304,6 +385,23 @@ class StudioState {
     this.onboardingOpen = true;
   }
 
+  async skipOnboarding(): Promise<void> {
+    this.onboardingOpen = false;
+    this.needsOnboarding = false;
+    this.clearSetupStream();
+    try {
+      const resp = await api.saveConfig(
+        this.config.libraries ?? [],
+        this.config.python_path ?? '',
+        this.config.export_dir ?? '',
+        { onboarding_skipped: true }
+      );
+      await this.applySavedConfig(resp);
+    } catch (err) {
+      this.workerError = err instanceof Error ? err.message : String(err);
+    }
+  }
+
   async finishOnboarding(resp: ConfigResponse): Promise<void> {
     this.needsOnboarding = Boolean(resp.needs_onboarding);
     this.onboardingOpen = false;
@@ -315,7 +413,11 @@ class StudioState {
     }
   }
 
-  private clearActiveModel(): void {
+  clearActiveModel(): void {
+    this.cancelPendingRender();
+    this.latestRenderSeq++;
+    this.rendering = false;
+    this.buildStartedAt = null;
     this.activeModelId = null;
     this.activeModel = null;
     this.modelDescription = '';
@@ -323,21 +425,21 @@ class StudioState {
     this.defaults = {};
     this.params = {};
     this.presets = [];
+    this.defaultPresetKey = '';
+    this.selectedPresetKey = 'default';
+    this.exportFilename = '';
+    this.exportFilenameEdited = false;
+    this.lastExportPath = '';
     this.modelLoadError = '';
     this.modelLoadTraceback = '';
     this.lastRenderedKey = '';
+    this.hasMesh = false;
+    this.pendingRender = null;
     this.status = { kind: 'idle' };
+    this.viewport?.clear();
   }
 
-  async applySavedConfig(resp: {
-    config: Config;
-    resolved_python: string;
-    resolved_export_dir: string;
-    needs_onboarding?: boolean;
-    has_desktop: boolean;
-    worker_running: boolean;
-    worker_error: string;
-  }): Promise<void> {
+  async applySavedConfig(resp: ConfigResponse): Promise<void> {
     const prevLibs = this.config.libraries ?? [];
     const nextLibs = resp.config.libraries ?? [];
     this.config = { ...resp.config, libraries: nextLibs };
@@ -347,8 +449,27 @@ class StudioState {
       this.needsOnboarding = resp.needs_onboarding;
     }
     this.hasDesktop = resp.has_desktop;
+    if (resp.os !== undefined) {
+      this.os = resp.os;
+    }
+    if (resp.config.export_quality) {
+      this.exportQuality = resp.config.export_quality;
+    }
     this.workerRunning = resp.worker_running;
     this.workerError = resp.worker_error;
+
+    // Clear param memory for removed or relocated libraries
+    for (const prevLib of prevLibs) {
+      const nextLib = nextLibs.find((l) => l.id === prevLib.id);
+      if (!nextLib || nextLib.path !== prevLib.path) {
+        const prefix = `${prevLib.id}/`;
+        for (const key of this.paramMemory.keys()) {
+          if (key.startsWith(prefix)) {
+            this.paramMemory.delete(key);
+          }
+        }
+      }
+    }
 
     // Clear active model if its owning library was removed or its path changed
     if (this.activeModel) {
@@ -398,11 +519,31 @@ class StudioState {
   }
 
   async selectModel(modelId: string): Promise<void> {
+    // Save unsaved edits for the outgoing model before switching
+    if (
+      this.activeModelId &&
+      this.activeModelId !== modelId &&
+      this.activeModel &&
+      !this.modelLoadError
+    ) {
+      if (this.paramsModified) {
+        this.paramMemory.set(this.activeModelId, {
+          params: deepClone(this.params),
+          selectedPresetKey: this.selectedPresetKey,
+        });
+      } else {
+        this.paramMemory.delete(this.activeModelId);
+      }
+    }
+
     const isDifferentModel = this.activeModelId !== modelId;
     this.activeModelId = modelId;
     this.modelLoading = true;
     this.modelLoadError = '';
     this.modelLoadTraceback = '';
+    this.lastExportPath = '';
+    this.exportFilenameEdited = false;
+    this.pendingRender = null;
     this.cancelPendingRender();
 
     try {
@@ -414,7 +555,27 @@ class StudioState {
         this.defaults = {};
         this.params = {};
         this.presets = [];
+        this.defaultPresetKey = '';
+        this.hasMesh = false;
+        this.pendingRender = null;
+        this.viewport?.clear();
         this.modelLoadError = resp.error || 'Failed to load model schema';
+        this.modelLoadTraceback = resp.traceback || '';
+        return;
+      }
+
+      if (resp.model.kind === 'error') {
+        this.activeModel = resp.model;
+        this.fields = [];
+        this.defaults = {};
+        this.params = {};
+        this.presets = [];
+        this.defaultPresetKey = '';
+        this.hasMesh = false;
+        this.pendingRender = null;
+        this.viewport?.clear();
+        this.modelLoadError =
+          resp.error || resp.model.parse_error || 'Failed to parse model script';
         this.modelLoadTraceback = resp.traceback || '';
         return;
       }
@@ -426,29 +587,56 @@ class StudioState {
       this.presets = resp.presets ?? [];
       this.defaultPresetKey = resp.default_preset_key ?? '';
 
-      const pinned = this.defaultPresetKey
-        ? this.presets.find((p) => p.key === this.defaultPresetKey)
-        : undefined;
-      if (pinned) {
-        this.selectedPresetKey = pinned.key;
+      const mem = this.paramMemory.get(modelId);
+      if (mem) {
+        const memPreset =
+          mem.selectedPresetKey === 'default' ||
+          this.presets.some((p) => p.key === mem.selectedPresetKey)
+            ? mem.selectedPresetKey
+            : this.defaultPresetKey && this.presets.some((p) => p.key === this.defaultPresetKey)
+              ? this.defaultPresetKey
+              : 'default';
+        this.selectedPresetKey = memPreset;
         this.params = normalizeParamsWithFields(
-          mergeWithDefaults(this.defaults, pinned.params),
+          mergeWithDefaults(this.defaults, mem.params),
           this.fields
         );
       } else {
-        this.selectedPresetKey = 'default';
-        this.params = normalizeParamsWithFields(deepClone(this.defaults), this.fields);
+        const pinned = this.defaultPresetKey
+          ? this.presets.find((p) => p.key === this.defaultPresetKey)
+          : undefined;
+        if (pinned) {
+          this.selectedPresetKey = pinned.key;
+          this.params = normalizeParamsWithFields(
+            mergeWithDefaults(this.defaults, pinned.params),
+            this.fields
+          );
+        } else {
+          this.selectedPresetKey = 'default';
+          this.params = normalizeParamsWithFields(deepClone(this.defaults), this.fields);
+        }
       }
 
       const stemFallback = resp.model.local_id?.split('/').pop() || modelId;
       this.exportFilename = stemFallback;
+      this.exportFilenameEdited = false;
       this.lastRenderedKey = '';
       this.modelLoading = false;
 
       await this.triggerRender(isDifferentModel, true);
     } catch (err) {
       if (this.activeModelId !== modelId) return;
+      this.activeModel = null;
+      this.fields = [];
+      this.defaults = {};
+      this.params = {};
+      this.presets = [];
+      this.defaultPresetKey = '';
+      this.hasMesh = false;
+      this.pendingRender = null;
+      this.viewport?.clear();
       this.modelLoadError = err instanceof Error ? err.message : String(err);
+      this.modelLoadTraceback = err instanceof ApiRequestError ? (err.traceback ?? '') : '';
     } finally {
       if (this.activeModelId === modelId) {
         this.modelLoading = false;
@@ -459,14 +647,21 @@ class StudioState {
   selectPreset(presetKey: string): void {
     const found = this.presets.find((p) => p.key === presetKey);
     this.selectedPresetKey = found ? found.key : 'default';
+    this.exportFilenameEdited = false;
     const next = found
       ? mergeWithDefaults(this.defaults, found.params)
       : deepClone(this.defaults);
     this.params = normalizeParamsWithFields(next, this.fields);
+    if (this.activeModelId) {
+      this.paramMemory.delete(this.activeModelId);
+    }
     void this.triggerRender(false);
   }
 
   resetParams(): void {
+    if (this.activeModelId) {
+      this.paramMemory.delete(this.activeModelId);
+    }
     this.selectPreset(this.selectedPresetKey);
   }
 
@@ -513,6 +708,19 @@ class StudioState {
     }
   }
 
+  async cancelActiveBuild(): Promise<void> {
+    this.latestRenderSeq++;
+    this.cancelPendingRender();
+    this.rendering = false;
+    this.buildStartedAt = null;
+    try {
+      await api.cancelRender();
+    } catch {
+      // ignore cancel errors if worker already stopped
+    }
+    this.status = { kind: 'message', message: 'Build cancelled' };
+  }
+
   async triggerRender(resetCamera: boolean, force = false): Promise<void> {
     const modelId = this.activeModelId;
     if (!modelId) return;
@@ -530,6 +738,7 @@ class StudioState {
         this.renderAbort = null;
         this.latestRenderSeq++;
         this.rendering = false;
+        this.buildStartedAt = null;
       }
       return;
     }
@@ -542,6 +751,7 @@ class StudioState {
     const abort = new AbortController();
     this.renderAbort = abort;
     this.rendering = true;
+    this.buildStartedAt = Date.now();
 
     try {
       const resp = await api.renderModel(modelId, paramsSnapshot, abort.signal);
@@ -553,6 +763,7 @@ class StudioState {
 
       if (!resp.ok) {
         this.lastRenderedKey = '';
+        this.pendingRender = null;
         this.status = {
           kind: 'error',
           error: resp.error || 'Model build failed',
@@ -562,13 +773,18 @@ class StudioState {
       }
 
       this.lastRenderedKey = renderKey;
-      if (resp.export_filename) {
+      if (resp.export_filename && !this.exportFilenameEdited) {
         this.exportFilename = resp.export_filename;
       }
 
-      if (resp.shapes && this.viewport) {
-        this.hasMesh = true;
-        this.viewport.renderShapes(modelId, resp.shapes, resetCamera);
+      if (resp.shapes) {
+        if (this.viewport) {
+          this.pendingRender = null;
+          this.hasMesh = true;
+          this.viewport.renderShapes(modelId, resp.shapes, resetCamera);
+        } else {
+          this.pendingRender = { modelId, shapes: resp.shapes, resetCamera };
+        }
       }
 
       this.status = {
@@ -583,14 +799,17 @@ class StudioState {
       if (this.activeModelId !== modelId) return;
       if (this.makeRenderKey(modelId, this.params) !== renderKey) return;
       this.lastRenderedKey = '';
+      this.pendingRender = null;
       this.status = {
         kind: 'error',
         error: err instanceof Error ? err.message : String(err),
+        traceback: err instanceof ApiRequestError ? err.traceback : undefined,
       };
     } finally {
       if (seq === this.latestRenderSeq) {
         this.renderAbort = null;
         this.rendering = false;
+        this.buildStartedAt = null;
       }
     }
   }
@@ -625,6 +844,7 @@ class StudioState {
     if (resp.preset_save_scope) {
       this.config = { ...this.config, preset_save_scope: resp.preset_save_scope };
     }
+    this.paramMemory.delete(modelId);
     return {
       key: resp.selected_key ?? '',
       message: `Saved preset "${label.trim()}"`,
@@ -676,6 +896,7 @@ class StudioState {
         this.selectedPresetKey = 'default';
         this.params = normalizeParamsWithFields(deepClone(this.defaults), this.fields);
       }
+      this.paramMemory.delete(modelId);
       void this.triggerRender(false);
     }
   }
@@ -762,21 +983,38 @@ class StudioState {
       this.modelDescription = schemaResp.description ?? '';
       this.fields = schemaResp.fields ?? [];
       this.defaults = deepClone(schemaResp.defaults ?? {});
-      this.params = deepClone(schemaResp.defaults ?? {});
+      this.params = normalizeParamsWithFields(deepClone(schemaResp.defaults ?? {}), this.fields);
       this.presets = schemaResp.presets ?? [];
+      this.defaultPresetKey = schemaResp.default_preset_key ?? '';
       this.selectedPresetKey = 'default';
       this.lastRenderedKey = '';
+      this.paramMemory.delete(modelId);
       void this.triggerRender(false, true);
     }
     return resp;
   }
 
-  async exportActiveModel(format: ExportFormat): Promise<void> {
+  async exportActiveModel(
+    format: ExportFormat,
+    options?: {
+      quality?: ExportQuality;
+      linear_deflection?: number;
+      angular_deflection?: number;
+      filename?: string;
+    }
+  ): Promise<void> {
     const modelId = this.activeModelId;
     if (!modelId) return;
     this.exporting = true;
+    this.lastExportPath = '';
     try {
-      const resp = await api.exportModel(modelId, this.params, format, this.hasDesktop);
+      const quality = options?.quality ?? this.exportQuality ?? this.config.export_quality ?? 'standard';
+      const filename = options?.filename ?? (this.exportFilename.trim() || undefined);
+      const resp = await api.exportModel(modelId, this.params, format, this.hasDesktop, {
+        ...options,
+        quality,
+        ...(filename ? { filename } : {}),
+      });
       if (!resp.ok) {
         this.status = {
           kind: 'error',
@@ -786,6 +1024,9 @@ class StudioState {
       } else if (resp.cancelled) {
         this.status = { kind: 'message', message: 'Export cancelled' };
       } else {
+        if (this.hasDesktop && resp.path) {
+          this.lastExportPath = resp.path;
+        }
         const name = resp.path ? resp.path.split(/[\\/]/).pop() || resp.path : `${modelId}.${format}`;
         const kb = Math.ceil((resp.size ?? 0) / 1024);
         this.status = { kind: 'message', message: `Exported ${name} (${kb} KB)` };
@@ -794,9 +1035,112 @@ class StudioState {
       this.status = {
         kind: 'error',
         error: err instanceof Error ? err.message : String(err),
+        traceback: err instanceof ApiRequestError ? err.traceback : undefined,
       };
     } finally {
       this.exporting = false;
+    }
+  }
+
+  async scaffoldDemo(targetDir?: string): Promise<ScaffoldResponse> {
+    const resp = await api.scaffoldModel({
+      mode: 'demo',
+      ...(targetDir ? { target_dir: targetDir } : {}),
+    });
+    if (!resp.ok) {
+      throw new Error(resp.error || 'Failed to scaffold demo project');
+    }
+    if (resp.config) {
+      await this.applySavedConfig(resp.config);
+    } else {
+      await this.refreshModels();
+    }
+    if (resp.model_id) {
+      await this.selectModel(resp.model_id);
+    } else if (!this.activeModelId && this.models.length > 0) {
+      await this.selectModel(this.models[0].id);
+    }
+    return resp;
+  }
+
+  async scaffoldNewModel(payload: Omit<ScaffoldRequest, 'mode'>): Promise<ScaffoldResponse> {
+    const resp = await api.scaffoldModel({
+      mode: 'new',
+      ...payload,
+    });
+    if (!resp.ok) {
+      throw new Error(resp.error || 'Failed to create new model');
+    }
+    if (resp.config) {
+      await this.applySavedConfig(resp.config);
+    } else {
+      await this.refreshModels();
+    }
+    if (resp.model_id) {
+      await this.selectModel(resp.model_id);
+    }
+    return resp;
+  }
+
+  async openActiveModelInEditor(): Promise<void> {
+    const targetPath = this.activeModel?.py_path || this.activeModel?.path;
+    if (!this.hasDesktop || !targetPath) return;
+    try {
+      const resp = await api.openInEditor(targetPath);
+      if (!resp.ok) {
+        this.status = { kind: 'error', error: resp.error || 'Failed to open model in editor' };
+      }
+    } catch (err) {
+      this.status = {
+        kind: 'error',
+        error: err instanceof Error ? err.message : String(err),
+      };
+    }
+  }
+
+  async revealActiveModel(): Promise<void> {
+    const targetPath = this.activeModel?.py_path || this.activeModel?.path;
+    if (!this.hasDesktop || !targetPath) return;
+    try {
+      const resp = await api.revealFile(targetPath);
+      if (!resp.ok) {
+        this.status = { kind: 'error', error: resp.error || 'Failed to reveal model file' };
+      }
+    } catch (err) {
+      this.status = {
+        kind: 'error',
+        error: err instanceof Error ? err.message : String(err),
+      };
+    }
+  }
+
+  async revealLastExport(): Promise<void> {
+    if (!this.hasDesktop || !this.lastExportPath) return;
+    try {
+      const resp = await api.revealFile(this.lastExportPath);
+      if (!resp.ok) {
+        this.status = { kind: 'error', error: resp.error || 'Failed to reveal exported file' };
+      }
+    } catch (err) {
+      this.status = {
+        kind: 'error',
+        error: err instanceof Error ? err.message : String(err),
+      };
+    }
+  }
+
+  async openLastExportInSlicer(): Promise<void> {
+    if (!this.hasDesktop || !this.lastExportPath) return;
+    try {
+      const resp = await api.openInSlicer(this.lastExportPath);
+      if (!resp.ok) {
+        this.status = { kind: 'error', error: resp.error || 'Failed to open in slicer' };
+      }
+    } catch (err) {
+      this.status = {
+        kind: 'error',
+        error: err instanceof Error ? err.message : String(err),
+      };
     }
   }
 
@@ -809,46 +1153,104 @@ class StudioState {
     }, 2000);
   }
 
-  private async handleFileChanged(): Promise<void> {
+  handleFileChanged(changedPath = ''): Promise<void> {
     this.flashReloadBadge();
-    await this.refreshModels();
 
-    const modelId = this.activeModelId;
-    if (!modelId) return;
+    if (this.fileReloadInFlight) {
+      if (this.queuedFileChangedPath === null) {
+        this.queuedFileChangedPath = changedPath;
+      } else if (changedPath === '' || this.queuedFileChangedPath === '') {
+        this.queuedFileChangedPath = '';
+      } else if (this.queuedFileChangedPath !== changedPath) {
+        this.queuedFileChangedPath = '';
+      }
+      return this.fileReloadInFlight;
+    }
 
-    const previousParams = deepClone(this.params);
-    try {
-      const resp = await api.getModel(modelId);
-      if (this.activeModelId !== modelId) return;
-      if (!resp.ok || !resp.model) {
-        this.status = {
-          kind: 'error',
-          error: resp.error || 'Failed to reload model schema',
-          traceback: resp.traceback,
-        };
-        return;
+    let promise!: Promise<void>;
+    promise = (async () => {
+      try {
+        await this.runFileChangedLoop(changedPath);
+      } finally {
+        if (this.fileReloadInFlight === promise) {
+          this.fileReloadInFlight = null;
+        }
+      }
+    })();
+    this.fileReloadInFlight = promise;
+    return promise;
+  }
+
+  private async runFileChangedLoop(initialPath: string): Promise<void> {
+    let nextPath: string | null = initialPath;
+
+    while (nextPath !== null) {
+      const currentPath = nextPath;
+      const seq = ++this.fileReloadSeq;
+
+      await this.refreshModels();
+      if (seq !== this.fileReloadSeq) {
+        nextPath = this.queuedFileChangedPath;
+        this.queuedFileChangedPath = null;
+        continue;
       }
 
-      this.activeModel = resp.model;
-      this.modelDescription = resp.description ?? '';
-      this.fields = resp.fields ?? [];
-      this.defaults = deepClone(resp.defaults ?? {});
-      this.params = normalizeParamsWithFields(
-        mergeWithDefaults(this.defaults, previousParams),
-        this.fields
-      );
-      this.presets = resp.presets ?? [];
-      this.modelLoadError = '';
-      this.modelLoadTraceback = '';
-      this.lastRenderedKey = '';
+      const modelId = this.activeModelId;
+      if (modelId && shouldReloadActiveModel(currentPath, this.activeModel, this.models)) {
+        const previousParams = deepClone(this.params);
+        try {
+          const resp = await api.getModel(modelId);
+          if (this.activeModelId === modelId && seq === this.fileReloadSeq) {
+            if (!resp.ok || !resp.model) {
+              this.status = {
+                kind: 'error',
+                error: resp.error || 'Failed to reload model schema',
+                traceback: resp.traceback,
+              };
+            } else if (resp.model.kind === 'error') {
+              this.activeModel = resp.model;
+              this.status = {
+                kind: 'error',
+                error: resp.error || resp.model.parse_error || 'Failed to parse model script',
+                traceback: resp.traceback,
+              };
+            } else {
+              this.activeModel = resp.model;
+              this.modelDescription = resp.description ?? '';
+              this.fields = resp.fields ?? [];
+              this.defaults = deepClone(resp.defaults ?? {});
+              this.params = normalizeParamsWithFields(
+                mergeWithDefaults(this.defaults, previousParams),
+                this.fields
+              );
+              this.presets = resp.presets ?? [];
+              this.defaultPresetKey = resp.default_preset_key ?? '';
+              if (
+                this.selectedPresetKey !== 'default' &&
+                !this.presets.some((p) => p.key === this.selectedPresetKey)
+              ) {
+                this.selectedPresetKey = 'default';
+              }
+              this.modelLoadError = '';
+              this.modelLoadTraceback = '';
+              this.lastRenderedKey = '';
 
-      await this.triggerRender(false, true);
-    } catch (err) {
-      if (this.activeModelId !== modelId) return;
-      this.status = {
-        kind: 'error',
-        error: err instanceof Error ? err.message : String(err),
-      };
+              await this.triggerRender(false, true);
+            }
+          }
+        } catch (err) {
+          if (this.activeModelId === modelId && seq === this.fileReloadSeq) {
+            this.status = {
+              kind: 'error',
+              error: err instanceof Error ? err.message : String(err),
+              traceback: err instanceof ApiRequestError ? err.traceback : undefined,
+            };
+          }
+        }
+      }
+
+      nextPath = this.queuedFileChangedPath;
+      this.queuedFileChangedPath = null;
     }
   }
 
@@ -859,6 +1261,9 @@ class StudioState {
       const resp = await api.getPresets(modelId);
       if (this.activeModelId === modelId && resp.ok) {
         this.presets = resp.presets;
+        if (resp.default_preset_key !== undefined) {
+          this.defaultPresetKey = resp.default_preset_key;
+        }
       }
     } catch {
       // ignore transient errors

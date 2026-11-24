@@ -4,10 +4,27 @@
 
   interface Props {
     status: StatusState;
+    rendering?: boolean;
+    buildStartedAt?: number | null;
+    onCancelBuild?: () => void;
   }
 
-  let { status }: Props = $props();
+  let { status, rendering = false, buildStartedAt = null, onCancelBuild }: Props = $props();
   let copied = $state(false);
+  let elapsedMs = $state(0);
+
+  $effect(() => {
+    if (!rendering) {
+      elapsedMs = 0;
+      return;
+    }
+    const start = buildStartedAt ?? Date.now();
+    elapsedMs = Math.max(0, Date.now() - start);
+    const timer = setInterval(() => {
+      elapsedMs = Math.max(0, Date.now() - start);
+    }, 100);
+    return () => clearInterval(timer);
+  });
 
   async function copyError() {
     if (status.kind !== 'error') return;
@@ -30,7 +47,25 @@
 </script>
 
 <div class="text-xs">
-  {#if status.kind === 'error'}
+  {#if rendering}
+    <div class="flex items-center justify-between gap-2 text-xs">
+      <div class="flex items-center gap-1.5 min-w-0">
+        <span class="loading loading-spinner loading-xs text-primary shrink-0"></span>
+        <span class="font-mono text-[11px] opacity-85 truncate">
+          Building… ({(elapsedMs / 1000).toFixed(1)}s)
+        </span>
+      </div>
+      {#if onCancelBuild}
+        <button
+          type="button"
+          class="btn btn-xs btn-ghost text-error h-5 min-h-0 px-1.5 shrink-0"
+          onclick={onCancelBuild}
+        >
+          Cancel
+        </button>
+      {/if}
+    </div>
+  {:else if status.kind === 'error'}
     <Alert variant="error" title="Build Error" class="select-text">
       {#snippet action()}
         <button

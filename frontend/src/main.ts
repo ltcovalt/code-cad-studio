@@ -1,5 +1,4 @@
 import { mount } from 'svelte';
-import 'three-cad-viewer/css';
 import './styles.css';
 import App from './App.svelte';
 

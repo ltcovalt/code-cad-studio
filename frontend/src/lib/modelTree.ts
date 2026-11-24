@@ -36,6 +36,8 @@ function modelMatchesTokens(model: ModelInfo, tokens: string[]): boolean {
     model.name,
     model.id,
     model.local_id,
+    model.rel_path,
+    model.parse_error ?? '',
     model.description,
     model.library_name,
     model.library_id,

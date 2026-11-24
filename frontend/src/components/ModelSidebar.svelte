@@ -2,6 +2,7 @@
   import { studio } from '../lib/studioState.svelte';
   import Alert from './Alert.svelte';
   import ModelTreeNodes from './ModelTreeNodes.svelte';
+  import NewModelModal from './NewModelModal.svelte';
 
   interface Props {
     style?: string;
@@ -9,17 +10,34 @@
 
   let { style = '' }: Props = $props();
 
+  let newModelOpen = $state(false);
+  let scaffoldingDemo = $state(false);
+  let demoError = $state('');
+
   let hasExpandable = $derived(studio.expandableFolderKeys.length > 0);
   let allCollapsed = $derived.by(() => {
     const keys = studio.expandableFolderKeys;
     if (keys.length === 0) return false;
     return keys.every((k) => Boolean(studio.collapsedFolders[k]));
   });
+
+  async function handleCreateDemo() {
+    if (scaffoldingDemo) return;
+    scaffoldingDemo = true;
+    demoError = '';
+    try {
+      await studio.scaffoldDemo();
+    } catch (err) {
+      demoError = err instanceof Error ? err.message : String(err);
+    } finally {
+      scaffoldingDemo = false;
+    }
+  }
 </script>
 
 <section
   id="models-pane"
-  class="flex flex-col min-h-0 min-w-0 overflow-hidden shrink-0"
+  class="bg-base-100 flex flex-col w-full h-full min-h-0 min-w-0 overflow-hidden"
   {style}
 >
   <div class="p-2.5 pb-2 border-b border-base-300/70 shrink-0 space-y-2">
@@ -28,6 +46,33 @@
         Explorer
       </span>
       <div class="flex items-center gap-0.5 shrink-0">
+        {#if studio.hasLibraries}
+          <button
+            type="button"
+            class="btn btn-ghost btn-xs btn-square"
+            title="New Model"
+            aria-label="New Model"
+            onclick={() => (newModelOpen = true)}
+          >
+            <svg
+              xmlns="http://www.w3.org/2000/svg"
+              class="h-3.5 w-3.5"
+              fill="none"
+              viewBox="0 0 24 24"
+              stroke="currentColor"
+              stroke-width="2"
+              stroke-linecap="round"
+              stroke-linejoin="round"
+              aria-hidden="true"
+            >
+              <path d="M15 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V7Z" />
+              <path d="M14 2v4a2 2 0 0 0 2 2h4" />
+              <path d="M9 15h6" />
+              <path d="M12 18v-6" />
+            </svg>
+          </button>
+        {/if}
+
         {#if hasExpandable && !studio.searchQuery.trim()}
           <button
             type="button"
@@ -110,7 +155,9 @@
       </div>
     </div>
     <input
+      id="model-search-input"
       type="search"
+      aria-label="Filter models and folders"
       bind:value={studio.searchQuery}
       placeholder={studio.config.libraries.length > 1
         ? 'Filter libraries, folders, models...'
@@ -121,35 +168,66 @@
 
   <div class="flex-1 overflow-y-auto p-2">
     {#if !studio.hasLibraries}
-      <div class="text-xs opacity-80 py-2 space-y-2">
+      <div class="text-xs opacity-85 py-2 space-y-2">
         <div>No model libraries configured yet.</div>
         <div class="flex flex-wrap items-center gap-2">
           <button
             type="button"
             class="btn btn-xs btn-primary"
+            disabled={scaffoldingDemo}
+            onclick={handleCreateDemo}
+          >
+            {#if scaffoldingDemo}
+              <span class="loading loading-spinner loading-xs"></span>
+              Creating…
+            {:else}
+              Create Demo Project
+            {/if}
+          </button>
+          <button
+            type="button"
+            class="btn btn-xs btn-ghost border border-base-300"
+            disabled={scaffoldingDemo}
             onclick={() => studio.openOnboarding(1)}
           >
-            Run Setup Wizard
+            Setup Wizard
           </button>
           <button
             type="button"
             class="link link-hover text-xs opacity-75"
+            disabled={scaffoldingDemo}
             onclick={() => (studio.settingsOpen = true)}
           >
-            Open Settings
+            Settings
           </button>
         </div>
+        {#if demoError}
+          <Alert variant="error" compact>{demoError}</Alert>
+        {/if}
       </div>
     {:else if studio.modelsError}
       <Alert variant="error" compact>{studio.modelsError}</Alert>
     {:else if studio.modelsLoading && studio.models.length === 0}
       <div class="text-xs opacity-60 py-2">Loading models...</div>
     {:else if studio.modelTree.length === 0}
-      <div class="text-xs opacity-60 py-2">
-        No models found{#if studio.searchQuery.trim()} matching "{studio.searchQuery.trim()}"{/if}.
+      <div class="text-xs opacity-70 py-2 space-y-2">
+        <div>
+          No models found{#if studio.searchQuery.trim()} matching "{studio.searchQuery.trim()}"{/if}.
+        </div>
+        {#if !studio.searchQuery.trim()}
+          <button
+            type="button"
+            class="btn btn-xs btn-outline"
+            onclick={() => (newModelOpen = true)}
+          >
+            + New Model
+          </button>
+        {/if}
       </div>
     {:else}
       <ModelTreeNodes nodes={studio.modelTree} />
     {/if}
   </div>
 </section>
+
+<NewModelModal open={newModelOpen} onClose={() => (newModelOpen = false)} />

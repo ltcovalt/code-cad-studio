@@ -1,5 +1,11 @@
 import type { ParamField, ParamsRecord } from './types';
 
+const DANGEROUS_KEYS = new Set(['__proto__', 'constructor', 'prototype']);
+
+function hasOwn(obj: object, key: string): boolean {
+  return Object.prototype.hasOwnProperty.call(obj, key);
+}
+
 export function isPlainObject(value: unknown): value is ParamsRecord {
   return typeof value === 'object' && value !== null && !Array.isArray(value);
 }
@@ -18,7 +24,7 @@ export function paramsEqual(a: unknown, b: unknown): boolean {
     const keysA = Object.keys(a);
     const keysB = Object.keys(b);
     if (keysA.length !== keysB.length) return false;
-    return keysA.every((k) => k in b && paramsEqual(a[k], b[k]));
+    return keysA.every((k) => hasOwn(b, k) && paramsEqual(a[k], b[k]));
   }
   return false;
 }
@@ -30,6 +36,7 @@ export function deepClone<T>(value: T): T {
   if (isPlainObject(value)) {
     const out: ParamsRecord = {};
     for (const [k, v] of Object.entries(value)) {
+      if (DANGEROUS_KEYS.has(k)) continue;
       out[k] = deepClone(v);
     }
     return out as unknown as T;
@@ -44,7 +51,7 @@ export function deepClone<T>(value: T): T {
 export function mergeWithDefaults(defaults: ParamsRecord, overrides: ParamsRecord): ParamsRecord {
   const merged = deepClone(defaults);
   for (const [key, val] of Object.entries(overrides)) {
-    if (!(key in merged)) continue;
+    if (DANGEROUS_KEYS.has(key) || !hasOwn(merged, key)) continue;
     const defVal = merged[key];
     if (isPlainObject(defVal) && isPlainObject(val)) {
       merged[key] = mergeWithDefaults(defVal, val);
@@ -62,14 +69,17 @@ function parseArrayIndex(part: string): number | null {
 }
 
 export function getParamByPath(root: ParamsRecord, path: string): unknown {
+  if (!path) return undefined;
   const parts = path.split('.');
   let curr: unknown = root;
   for (const part of parts) {
+    if (DANGEROUS_KEYS.has(part)) return undefined;
     if (Array.isArray(curr)) {
       const idx = parseArrayIndex(part);
       if (idx === null || idx < 0 || idx >= curr.length) return undefined;
       curr = curr[idx];
     } else if (isPlainObject(curr)) {
+      if (!hasOwn(curr, part)) return undefined;
       curr = curr[part];
     } else {
       return undefined;
@@ -79,8 +89,13 @@ export function getParamByPath(root: ParamsRecord, path: string): unknown {
 }
 
 export function setParamByPath(root: ParamsRecord, path: string, value: unknown): ParamsRecord {
-  const parts = path.split('.');
   const next: ParamsRecord = { ...root };
+  if (!path) return next;
+  const parts = path.split('.');
+  if (parts.some((p) => !p || DANGEROUS_KEYS.has(p))) {
+    return next;
+  }
+
   let curr: ParamsRecord | unknown[] = next;
   for (let i = 0; i < parts.length - 1; i++) {
     const part = parts[i];
@@ -100,7 +115,7 @@ export function setParamByPath(root: ParamsRecord, path: string, value: unknown)
       curr[idx] = clonedChild;
       curr = clonedChild;
     } else {
-      const existing: unknown = curr[part];
+      const existing: unknown = hasOwn(curr, part) ? curr[part] : undefined;
       const clonedChild: ParamsRecord | unknown[] = nextIsIndex
         ? Array.isArray(existing)
           ? [...existing]
@@ -148,7 +163,8 @@ export function normalizeParamsWithFields(
 ): ParamsRecord {
   const out: ParamsRecord = { ...params };
   for (const f of fields) {
-    const val = out[f.name];
+    if (DANGEROUS_KEYS.has(f.name)) continue;
+    const val = hasOwn(out, f.name) ? out[f.name] : undefined;
     if (f.type === 'group' && f.children && isPlainObject(val)) {
       out[f.name] = normalizeParamsWithFields(val, f.children);
     } else if (
@@ -183,7 +199,12 @@ export function evaluateWhen(
 ): boolean {
   if (!when) return true;
   for (const [key, expected] of Object.entries(when)) {
-    const actual = key.includes('.') ? getParamByPath(rootParams, key) : groupParams[key];
+    if (DANGEROUS_KEYS.has(key)) continue;
+    const actual = key.includes('.')
+      ? getParamByPath(rootParams, key)
+      : hasOwn(groupParams, key)
+        ? groupParams[key]
+        : undefined;
     if (Array.isArray(expected)) {
       if (!expected.includes(actual)) return false;
     } else if (actual !== expected) {
