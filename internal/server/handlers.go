@@ -412,6 +412,23 @@ func firstLibraryPath(cfg config.Config) string {
 	return ""
 }
 
+func isDialogCancelError(err error) bool {
+	if err == nil {
+		return false
+	}
+	msg := strings.ToLower(strings.TrimSpace(err.Error()))
+	switch msg {
+	case "cancelled", "canceled", "cancelled by user", "canceled by user":
+		return true
+	}
+	return strings.Contains(msg, "cancelled by user") ||
+		strings.Contains(msg, "canceled by user") ||
+		strings.Contains(msg, "user cancelled") ||
+		strings.Contains(msg, "user canceled") ||
+		strings.HasSuffix(msg, ": cancelled") ||
+		strings.HasSuffix(msg, ": canceled")
+}
+
 func (s *Server) handleDialogProject(w http.ResponseWriter, r *http.Request) {
 	if s.dialogs == nil {
 		writeError(w, http.StatusBadRequest, "desktop_unavailable", "Native dialogs are unavailable in server mode")
@@ -430,6 +447,13 @@ func (s *Server) handleDialogProject(w http.ResponseWriter, r *http.Request) {
 	startDir = nearestExistingDir(startDir)
 	dir, err := s.dialogs.ChooseDirectory("Select Model Library Folder", startDir)
 	if err != nil {
+		if isDialogCancelError(err) {
+			writeJSON(w, http.StatusOK, map[string]any{
+				"path":      "",
+				"cancelled": true,
+			})
+			return
+		}
 		writeError(w, http.StatusInternalServerError, "dialog_error", err.Error())
 		return
 	}
@@ -457,6 +481,13 @@ func (s *Server) handleDialogPython(w http.ResponseWriter, r *http.Request) {
 	startDir = nearestExistingDir(startDir)
 	p, err := s.dialogs.ChooseFile("Select Python Interpreter", startDir)
 	if err != nil {
+		if isDialogCancelError(err) {
+			writeJSON(w, http.StatusOK, map[string]any{
+				"path":      "",
+				"cancelled": true,
+			})
+			return
+		}
 		writeError(w, http.StatusInternalServerError, "dialog_error", err.Error())
 		return
 	}
@@ -485,6 +516,13 @@ func (s *Server) handleDialogExportDir(w http.ResponseWriter, r *http.Request) {
 	startDir = nearestExistingDir(startDir)
 	dir, err := s.dialogs.ChooseDirectory("Select Default Export Folder", startDir)
 	if err != nil {
+		if isDialogCancelError(err) {
+			writeJSON(w, http.StatusOK, map[string]any{
+				"path":      "",
+				"cancelled": true,
+			})
+			return
+		}
 		writeError(w, http.StatusInternalServerError, "dialog_error", err.Error())
 		return
 	}
@@ -543,19 +581,14 @@ func (s *Server) handleCancelRender(w http.ResponseWriter, r *http.Request) {
 }
 
 func defaultDemoTargetDir() (string, error) {
-	home, err := os.UserHomeDir()
-	if err != nil || strings.TrimSpace(home) == "" {
+	baseDir := setup.DefaultLibrariesBaseDir()
+	if strings.TrimSpace(baseDir) == "" {
 		return "", fmt.Errorf("cannot determine home directory for demo project")
 	}
-	baseDir := home
-	docsDir := filepath.Join(home, "Documents")
-	if st, statErr := os.Stat(docsDir); statErr == nil && st.IsDir() {
-		baseDir = docsDir
-	}
 	for i := 1; ; i++ {
-		name := "code-cad-demo"
+		name := "demo"
 		if i > 1 {
-			name = fmt.Sprintf("code-cad-demo-%d", i)
+			name = fmt.Sprintf("demo-%d", i)
 		}
 		cand := filepath.Join(baseDir, name)
 		st, statErr := os.Stat(cand)
@@ -943,7 +976,7 @@ func (s *Server) handleScaffoldModel(w http.ResponseWriter, r *http.Request) {
 		cfg, err := s.cfgStore.Update(func(c *config.Config) {
 			found := false
 			for _, lib := range c.Libraries {
-				if filepath.Clean(lib.Path) == filepath.Clean(targetDir) {
+				if config.SamePath(lib.Path, targetDir) {
 					found = true
 					break
 				}
@@ -963,7 +996,7 @@ func (s *Server) handleScaffoldModel(w http.ResponseWriter, r *http.Request) {
 
 		var libID string
 		for _, lib := range cfg.Libraries {
-			if filepath.Clean(lib.Path) == filepath.Clean(targetDir) {
+			if config.SamePath(lib.Path, targetDir) {
 				libID = lib.ID
 				break
 			}
@@ -1623,6 +1656,10 @@ func (s *Server) handleExportModel(w http.ResponseWriter, r *http.Request) {
 
 	outPath, err := s.dialogs.SaveFile("Export "+strings.ToUpper(fmtName), exportDir, defaultFile, filterName, filterPattern)
 	if err != nil {
+		if isDialogCancelError(err) {
+			writeJSON(w, http.StatusOK, map[string]any{"ok": true, "cancelled": true})
+			return
+		}
 		writeError(w, http.StatusInternalServerError, "dialog_error", err.Error())
 		return
 	}

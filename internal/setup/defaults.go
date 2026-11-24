@@ -165,6 +165,22 @@ func countLikelyModels(root string) int {
 	return count
 }
 
+// DefaultLibrariesBaseDir returns the consolidated managed parent directory for
+// Studio-downloaded and scaffolded model libraries: <Documents>/code-cad-studio
+// when ~/Documents exists, or <home>/code-cad-studio otherwise.
+func DefaultLibrariesBaseDir() string {
+	home, err := os.UserHomeDir()
+	if err != nil || strings.TrimSpace(home) == "" {
+		return ""
+	}
+	baseDir := home
+	docsDir := filepath.Join(home, "Documents")
+	if st, err := os.Stat(docsDir); err == nil && st.IsDir() {
+		baseDir = docsDir
+	}
+	return filepath.Join(baseDir, config.AppDirName)
+}
+
 // Defaults computes OS-aware suggested download/venv locations and scans
 // common directories for existing build123d repositories.
 func Defaults() DefaultsResult {
@@ -182,15 +198,31 @@ func Defaults() DefaultsResult {
 		return res
 	}
 
-	// Scan common directories for an existing code-cad checkout
-	searchCandidates := []string{
+	baseDir := DefaultLibrariesBaseDir()
+
+	// Scan managed libraries directory and common directories for existing projects.
+	searchCandidates := []string{}
+	if baseDir != "" {
+		if entries, err := os.ReadDir(baseDir); err == nil {
+			for _, entry := range entries {
+				if strings.HasPrefix(entry.Name(), ".") {
+					continue
+				}
+				if entry.IsDir() || entry.Type()&os.ModeSymlink != 0 {
+					searchCandidates = append(searchCandidates, filepath.Join(baseDir, entry.Name()))
+				}
+			}
+		}
+	}
+	searchCandidates = append(searchCandidates,
 		filepath.Join(home, "Documents", "code-cad"),
 		filepath.Join(home, "code-cad"),
 		filepath.Join(home, "repos", "code-cad"),
+		filepath.Join(home, "Repos", "code-cad"),
 		filepath.Join(home, "Projects", "code-cad"),
 		filepath.Join(home, "projects", "code-cad"),
 		filepath.Join(home, "src", "code-cad"),
-	}
+	)
 
 	seen := map[string]struct{}{}
 	for _, cand := range searchCandidates {
@@ -198,32 +230,32 @@ func Defaults() DefaultsResult {
 		if !info.Exists || !info.IsDir || !info.HasModels {
 			continue
 		}
-		key := info.Path
-		if resolved, err := filepath.EvalSymlinks(info.Path); err == nil {
-			key = resolved
+		displayPath := info.Path
+		if resolved, err := filepath.EvalSymlinks(info.Path); err == nil && resolved != "" {
+			displayPath = resolved
+		}
+		key := filepath.Clean(displayPath)
+		if runtime.GOOS == "windows" {
+			key = strings.ToLower(key)
 		}
 		if _, dup := seen[key]; dup {
 			continue
 		}
 		seen[key] = struct{}{}
 		res.DetectedProjects = append(res.DetectedProjects, DetectedProject{
-			Path:       info.Path,
-			Name:       filepath.Base(info.Path),
+			Path:       displayPath,
+			Name:       filepath.Base(displayPath),
 			ModelCount: info.ModelCount,
 			HasVenv:    info.HasVenv,
 		})
 	}
 
-	baseDir := home
-	docsDir := filepath.Join(home, "Documents")
-	if st, err := os.Stat(docsDir); err == nil && st.IsDir() {
-		baseDir = docsDir
+	if baseDir != "" {
+		downloadDir := filepath.Join(baseDir, "code-cad")
+		if info := InspectProjectDir(downloadDir); info.Exists && !info.IsEmpty {
+			downloadDir = filepath.Join(baseDir, "code-cad-starter")
+		}
+		res.DefaultDownloadDir = downloadDir
 	}
-
-	downloadDir := filepath.Join(baseDir, "code-cad")
-	if info := InspectProjectDir(downloadDir); info.Exists && !info.IsEmpty {
-		downloadDir = filepath.Join(baseDir, "code-cad-starter")
-	}
-	res.DefaultDownloadDir = downloadDir
 	return res
 }

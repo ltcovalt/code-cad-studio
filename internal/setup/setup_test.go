@@ -72,14 +72,14 @@ func TestInspectProjectDirAndDefaults(t *testing.T) {
 	home := t.TempDir()
 	setTestHomeEnv(t, home)
 
-	// Fresh home with Documents folder -> suggests ~/Documents/code-cad as default download dir
+	// Fresh home with Documents folder -> suggests ~/Documents/code-cad-studio/code-cad as default download dir
 	docsDir := filepath.Join(home, "Documents")
 	if err := os.MkdirAll(docsDir, 0o755); err != nil {
 		t.Fatalf("mkdir Documents: %v", err)
 	}
 
 	def := Defaults()
-	wantDownload := filepath.Join(docsDir, "code-cad")
+	wantDownload := filepath.Join(docsDir, "code-cad-studio", "code-cad")
 	if def.DefaultDownloadDir != wantDownload {
 		t.Fatalf("DefaultDownloadDir = %q, want %q", def.DefaultDownloadDir, wantDownload)
 	}
@@ -138,10 +138,96 @@ func TestInspectProjectDirAndDefaults(t *testing.T) {
 		t.Fatalf("expected HasRequirements=true")
 	}
 
-	// Defaults should now detect ~/code-cad
+	// Defaults should now detect ~/code-cad with canonical resolved path
+	wantExisting := existing
+	if resolved, err := filepath.EvalSymlinks(existing); err == nil && resolved != "" {
+		wantExisting = resolved
+	}
 	def2 := Defaults()
-	if len(def2.DetectedProjects) != 1 || def2.DetectedProjects[0].Path != existing || def2.DetectedProjects[0].ModelCount != 3 {
-		t.Fatalf("expected detected project %q with 3 models, got %+v", existing, def2.DetectedProjects)
+	if len(def2.DetectedProjects) != 1 || def2.DetectedProjects[0].Path != wantExisting || def2.DetectedProjects[0].ModelCount != 3 {
+		t.Fatalf("expected detected project %q with 3 models, got %+v", wantExisting, def2.DetectedProjects)
+	}
+}
+
+func TestDefaultLibrariesBaseDirAndDefaultsDetection(t *testing.T) {
+	home := t.TempDir()
+	setTestHomeEnv(t, home)
+
+	// Without Documents folder -> falls back to <home>/code-cad-studio
+	wantFallbackBase := filepath.Join(home, "code-cad-studio")
+	if got := DefaultLibrariesBaseDir(); got != wantFallbackBase {
+		t.Fatalf("DefaultLibrariesBaseDir() without Documents = %q, want %q", got, wantFallbackBase)
+	}
+	defNoDocs := Defaults()
+	if defNoDocs.DefaultDownloadDir != filepath.Join(wantFallbackBase, "code-cad") {
+		t.Fatalf("DefaultDownloadDir without Documents = %q, want %q", defNoDocs.DefaultDownloadDir, filepath.Join(wantFallbackBase, "code-cad"))
+	}
+
+	// With Documents folder -> <home>/Documents/code-cad-studio
+	docsDir := filepath.Join(home, "Documents")
+	if err := os.MkdirAll(docsDir, 0o755); err != nil {
+		t.Fatalf("mkdir Documents: %v", err)
+	}
+	wantDocsBase := filepath.Join(docsDir, "code-cad-studio")
+	if got := DefaultLibrariesBaseDir(); got != wantDocsBase {
+		t.Fatalf("DefaultLibrariesBaseDir() with Documents = %q, want %q", got, wantDocsBase)
+	}
+	defDocs := Defaults()
+	if defDocs.DefaultDownloadDir != filepath.Join(wantDocsBase, "code-cad") {
+		t.Fatalf("DefaultDownloadDir = %q, want %q", defDocs.DefaultDownloadDir, filepath.Join(wantDocsBase, "code-cad"))
+	}
+
+	// Populate ~/Documents/code-cad-studio/code-cad (non-empty) -> fallback to code-cad-starter
+	managedStarter := filepath.Join(wantDocsBase, "code-cad")
+	if err := os.MkdirAll(filepath.Join(managedStarter, "models", "box"), 0o755); err != nil {
+		t.Fatalf("mkdir managed code-cad: %v", err)
+	}
+	if err := os.WriteFile(filepath.Join(managedStarter, "models", "box", "box.py"), []byte("# box\n"), 0o644); err != nil {
+		t.Fatalf("write box.py: %v", err)
+	}
+	// Add a second managed subdir (demo) inside DefaultLibrariesBaseDir
+	managedDemo := filepath.Join(wantDocsBase, "demo")
+	if err := os.MkdirAll(filepath.Join(managedDemo, "models", "spool"), 0o755); err != nil {
+		t.Fatalf("mkdir managed demo: %v", err)
+	}
+	if err := os.WriteFile(filepath.Join(managedDemo, "models", "spool", "spool.py"), []byte("# spool\n"), 0o644); err != nil {
+		t.Fatalf("write spool.py: %v", err)
+	}
+
+	// Create ~/Repos/code-cad (capital R) — Defaults() checks both repos/code-cad and Repos/code-cad;
+	// on Windows case-insensitive dedup + EvalSymlinks must keep only one entry with exact on-disk casing.
+	reposCheckout := filepath.Join(home, "Repos", "code-cad")
+	if err := os.MkdirAll(filepath.Join(reposCheckout, "models", "bracket"), 0o755); err != nil {
+		t.Fatalf("mkdir Repos/code-cad: %v", err)
+	}
+	if err := os.WriteFile(filepath.Join(reposCheckout, "models", "bracket", "bracket.py"), []byte("# bracket\n"), 0o644); err != nil {
+		t.Fatalf("write bracket.py: %v", err)
+	}
+
+	defPopulated := Defaults()
+	wantStarterFallback := filepath.Join(wantDocsBase, "code-cad-starter")
+	if defPopulated.DefaultDownloadDir != wantStarterFallback {
+		t.Fatalf("DefaultDownloadDir when code-cad non-empty = %q, want %q", defPopulated.DefaultDownloadDir, wantStarterFallback)
+	}
+
+	resolveOrSelf := func(p string) string {
+		if r, err := filepath.EvalSymlinks(p); err == nil && r != "" {
+			return r
+		}
+		return p
+	}
+	wantPaths := map[string]bool{
+		resolveOrSelf(managedStarter): true,
+		resolveOrSelf(managedDemo):    true,
+		resolveOrSelf(reposCheckout):  true,
+	}
+	if len(defPopulated.DetectedProjects) != len(wantPaths) {
+		t.Fatalf("expected %d unique detected projects, got %d: %+v", len(wantPaths), len(defPopulated.DetectedProjects), defPopulated.DetectedProjects)
+	}
+	for _, dp := range defPopulated.DetectedProjects {
+		if !wantPaths[dp.Path] {
+			t.Fatalf("unexpected or non-canonical detected project path %q (want one of %v)", dp.Path, wantPaths)
+		}
 	}
 }
 

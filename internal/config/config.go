@@ -124,6 +124,17 @@ func pathDedupeKey(p string) string {
 	return clean
 }
 
+// SamePath reports whether two filesystem paths refer to the same location after
+// expanding leading "~" and cleaning separators (case-insensitive on Windows).
+func SamePath(a, b string) bool {
+	ea := ExpandPath(a)
+	eb := ExpandPath(b)
+	if ea == "" || eb == "" {
+		return false
+	}
+	return pathDedupeKey(ea) == pathDedupeKey(eb)
+}
+
 // NormalizeLibraries cleans paths, drops empty/duplicate paths, assigns sensible display names
 // (disambiguating colliding folder basenames when names were auto-derived), and ensures stable
 // unique IDs for every library.

@@ -4,10 +4,28 @@ package main
 
 import (
 	"runtime"
+	"strings"
 
 	"github.com/ltcovalt/code-cad-studio/internal/server"
 	"github.com/wailsapp/wails/v3/pkg/application"
 )
+
+func isDialogCancelled(err error) bool {
+	if err == nil {
+		return false
+	}
+	msg := strings.ToLower(strings.TrimSpace(err.Error()))
+	switch msg {
+	case "cancelled", "canceled", "cancelled by user", "canceled by user":
+		return true
+	}
+	return strings.Contains(msg, "cancelled by user") ||
+		strings.Contains(msg, "canceled by user") ||
+		strings.Contains(msg, "user cancelled") ||
+		strings.Contains(msg, "user canceled") ||
+		strings.HasSuffix(msg, ": cancelled") ||
+		strings.HasSuffix(msg, ": canceled")
+}
 
 // wailsDialogs bridges Wails3 native OS dialogs into internal/server.DesktopDialogs.
 type wailsDialogs struct {
@@ -22,7 +40,11 @@ func (d *wailsDialogs) ChooseDirectory(title, startDir string) (string, error) {
 	if startDir != "" {
 		dlg.SetDirectory(startDir)
 	}
-	return dlg.PromptForSingleSelection()
+	path, err := dlg.PromptForSingleSelection()
+	if isDialogCancelled(err) {
+		return "", nil
+	}
+	return path, err
 }
 
 func (d *wailsDialogs) ChooseFile(title, startDir string) (string, error) {
@@ -33,7 +55,11 @@ func (d *wailsDialogs) ChooseFile(title, startDir string) (string, error) {
 	if startDir != "" {
 		dlg.SetDirectory(startDir)
 	}
-	return dlg.PromptForSingleSelection()
+	path, err := dlg.PromptForSingleSelection()
+	if isDialogCancelled(err) {
+		return "", nil
+	}
+	return path, err
 }
 
 func (d *wailsDialogs) SaveFile(title, defaultDir, defaultFilename, filterName, filterPattern string) (string, error) {
@@ -46,7 +72,11 @@ func (d *wailsDialogs) SaveFile(title, defaultDir, defaultFilename, filterName, 
 	if title != "" {
 		dlg.SetMessage(title)
 	}
-	return dlg.PromptForSingleSelection()
+	path, err := dlg.PromptForSingleSelection()
+	if isDialogCancelled(err) {
+		return "", nil
+	}
+	return path, err
 }
 
 // wailsWindow bridges Wails3 frameless window controls into internal/server.DesktopWindow.

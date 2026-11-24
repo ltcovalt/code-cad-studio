@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"runtime"
 	"strings"
 	"sync"
 	"testing"
@@ -379,5 +380,35 @@ func TestStoreConcurrentUpdateAndGetNoDataRace(t *testing.T) {
 		if final.DefaultPresets[key] != want {
 			t.Fatalf("DefaultPresets[%q] = %q, want %q", key, final.DefaultPresets[key], want)
 		}
+	}
+}
+
+func TestSamePath(t *testing.T) {
+	home := setTestConfigEnv(t)
+
+	// Empty paths never match anything
+	if SamePath("", "") || SamePath("   ", "") || SamePath("", ".") {
+		t.Fatalf("expected empty paths to return false")
+	}
+
+	target := filepath.Join(home, "Repos", "code-cad")
+	if !SamePath(target, target+string(os.PathSeparator)) {
+		t.Fatalf("expected trailing separator equivalence for %q", target)
+	}
+	if !SamePath(target, filepath.Join(home, "Repos", ".", "code-cad")) {
+		t.Fatalf("expected cleaned path equivalence for %q", target)
+	}
+	if !SamePath("~/Repos/code-cad", target) {
+		t.Fatalf("expected tilde expansion equivalence with %q", target)
+	}
+	if SamePath(target, filepath.Join(home, "Repos", "other")) {
+		t.Fatalf("expected distinct paths to return false")
+	}
+
+	altCase := filepath.Join(home, "repos", "CODE-CAD")
+	gotCase := SamePath(target, altCase)
+	wantCase := runtime.GOOS == "windows"
+	if gotCase != wantCase {
+		t.Fatalf("SamePath(%q, %q) = %v, want %v on %s", target, altCase, gotCase, wantCase, runtime.GOOS)
 	}
 }

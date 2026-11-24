@@ -5,6 +5,7 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"errors"
 	"io"
 	"net/http"
 	"net/http/httptest"
@@ -25,23 +26,35 @@ import (
 
 type stubDialogs struct {
 	dirPath     string
+	dirErr      error
 	filePath    string
+	fileErr     error
 	savePath    string
+	saveErr     error
 	lastSaveDir string
 	lastSave    string
 }
 
 func (d *stubDialogs) ChooseDirectory(title, startDir string) (string, error) {
+	if d.dirErr != nil {
+		return "", d.dirErr
+	}
 	return d.dirPath, nil
 }
 
 func (d *stubDialogs) ChooseFile(title, startDir string) (string, error) {
+	if d.fileErr != nil {
+		return "", d.fileErr
+	}
 	return d.filePath, nil
 }
 
 func (d *stubDialogs) SaveFile(title, defaultDir, defaultFilename, filterName, filterPattern string) (string, error) {
 	d.lastSaveDir = defaultDir
 	d.lastSave = defaultFilename
+	if d.saveErr != nil {
+		return "", d.saveErr
+	}
 	return d.savePath, nil
 }
 
@@ -2552,5 +2565,247 @@ func TestServerShutdownWithActiveWatcherEdits(t *testing.T) {
 	running, _ := srv.worker.Status()
 	if running {
 		t.Fatal("expected worker to remain stopped after Server.Shutdown() despite active watcher edits")
+	}
+}
+
+func TestDialogCancelErrorsReturnOKCancelled(t *testing.T) {
+	pyExe := findTestPython(t)
+	projectDir := t.TempDir()
+	modelDir := filepath.Join(projectDir, "models", "cancel_box")
+	if err := os.MkdirAll(modelDir, 0o755); err != nil {
+		t.Fatalf("mkdir: %v", err)
+	}
+	modelSrc := `from dataclasses import dataclass
+
+@dataclass
+class CancelBoxParams:
+    width: float = 10.0
+
+def create_cancel_box(params: CancelBoxParams):
+    return None
+`
+	if err := os.WriteFile(filepath.Join(modelDir, "cancel_box.py"), []byte(modelSrc), 0o644); err != nil {
+		t.Fatalf("write cancel_box.py: %v", err)
+	}
+
+	cancelErr := errors.New("cancelled by user")
+	dialogs := &stubDialogs{
+		dirErr:  cancelErr,
+		fileErr: cancelErr,
+		saveErr: cancelErr,
+	}
+	srv := newTestServer(t, dialogs)
+
+	saveBody, _ := json.Marshal(map[string]any{
+		"libraries":   []config.Library{{ID: "test-lib", Name: "Test Lib", Path: projectDir}},
+		"python_path": pyExe,
+	})
+	rec := httptest.NewRecorder()
+	srv.Handler().ServeHTTP(rec, newAPIRequest(http.MethodPost, "/api/config", bytes.NewReader(saveBody)))
+	if rec.Code != http.StatusOK {
+		t.Fatalf("POST /api/config status = %d, body = %s", rec.Code, rec.Body.String())
+	}
+
+	// 1. Project, python, and export-dir dialogs return HTTP 200 {path:"", cancelled:true} on cancel errors
+	for _, endpoint := range []string{"/api/dialogs/project", "/api/dialogs/python", "/api/dialogs/export-dir"} {
+		rec = httptest.NewRecorder()
+		srv.Handler().ServeHTTP(rec, newAPIRequest(http.MethodPost, endpoint, bytes.NewBufferString(`{}`)))
+		if rec.Code != http.StatusOK {
+			t.Fatalf("%s cancel status = %d, want 200 (body=%s)", endpoint, rec.Code, rec.Body.String())
+		}
+		var resp struct {
+			Path      string `json:"path"`
+			Cancelled bool   `json:"cancelled"`
+		}
+		if err := json.Unmarshal(rec.Body.Bytes(), &resp); err != nil {
+			t.Fatalf("decode %s cancel resp: %v", endpoint, err)
+		}
+		if resp.Path != "" || !resp.Cancelled {
+			t.Fatalf("%s cancel resp = %+v, want {Path:\"\", Cancelled:true}", endpoint, resp)
+		}
+	}
+
+	// 2. Export SaveFile dialog returns HTTP 200 {ok:true, cancelled:true} on cancel error
+	rec = httptest.NewRecorder()
+	srv.Handler().ServeHTTP(rec, newAPIRequest(
+		http.MethodPost,
+		modelPath("test-lib/cancel_box", "/export"),
+		bytes.NewBufferString(`{"format":"stl","params":{}}`),
+	))
+	if rec.Code != http.StatusOK {
+		t.Fatalf("export SaveFile cancel status = %d, want 200 (body=%s)", rec.Code, rec.Body.String())
+	}
+	var exportResp struct {
+		OK        bool `json:"ok"`
+		Cancelled bool `json:"cancelled"`
+	}
+	if err := json.Unmarshal(rec.Body.Bytes(), &exportResp); err != nil {
+		t.Fatalf("decode export cancel resp: %v", err)
+	}
+	if !exportResp.OK || !exportResp.Cancelled {
+		t.Fatalf("export cancel resp = %+v, want {OK:true, Cancelled:true}", exportResp)
+	}
+
+	// 3. Real dialog failures still propagate as HTTP 500 dialog_error
+	realErr := errors.New("COM initialization failed")
+	dialogs.dirErr = realErr
+	dialogs.fileErr = realErr
+	dialogs.saveErr = realErr
+
+	for _, endpoint := range []string{"/api/dialogs/project", "/api/dialogs/python", "/api/dialogs/export-dir"} {
+		rec = httptest.NewRecorder()
+		srv.Handler().ServeHTTP(rec, newAPIRequest(http.MethodPost, endpoint, bytes.NewBufferString(`{}`)))
+		if rec.Code != http.StatusInternalServerError {
+			t.Fatalf("%s real error status = %d, want 500 (body=%s)", endpoint, rec.Code, rec.Body.String())
+		}
+	}
+	rec = httptest.NewRecorder()
+	srv.Handler().ServeHTTP(rec, newAPIRequest(
+		http.MethodPost,
+		modelPath("test-lib/cancel_box", "/export"),
+		bytes.NewBufferString(`{"format":"stl","params":{}}`),
+	))
+	if rec.Code != http.StatusInternalServerError {
+		t.Fatalf("export SaveFile real error status = %d, want 500 (body=%s)", rec.Code, rec.Body.String())
+	}
+}
+
+func TestDefaultDemoTargetDirAndDemoScaffoldAppendsExistingLibraries(t *testing.T) {
+	pyExe := findTestPython(t)
+	srv := newTestServer(t, nil)
+
+	// Re-point home for deterministic Documents/code-cad-studio/demo assertions
+	home := setIsolatedTestEnv(t)
+
+	// Without Documents -> <home>/code-cad-studio/demo
+	gotNoDocs, err := defaultDemoTargetDir()
+	if err != nil {
+		t.Fatalf("defaultDemoTargetDir (no Documents): %v", err)
+	}
+	wantNoDocs := filepath.Join(home, "code-cad-studio", "demo")
+	if gotNoDocs != wantNoDocs {
+		t.Fatalf("defaultDemoTargetDir (no Documents) = %q, want %q", gotNoDocs, wantNoDocs)
+	}
+
+	// With Documents -> <home>/Documents/code-cad-studio/demo
+	docsDir := filepath.Join(home, "Documents")
+	if err := os.MkdirAll(docsDir, 0o755); err != nil {
+		t.Fatalf("mkdir Documents: %v", err)
+	}
+	wantDemo1 := filepath.Join(docsDir, "code-cad-studio", "demo")
+	got1, err := defaultDemoTargetDir()
+	if err != nil {
+		t.Fatalf("defaultDemoTargetDir (with Documents): %v", err)
+	}
+	if got1 != wantDemo1 {
+		t.Fatalf("defaultDemoTargetDir = %q, want %q", got1, wantDemo1)
+	}
+
+	// Seed an existing library first, then scaffold demo with default target_dir
+	existingLib := filepath.Join(t.TempDir(), "existing-lib")
+	if err := os.MkdirAll(existingLib, 0o755); err != nil {
+		t.Fatalf("mkdir existingLib: %v", err)
+	}
+	initCfg, _ := json.Marshal(map[string]any{
+		"libraries":   []config.Library{{ID: "existing", Name: "Existing", Path: existingLib}},
+		"python_path": pyExe,
+	})
+	rec := httptest.NewRecorder()
+	srv.Handler().ServeHTTP(rec, newAPIRequest(http.MethodPost, "/api/config", bytes.NewReader(initCfg)))
+	if rec.Code != http.StatusOK {
+		t.Fatalf("POST /api/config status = %d, body = %s", rec.Code, rec.Body.String())
+	}
+
+	rec = httptest.NewRecorder()
+	srv.Handler().ServeHTTP(rec, newAPIRequest(http.MethodPost, "/api/models/scaffold", bytes.NewBufferString(`{"mode":"demo"}`)))
+	if rec.Code != http.StatusOK {
+		t.Fatalf("POST /api/models/scaffold demo status = %d, body = %s", rec.Code, rec.Body.String())
+	}
+	var demoResp struct {
+		OK        bool           `json:"ok"`
+		TargetDir string         `json:"target_dir"`
+		LibraryID string         `json:"library_id"`
+		ModelID   string         `json:"model_id"`
+		Config    configResponse `json:"config"`
+	}
+	if err := json.Unmarshal(rec.Body.Bytes(), &demoResp); err != nil || !demoResp.OK {
+		t.Fatalf("decode demo scaffold resp: err=%v body=%s", err, rec.Body.String())
+	}
+	if !config.SamePath(demoResp.TargetDir, wantDemo1) {
+		t.Fatalf("demo target_dir = %q, want %q", demoResp.TargetDir, wantDemo1)
+	}
+	if len(demoResp.Config.Config.Libraries) != 2 {
+		t.Fatalf("expected existing library preserved and demo appended (2 total), got %+v", demoResp.Config.Config.Libraries)
+	}
+	if !config.SamePath(demoResp.Config.Config.Libraries[0].Path, existingLib) {
+		t.Fatalf("expected existing library first, got %+v", demoResp.Config.Config.Libraries)
+	}
+	if !config.SamePath(demoResp.Config.Config.Libraries[1].Path, wantDemo1) {
+		t.Fatalf("expected demo library second, got %+v", demoResp.Config.Config.Libraries)
+	}
+
+	// Now that demo is non-empty, defaultDemoTargetDir increments to demo-2, then demo-3
+	wantDemo2 := filepath.Join(docsDir, "code-cad-studio", "demo-2")
+	got2, err := defaultDemoTargetDir()
+	if err != nil {
+		t.Fatalf("defaultDemoTargetDir (second): %v", err)
+	}
+	if got2 != wantDemo2 {
+		t.Fatalf("defaultDemoTargetDir (second) = %q, want %q", got2, wantDemo2)
+	}
+
+	if err := os.MkdirAll(wantDemo2, 0o755); err != nil {
+		t.Fatalf("mkdir demo-2: %v", err)
+	}
+	if err := os.WriteFile(filepath.Join(wantDemo2, "keep.txt"), []byte("x"), 0o644); err != nil {
+		t.Fatalf("write demo-2 marker: %v", err)
+	}
+	wantDemo3 := filepath.Join(docsDir, "code-cad-studio", "demo-3")
+	got3, err := defaultDemoTargetDir()
+	if err != nil {
+		t.Fatalf("defaultDemoTargetDir (third): %v", err)
+	}
+	if got3 != wantDemo3 {
+		t.Fatalf("defaultDemoTargetDir (third) = %q, want %q", got3, wantDemo3)
+	}
+
+	// Scaffolding demo into an already-configured empty library reuses its entry via config.SamePath
+	emptyPreConfigured := filepath.Join(t.TempDir(), "PreConfiguredDemo")
+	if err := os.MkdirAll(emptyPreConfigured, 0o755); err != nil {
+		t.Fatalf("mkdir emptyPreConfigured: %v", err)
+	}
+	_, err = srv.cfgStore.Update(func(c *config.Config) {
+		c.Libraries = append(c.Libraries, config.Library{
+			ID:   "preconf",
+			Name: "PreConfigured",
+			Path: emptyPreConfigured,
+		})
+	})
+	if err != nil {
+		t.Fatalf("Update config: %v", err)
+	}
+	targetForRequest := emptyPreConfigured
+	if runtime.GOOS == "windows" {
+		targetForRequest = strings.ToLower(emptyPreConfigured)
+	}
+	reuseBody, _ := json.Marshal(map[string]any{"mode": "demo", "target_dir": targetForRequest})
+	rec = httptest.NewRecorder()
+	srv.Handler().ServeHTTP(rec, newAPIRequest(http.MethodPost, "/api/models/scaffold", bytes.NewReader(reuseBody)))
+	if rec.Code != http.StatusOK {
+		t.Fatalf("POST /api/models/scaffold reuse status = %d, body = %s", rec.Code, rec.Body.String())
+	}
+	var reuseResp struct {
+		OK        bool           `json:"ok"`
+		LibraryID string         `json:"library_id"`
+		Config    configResponse `json:"config"`
+	}
+	if err := json.Unmarshal(rec.Body.Bytes(), &reuseResp); err != nil || !reuseResp.OK {
+		t.Fatalf("decode reuse resp: err=%v body=%s", err, rec.Body.String())
+	}
+	if reuseResp.LibraryID != "preconf" {
+		t.Fatalf("expected reused library_id 'preconf', got %q", reuseResp.LibraryID)
+	}
+	if len(reuseResp.Config.Config.Libraries) != 3 {
+		t.Fatalf("expected no duplicate library entry (3 total), got %+v", reuseResp.Config.Config.Libraries)
 	}
 }
