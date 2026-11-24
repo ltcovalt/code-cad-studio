@@ -2033,7 +2033,7 @@ func TestScaffoldDemoAndNewModel(t *testing.T) {
 	}
 
 	// 2. Scaffold new model validation + creation + conflict
-	for _, badName := range []string{"", "../escape", "bad/name", `bad\name`, "bad:name", ".hidden", "_private", "test_foo", "CON"} {
+	for _, badName := range []string{"", "../escape", "bad/name", `bad\name`, "bad:name", ".hidden", "_private", "setup", "CON"} {
 		body, _ := json.Marshal(map[string]any{"mode": "new", "name": badName, "library_id": demoResp.LibraryID})
 		rec = httptest.NewRecorder()
 		srv.Handler().ServeHTTP(rec, newAPIRequest(http.MethodPost, "/api/models/scaffold", bytes.NewReader(body)))
@@ -2042,8 +2042,8 @@ func TestScaffoldDemoAndNewModel(t *testing.T) {
 		}
 	}
 
-	// Non-snake_case names (CamelCase, kebab-case, leading digit) preserve filename while generating valid Python identifiers
-	for _, flexibleName := range []string{"TestParametricTemplate", "cable-clip", "1U Shelf"} {
+	// Non-snake_case and test_* names preserve filename while generating valid Python identifiers
+	for _, flexibleName := range []string{"TestParametricTemplate", "test_parametric_model", "cable-clip", "1U Shelf"} {
 		body, _ := json.Marshal(map[string]any{
 			"mode":       "new",
 			"name":       flexibleName,

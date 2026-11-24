@@ -688,8 +688,8 @@ func validateScaffoldModelName(raw string) (string, error) {
 	if strings.HasPrefix(name, "_") {
 		return "", fmt.Errorf("Model name cannot start with '_' (ignored by model discovery).")
 	}
-	if strings.HasPrefix(name, "test_") || name == "setup" {
-		return "", fmt.Errorf("Model name cannot start with 'test_' or be 'setup' (ignored by model discovery).")
+	if name == "setup" {
+		return "", fmt.Errorf("Model name cannot be 'setup' (ignored by model discovery).")
 	}
 	baseUpper := strings.ToUpper(strings.SplitN(name, ".", 2)[0])
 	if windowsReservedNames[baseUpper] {

@@ -266,6 +266,31 @@ def _inspect_script_ast(py_file: Path) -> dict[str, Any] | None:
             elif node.name in ("build", "generate", "create"):
                 fallback_funcs.append(node.name)
 
+    # Skip actual Python test suites named test_*.py (imports pytest/unittest or defines def test_*/class Test*),
+    # while still discovering maker CAD models like test_bracket.py or test_parametric_model.py.
+    if py_file.name.startswith("test_"):
+        is_unit_test = False
+        for node in tree.body:
+            if isinstance(node, ast.FunctionDef) and node.name.startswith("test_"):
+                is_unit_test = True
+                break
+            if isinstance(node, ast.ClassDef) and node.name.startswith("Test") and not node.name.endswith("Params"):
+                is_unit_test = True
+                break
+            if isinstance(node, ast.Import) and any(
+                a.name in ("pytest", "unittest") or a.name.startswith(("pytest.", "unittest."))
+                for a in node.names
+            ):
+                is_unit_test = True
+                break
+            if isinstance(node, ast.ImportFrom) and node.module and (
+                node.module in ("pytest", "unittest") or node.module.startswith(("pytest.", "unittest."))
+            ):
+                is_unit_test = True
+                break
+        if is_unit_test:
+            return None
+
     docstring = ast.get_docstring(tree) or ""
     first_line = docstring.splitlines()[0].strip() if docstring else ""
     stem = py_file.stem
@@ -2079,7 +2104,7 @@ class WorkerState:
                     for fname in sorted(filenames):
                         if not fname.endswith(".py"):
                             continue
-                        if fname.startswith("_") or fname.startswith("test_") or fname == "setup.py":
+                        if fname.startswith("_") or fname == "setup.py":
                             continue
                         py_file = Path(dirpath) / fname
                         cache_key = str(py_file)
