@@ -138,6 +138,12 @@ def test_real_build123d_tessellation_and_exports(tmp_path: Path) -> None:
     worker.export_shape_to_file(cyl, "step", step_out)
     worker.export_shape_to_file(cyl, "3mf", threemf_out, *worker._resolve_export_deflection("standard"))
 
+    # Regression: Part(children=[solid]) must preserve its root Part container on STEP export
+    wrapped_part = b3d.Part(children=[cyl.solid()])
+    wrapped_step = tmp_path / "wrapped_part.step"
+    worker.export_shape_to_file(wrapped_part, "step", wrapped_step)
+    assert wrapped_step.stat().st_size > 0
+
     assert draft_stl.stat().st_size > 0
     assert fine_stl.stat().st_size > draft_stl.stat().st_size
     assert step_out.stat().st_size > 0

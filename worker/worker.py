@@ -1704,7 +1704,16 @@ def export_shape_to_file(
     if not named_parts:
         raise ValueError("No geometry to export.")
 
-    if len(named_parts) == 1:
+    direct_shape = None
+    if not isinstance(result, (dict, list, tuple)):
+        candidate = result.shape if isinstance(result, _CapturedShape) else result
+        candidate = _unwrap_shape(candidate)
+        if candidate is not None and hasattr(candidate, "wrapped"):
+            direct_shape = candidate
+
+    if direct_shape is not None:
+        export_obj = direct_shape
+    elif len(named_parts) == 1:
         export_obj = named_parts[0][1]
     else:
         children = []
