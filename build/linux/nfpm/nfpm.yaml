@@ -12,8 +12,8 @@ priority: "extra"
 maintainer: ${GIT_COMMITTER_NAME} <${GIT_COMMITTER_EMAIL}>
 description: "Model-agnostic parametric GUI for build123d"
 vendor: "ltcovalt"
-homepage: "https://wails.io"
-license: "MIT"
+homepage: "https://github.com/ltcovalt/code-cad-studio"
+license: "Apache-2.0"
 release: "1"
 
 contents:

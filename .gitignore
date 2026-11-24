@@ -8,10 +8,9 @@ build/linux/appimage/build
 build/darwin/icons.icns
 build/windows/icon.ico
 build/windows/nsis/MicrosoftEdgeWebview2Setup.exe
-# Mobile generated (per-machine; overlays hold absolute paths)
-build/ios/xcode/overlay.json
-build/ios/xcode/gen/
-build/android/overlay.json
-build/android/gen/
 __pycache__/
 *.pyc
+.venv/
+venv/
+.pytest_cache/
+*.exe

@@ -1,67 +1,88 @@
-# Wails Server Mode Dockerfile
-# Multi-stage build for a minimal image.
+# Code CAD Studio Server Mode Dockerfile
+# 3-stage build producing a runnable headless HTTP server with embedded frontend
+# assets and a Python 3.12 + build123d + ocp_tessellate runtime environment.
 #
-# Defaults produce a pure-Go, fully static binary on a distroless/static base:
-# the smallest, most secure image, and correct for the default (CGO-free) app.
+# Build:
+#   docker build -t code-cad-studio:latest -f build/docker/Dockerfile.server .
 #
-# If your app needs CGO, override the build args, e.g.:
-#   docker build --build-arg CGO_ENABLED=1 \
-#                --build-arg GO_IMAGE=golang:bookworm \
-#                --build-arg RUNTIME_IMAGE=gcr.io/distroless/base-debian12 \
-#                -f build/docker/Dockerfile.server .
-# CGO needs a C toolchain in the builder and a libc in the runtime image; keep
-# the builder and runtime libc compatible (a glibc builder -> a glibc runtime).
-# The Taskfile passes these through: task build:docker CGO_ENABLED=1 GO_IMAGE=... RUNTIME_IMAGE=...
+# Run (mount your local CAD models directory to /projects):
+#   docker run --rm -p 8080:8080 -v /path/to/models:/projects code-cad-studio:latest
 
-ARG GO_IMAGE=golang:alpine
-ARG RUNTIME_IMAGE=gcr.io/distroless/static-debian12
+ARG NODE_IMAGE=node:22-bookworm-slim
+ARG GO_IMAGE=golang:1.26-bookworm
+ARG RUNTIME_IMAGE=debian:bookworm-slim
 ARG CGO_ENABLED=0
 
-# Build stage
-FROM ${GO_IMAGE} AS builder
+# Stage 1: Build production frontend assets (embedded into the Go binary)
+FROM ${NODE_IMAGE} AS frontend-builder
+
+WORKDIR /src/frontend
+COPY frontend/package.json frontend/package-lock.json ./
+RUN npm ci
+COPY frontend/ ./
+RUN npm run build
+
+# Stage 2: Build the production Go server binary (-tags server,production)
+FROM ${GO_IMAGE} AS go-builder
 ARG CGO_ENABLED
 
-WORKDIR /app
+WORKDIR /src
+RUN apt-get update && apt-get install -y --no-install-recommends \
+    git \
+    $([ "$CGO_ENABLED" = "1" ] && echo "gcc libc6-dev") \
+    && rm -rf /var/lib/apt/lists/*
 
-# Install build dependencies: git always; a C compiler only when CGO is enabled.
-# Supports both apk (alpine) and apt (debian/bookworm) base images.
-RUN if command -v apk >/dev/null 2>&1; then \
-        apk add --no-cache git $([ "$CGO_ENABLED" = "1" ] && echo gcc musl-dev); \
-    else \
-        apt-get update && apt-get install -y --no-install-recommends git $([ "$CGO_ENABLED" = "1" ] && echo gcc libc6-dev) && rm -rf /var/lib/apt/lists/*; \
-    fi
+COPY go.mod go.sum ./
+RUN go mod download
 
-# Copy source code
 COPY . .
+COPY --from=frontend-builder /src/frontend/dist ./frontend/dist
 
-# Remove local replace directive if present (for production builds)
 RUN sed -i '/^replace/d' go.mod || true
+RUN CGO_ENABLED=${CGO_ENABLED} go build -tags server,production -trimpath -buildvcs=false -ldflags="-s -w" -o /out/code-cad-studio-server .
 
-# Download dependencies
-RUN go mod tidy
+# Stage 3: Runtime image with OCCT system libraries + uv + Python 3.12 + build123d
+FROM ${RUNTIME_IMAGE} AS runtime
 
-# Build the production server binary.
-# - server,production tags: HTTP server mode with production code paths (no dev
-#   logger/asset middleware), matching the desktop production build.
-# - CGO_ENABLED defaults to 0 for a fully static binary (distroless/static);
-#   override with --build-arg CGO_ENABLED=1 (see header) for CGO apps.
-RUN CGO_ENABLED=${CGO_ENABLED} go build -tags server,production -trimpath -buildvcs=false -ldflags="-s -w" -o server .
+RUN apt-get update && apt-get install -y --no-install-recommends \
+    ca-certificates \
+    libexpat1 \
+    libfontconfig1 \
+    libfreetype6 \
+    libgl1 \
+    libglu1-mesa \
+    libgomp1 \
+    libice6 \
+    libsm6 \
+    libx11-6 \
+    libxext6 \
+    libxi6 \
+    libxrender1 \
+    && rm -rf /var/lib/apt/lists/*
 
-# Runtime stage - minimal image
-FROM ${RUNTIME_IMAGE}
+COPY --from=ghcr.io/astral-sh/uv:0.6 /uv /usr/local/bin/uv
 
-# Copy the binary
-COPY --from=builder /app/server /server
+ENV UV_PYTHON_INSTALL_DIR=/opt/code-cad-studio/python
+RUN uv python install 3.12 \
+    && uv venv --python 3.12 /opt/code-cad-studio/venv \
+    && uv pip install --no-cache --python /opt/code-cad-studio/venv/bin/python \
+        "build123d>=0.8,<1.0" \
+        "ocp_tessellate>=3.0,<4.0"
 
-# Copy frontend assets
-COPY --from=builder /app/frontend/dist /frontend/dist
+COPY --from=go-builder /out/code-cad-studio-server /usr/local/bin/code-cad-studio-server
 
-# Expose the default port
+RUN groupadd --system studio \
+    && useradd --system --gid studio --create-home --home-dir /home/studio --shell /usr/sbin/nologin studio \
+    && mkdir -p /projects /home/studio/.config/code-cad-studio \
+    && chown -R studio:studio /projects /home/studio
+
+USER studio
+WORKDIR /projects
+VOLUME ["/projects"]
+
 EXPOSE 8080
 
-# Bind to all interfaces (required for Docker)
-# Can be overridden at runtime with -e WAILS_SERVER_HOST=...
 ENV WAILS_SERVER_HOST=0.0.0.0
+ENV PATH="/opt/code-cad-studio/venv/bin:${PATH}"
 
-# Run the server
-ENTRYPOINT ["/server"]
+ENTRYPOINT ["/usr/local/bin/code-cad-studio-server"]

@@ -168,6 +168,18 @@ tasks:
       - codesign --force --deep --sign - "{{.BIN_DIR}}/{{.APP_NAME}}.dev.app"
       - '"{{.BIN_DIR}}/{{.APP_NAME}}.dev.app/Contents/MacOS/{{.APP_NAME}}"'
 
+  create:dmg:
+    summary: Creates a macOS `.dmg` disk image from the `.app` bundle
+    cmds:
+      - wails3 tool package -format dmg -name "{{.APP_NAME}}" -out "{{.BIN_DIR}}" -volume-icon "build/darwin/icons.icns"
+
+  package:dmg:
+    summary: Packages the universal `.app` bundle into a macOS `.dmg`
+    deps:
+      - task: package:universal
+    cmds:
+      - task: create:dmg
+
   sign:
     summary: Signs the application bundle with Developer ID
     desc: |
@@ -175,7 +187,7 @@ tasks:
       Uses signing identity from `wails3 setup` (stored in ~/.config/wails/defaults.yaml).
       Override with: task darwin:sign -- --identity "Developer ID Application: ..."
     deps:
-      - task: package
+      - task: package:universal
     cmds:
       - wails3 tool sign --input "{{.BIN_DIR}}/{{.APP_NAME}}.app" {{.CLI_ARGS}}
 
@@ -188,6 +200,6 @@ tasks:
       First-time setup:
         wails3 setup
     deps:
-      - task: package
+      - task: package:universal
     cmds:
       - wails3 tool sign --input "{{.BIN_DIR}}/{{.APP_NAME}}.app" --notarize {{.CLI_ARGS}}

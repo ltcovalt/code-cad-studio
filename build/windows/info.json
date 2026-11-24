@@ -7,9 +7,9 @@
 			"ProductVersion": "0.1.0",
 			"CompanyName": "ltcovalt",
 			"FileDescription": "Model-agnostic parametric GUI for build123d",
-			"LegalCopyright": "© 2026, SheprdSoft",
+			"LegalCopyright": "© 2026, Luke Covalt",
 			"ProductName": "Code CAD Studio",
-			"Comments": "This is a comment"
+			"Comments": "Local-first parametric 3D CAD GUI for build123d"
 		}
 	}
 }

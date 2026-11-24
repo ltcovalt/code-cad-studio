@@ -1,0 +1,142 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+
+permissions:
+  contents: read
+
+jobs:
+  frontend:
+    name: Frontend (check, test, build)
+    runs-on: ubuntu-24.04
+    defaults:
+      run:
+        working-directory: frontend
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: "22"
+          cache: npm
+          cache-dependency-path: frontend/package-lock.json
+
+      - name: Install dependencies
+        run: npm ci
+
+      - name: Typecheck & Svelte check
+        run: npm run check
+
+      - name: Run Vitest suite
+        run: npm test
+
+      - name: Build production bundle
+        run: npm run build
+
+  python:
+    name: Python Worker (pytest & params.py parity)
+    runs-on: ubuntu-24.04
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup Python 3.12
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Install pytest
+        run: python -m pip install --upgrade pip pytest
+
+      - name: Run worker pytest suite
+        run: pytest -v worker/tests
+
+      - name: Verify canonical params.py parity
+        run: diff -u worker/params.py examples/demo_project/utils/params.py
+
+  go:
+    name: Go (${{ matrix.os }})
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-24.04, macos-14, windows-latest]
+    runs-on: ${{ matrix.os }}
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup Go
+        uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+          cache: true
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: "22"
+          cache: npm
+          cache-dependency-path: frontend/package-lock.json
+
+      - name: Setup Python 3.12
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Install Linux GTK4 & WebKitGTK 6.0 dependencies
+        if: runner.os == 'Linux'
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends libgtk-4-dev libwebkitgtk-6.0-dev pkg-config
+
+      - name: Ensure MinGW gcc on PATH for Windows -race tests
+        if: runner.os == 'Windows'
+        shell: pwsh
+        run: |
+          if (-not (Get-Command gcc -ErrorAction SilentlyContinue)) {
+            if (Test-Path "C:\msys64\mingw64\bin\gcc.exe") {
+              "C:\msys64\mingw64\bin" | Out-File -FilePath $env:GITHUB_PATH -Encoding utf8 -Append
+            } else {
+              choco install mingw -y
+            }
+          }
+
+      - name: Build embedded frontend assets
+        working-directory: frontend
+        run: |
+          npm ci
+          npm run build
+
+      - name: Go vet (desktop)
+        run: go vet ./...
+
+      - name: Go vet (server)
+        run: go vet -tags server ./...
+
+      - name: Go test (-race)
+        env:
+          CGO_ENABLED: "1"
+        run: go test -race -count=1 ./...
+
+      - name: Build desktop binary
+        if: runner.os != 'Windows'
+        run: go build -o bin/code-cad-studio .
+
+      - name: Build desktop binary (Windows)
+        if: runner.os == 'Windows'
+        run: go build -o bin/code-cad-studio.exe .
+
+      - name: Build headless server binary
+        if: runner.os != 'Windows'
+        run: go build -tags server -o bin/code-cad-studio-server .
+
+      - name: Build headless server binary (Windows)
+        if: runner.os == 'Windows'
+        run: go build -tags server -o bin/code-cad-studio-server.exe .
+
