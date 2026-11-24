@@ -3,15 +3,27 @@ package server
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
+	"io"
+	"io/fs"
 	"log"
 	"net/http"
+	"os/exec"
+	"strings"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"github.com/ltcovalt/code-cad-studio/internal/config"
 	"github.com/ltcovalt/code-cad-studio/internal/watcher"
 	"github.com/ltcovalt/code-cad-studio/internal/worker"
+)
+
+const (
+	defaultSSEKeepalive = 15 * time.Second
+	maxSSELogQueue      = 64
+	maxSSEControlQueue  = 4096
 )
 
 // DesktopDialogs abstracts native OS file/folder dialogs so internal/server
@@ -31,6 +43,21 @@ type DesktopWindow interface {
 	Close()
 }
 
+type sseMessage struct {
+	event string
+	data  string
+	isLog bool
+}
+
+type sseClient struct {
+	mu        sync.Mutex
+	queue     []sseMessage
+	logCount  int
+	ctrlCount int
+	notify    chan struct{}
+	closed    bool
+}
+
 // Server holds the standard net/http router and coordinates the worker, config, presets, and SSE hub.
 type Server struct {
 	mux      *http.ServeMux
@@ -38,28 +65,72 @@ type Server struct {
 	worker   *worker.Manager
 	watcher  *watcher.Watcher
 	dialogs  DesktopDialogs
+
+	windowMu sync.RWMutex
 	window   DesktopWindow
 
-	sseMu      sync.Mutex
-	sseClients map[chan string]struct{}
+	demoFS   fs.FS
+	paramsPy []byte
+
+	desktopRunner func(name string, args ...string) error
+
+	sseMu               sync.Mutex
+	sseClients          map[*sseClient]struct{}
+	sseKeepaliveTimeout time.Duration
 
 	setupMu     sync.Mutex
 	setupCancel context.CancelFunc
+
+	shuttingDown atomic.Bool
 }
 
 // SetWindow attaches native desktop window controls (optional; nil in standalone web mode).
 func (s *Server) SetWindow(win DesktopWindow) {
+	s.windowMu.Lock()
 	s.window = win
+	s.windowMu.Unlock()
+}
+
+func (s *Server) getWindow() DesktopWindow {
+	s.windowMu.RLock()
+	win := s.window
+	s.windowMu.RUnlock()
+	return win
+}
+
+// SetScaffoldAssets configures the embedded offline demo project filesystem and canonical params.py bytes.
+func (s *Server) SetScaffoldAssets(demoFS fs.FS, paramsPy []byte) {
+	s.demoFS = demoFS
+	s.paramsPy = paramsPy
+}
+
+func defaultDesktopRunner(name string, args ...string) error {
+	cmd := exec.Command(name, args...)
+	if err := cmd.Start(); err != nil {
+		return err
+	}
+	go func() {
+		_ = cmd.Wait()
+	}()
+	return nil
 }
 
 // New creates a new HTTP server with all JSON API and SSE routes registered.
 func New(cfgStore *config.Store, workerMgr *worker.Manager, dialogs DesktopDialogs) *Server {
 	s := &Server{
-		mux:        http.NewServeMux(),
-		cfgStore:   cfgStore,
-		worker:     workerMgr,
-		dialogs:    dialogs,
-		sseClients: make(map[chan string]struct{}),
+		mux:                 http.NewServeMux(),
+		cfgStore:            cfgStore,
+		worker:              workerMgr,
+		dialogs:             dialogs,
+		desktopRunner:       defaultDesktopRunner,
+		sseClients:          make(map[*sseClient]struct{}),
+		sseKeepaliveTimeout: defaultSSEKeepalive,
+	}
+
+	if workerMgr != nil {
+		workerMgr.SetOnUnexpectedExit(func(msg string) {
+			s.broadcastSSE("worker-error", map[string]string{"error": msg})
+		})
 	}
 
 	s.watcher = watcher.New(s.handlePyFileChanged, s.handlePresetFileChanged)
@@ -98,6 +169,7 @@ func (s *Server) StartServices() {
 
 // Shutdown stops any in-flight setup task, the file watcher, and the Python worker cleanly.
 func (s *Server) Shutdown() {
+	s.shuttingDown.Store(true)
 	s.cancelSetupTask()
 	if s.watcher != nil {
 		s.watcher.Stop()
@@ -109,23 +181,33 @@ func (s *Server) Shutdown() {
 
 // Handler returns the standard http.Handler for standalone web mode.
 func (s *Server) Handler() http.Handler {
-	return s.mux
+	return s.securityMiddleware(s.mux, false)
 }
 
-// Middleware adapts the Go ServeMux for Wails3 AssetOptions.Middleware.
+// DesktopMiddleware adapts the Go ServeMux for Wails3 desktop AssetOptions.Middleware.
 // Any matched /api/* or /events route is handled by Go; everything else
-// falls through to Wails' static/dev asset server.
-func (s *Server) Middleware(next http.Handler) http.Handler {
-	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+// falls through to Wails' static/dev asset server, permitting internal Wails hosts/origins.
+func (s *Server) DesktopMiddleware(next http.Handler) http.Handler {
+	return s.middleware(next, true)
+}
+
+// ServerMiddleware adapts the Go ServeMux for Wails3 headless server AssetOptions.Middleware.
+// Any matched /api/* or /events route is handled by Go; everything else
+// falls through to Wails' static/dev asset server, rejecting internal Wails hosts/origins.
+func (s *Server) ServerMiddleware(next http.Handler) http.Handler {
+	return s.middleware(next, false)
+}
+
+func (s *Server) middleware(next http.Handler, allowWailsInternal bool) http.Handler {
+	combined := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		_, pattern := s.mux.Handler(r)
-		if pattern != "" {
-			w.Header().Set("Cache-Control", "no-store, no-cache, must-revalidate")
-			w.Header().Set("Pragma", "no-cache")
+		if pattern != "" || strings.HasPrefix(r.URL.Path, "/api/") || r.URL.Path == "/events" {
 			s.mux.ServeHTTP(w, r)
 			return
 		}
 		next.ServeHTTP(w, r)
 	})
+	return s.securityMiddleware(combined, allowWailsInternal)
 }
 
 func (s *Server) registerRoutes() {
@@ -155,6 +237,13 @@ func (s *Server) registerRoutes() {
 	s.mux.HandleFunc("GET /api/window/state", s.handleWindowState)
 	s.mux.HandleFunc("POST /api/window/close", s.handleWindowClose)
 
+	// Render Cancellation, Scaffolding & Desktop Actions
+	s.mux.HandleFunc("POST /api/render/cancel", s.handleCancelRender)
+	s.mux.HandleFunc("POST /api/models/scaffold", s.handleScaffoldModel)
+	s.mux.HandleFunc("POST /api/desktop/open-editor", s.handleDesktopOpenEditor)
+	s.mux.HandleFunc("POST /api/desktop/reveal-file", s.handleDesktopRevealFile)
+	s.mux.HandleFunc("POST /api/desktop/open-slicer", s.handleDesktopOpenSlicer)
+
 	// Models, Rendering, Exporting & Presets
 	s.mux.HandleFunc("GET /api/models", s.handleListModels)
 	s.mux.HandleFunc("GET /api/models/{id}", s.handleGetModel)
@@ -180,29 +269,89 @@ func writeJSON(w http.ResponseWriter, status int, payload any) {
 	}
 }
 
-func decodeJSON(r *http.Request, dst any) error {
+func writeError(w http.ResponseWriter, status int, code, message string, traceback ...string) {
+	payload := map[string]any{
+		"ok":    false,
+		"code":  code,
+		"error": message,
+	}
+	if len(traceback) > 0 && strings.TrimSpace(traceback[0]) != "" {
+		payload["traceback"] = traceback[0]
+	}
+	writeJSON(w, status, payload)
+}
+
+func decodeJSON(w http.ResponseWriter, r *http.Request, dst any, allowEmptyEOF bool) bool {
+	r.Body = http.MaxBytesReader(w, r.Body, maxJSONBodyBytes)
 	defer r.Body.Close()
+
 	dec := json.NewDecoder(r.Body)
-	return dec.Decode(dst)
+	err := dec.Decode(dst)
+	if err == nil {
+		return true
+	}
+	if allowEmptyEOF && errors.Is(err, io.EOF) {
+		return true
+	}
+	var maxErr *http.MaxBytesError
+	if errors.As(err, &maxErr) {
+		writeError(w, http.StatusRequestEntityTooLarge, "body_too_large", "Request body exceeds 2 MiB limit")
+		return false
+	}
+	writeError(w, http.StatusBadRequest, "invalid_json", "Invalid JSON body")
+	return false
 }
 
 func (s *Server) broadcastSSE(eventName string, payload any) {
-	data, err := json.Marshal(payload)
+	raw, err := json.Marshal(payload)
 	if err != nil {
 		return
 	}
-	msg := fmt.Sprintf("event: %s\ndata: %s\n\n", eventName, string(data))
+	msg := sseMessage{
+		event: eventName,
+		data:  string(raw),
+		isLog: eventName == "setup-log",
+	}
+
 	s.sseMu.Lock()
-	defer s.sseMu.Unlock()
-	for ch := range s.sseClients {
-		select {
-		case ch <- msg:
-		default:
+	clients := make([]*sseClient, 0, len(s.sseClients))
+	for c := range s.sseClients {
+		clients = append(clients, c)
+	}
+	s.sseMu.Unlock()
+
+	for _, c := range clients {
+		c.mu.Lock()
+		if !c.closed {
+			appended := false
+			if msg.isLog {
+				if c.logCount < maxSSELogQueue {
+					c.queue = append(c.queue, msg)
+					c.logCount++
+					appended = true
+				}
+			} else {
+				if c.ctrlCount < maxSSEControlQueue {
+					c.queue = append(c.queue, msg)
+					c.ctrlCount++
+					appended = true
+				}
+			}
+			if appended {
+				select {
+				case c.notify <- struct{}{}:
+				default:
+				}
+			}
 		}
+		c.mu.Unlock()
 	}
 }
 
 func (s *Server) handlePyFileChanged(path string) {
+	if s.shuttingDown.Load() {
+		return
+	}
 	ctx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
 	defer cancel()
 
@@ -213,9 +362,15 @@ func (s *Server) handlePyFileChanged(path string) {
 		return
 	}
 
+	if s.shuttingDown.Load() {
+		return
+	}
 	log.Printf("Python file changed (%s) -> restarting worker", path)
 	cfg := s.cfgStore.Get()
 	if err := s.worker.Restart(cfg.ResolvePython(), librarySpecs(cfg)); err != nil {
+		if s.shuttingDown.Load() {
+			return
+		}
 		log.Printf("Worker restart failed: %v", err)
 		s.broadcastSSE("worker-error", map[string]string{"error": err.Error()})
 		return
@@ -224,6 +379,9 @@ func (s *Server) handlePyFileChanged(path string) {
 }
 
 func (s *Server) handlePresetFileChanged(path string) {
+	if s.shuttingDown.Load() {
+		return
+	}
 	log.Printf("Presets file changed (%s)", path)
 	s.broadcastSSE("presets-changed", map[string]string{"path": path})
 }
@@ -231,35 +389,90 @@ func (s *Server) handlePresetFileChanged(path string) {
 func (s *Server) handleSSE(w http.ResponseWriter, r *http.Request) {
 	flusher, ok := w.(http.Flusher)
 	if !ok {
-		http.Error(w, "streaming unsupported", http.StatusInternalServerError)
+		writeError(w, http.StatusInternalServerError, "streaming_unsupported", "streaming unsupported")
 		return
 	}
+
+	rc := http.NewResponseController(w)
+	_ = rc.SetWriteDeadline(time.Time{})
+
 	w.Header().Set("Content-Type", "text/event-stream")
 	w.Header().Set("Cache-Control", "no-cache")
 	w.Header().Set("Connection", "keep-alive")
 
-	ch := make(chan string, 16)
+	client := &sseClient{
+		notify: make(chan struct{}, 1),
+	}
 	s.sseMu.Lock()
-	s.sseClients[ch] = struct{}{}
+	s.sseClients[client] = struct{}{}
 	s.sseMu.Unlock()
 
 	defer func() {
 		s.sseMu.Lock()
-		delete(s.sseClients, ch)
+		delete(s.sseClients, client)
 		s.sseMu.Unlock()
+
+		client.mu.Lock()
+		client.closed = true
+		client.queue = nil
+		client.logCount = 0
+		client.ctrlCount = 0
+		client.mu.Unlock()
 	}()
 
-	// Initial ping
-	_, _ = fmt.Fprint(w, "event: connected\ndata: {}\n\n")
+	seq := int64(1)
+	if _, err := fmt.Fprintf(w, "id: %d\nevent: connected\ndata: {}\n\n", seq); err != nil {
+		return
+	}
 	flusher.Flush()
+
+	interval := s.sseKeepaliveTimeout
+	if interval <= 0 {
+		interval = defaultSSEKeepalive
+	}
+	keepalive := time.NewTicker(interval)
+	defer keepalive.Stop()
+
+	drain := func() bool {
+		for {
+			client.mu.Lock()
+			if len(client.queue) == 0 {
+				client.mu.Unlock()
+				return true
+			}
+			batch := client.queue
+			client.queue = nil
+			client.logCount = 0
+			client.ctrlCount = 0
+			client.mu.Unlock()
+
+			for _, msg := range batch {
+				seq++
+				if _, err := fmt.Fprintf(w, "id: %d\nevent: %s\ndata: %s\n\n", seq, msg.event, msg.data); err != nil {
+					return false
+				}
+			}
+			flusher.Flush()
+		}
+	}
 
 	ctx := r.Context()
 	for {
+		if !drain() {
+			return
+		}
 		select {
 		case <-ctx.Done():
 			return
-		case msg := <-ch:
-			_, _ = fmt.Fprint(w, msg)
+		case <-client.notify:
+			// drained at top of loop
+		case <-keepalive.C:
+			if !drain() {
+				return
+			}
+			if _, err := fmt.Fprint(w, ": keepalive\n\n"); err != nil {
+				return
+			}
 			flusher.Flush()
 		}
 	}

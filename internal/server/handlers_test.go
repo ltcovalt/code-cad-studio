@@ -1,13 +1,23 @@
 package server
 
 import (
+	"bufio"
 	"bytes"
+	"context"
 	"encoding/json"
+	"io"
 	"net/http"
 	"net/http/httptest"
+	"net/url"
 	"os"
+	"os/exec"
 	"path/filepath"
+	"runtime"
+	"strconv"
+	"strings"
+	"sync"
 	"testing"
+	"time"
 
 	"github.com/ltcovalt/code-cad-studio/internal/config"
 	"github.com/ltcovalt/code-cad-studio/internal/worker"
@@ -35,9 +45,95 @@ func (d *stubDialogs) SaveFile(title, defaultDir, defaultFilename, filterName, f
 	return d.savePath, nil
 }
 
+type stubWindow struct {
+	mu        sync.Mutex
+	minimised int
+	maximised bool
+	closed    int
+}
+
+func (w *stubWindow) Minimise() {
+	w.mu.Lock()
+	w.minimised++
+	w.mu.Unlock()
+}
+
+func (w *stubWindow) ToggleMaximise() bool {
+	w.mu.Lock()
+	w.maximised = !w.maximised
+	val := w.maximised
+	w.mu.Unlock()
+	return val
+}
+
+func (w *stubWindow) IsMaximised() bool {
+	w.mu.Lock()
+	val := w.maximised
+	w.mu.Unlock()
+	return val
+}
+
+func (w *stubWindow) Close() {
+	w.mu.Lock()
+	w.closed++
+	w.mu.Unlock()
+}
+
+func setIsolatedTestEnv(t *testing.T) string {
+	t.Helper()
+	base := t.TempDir()
+	t.Setenv("HOME", base)
+	t.Setenv("USERPROFILE", base)
+	t.Setenv("XDG_CONFIG_HOME", filepath.Join(base, "xdg-config"))
+	t.Setenv("XDG_DATA_HOME", filepath.Join(base, "xdg-data"))
+	t.Setenv("AppData", filepath.Join(base, "appdata"))
+	t.Setenv("LOCALAPPDATA", filepath.Join(base, "localappdata"))
+	return base
+}
+
+func findTestPython(t *testing.T) string {
+	t.Helper()
+	candidates := []string{"python3", "python"}
+	if runtime.GOOS == "windows" {
+		candidates = []string{"python", "python3"}
+	}
+	for _, name := range candidates {
+		p, err := exec.LookPath(name)
+		if err != nil || p == "" {
+			continue
+		}
+		norm := strings.ToLower(strings.ReplaceAll(p, `\`, "/"))
+		if strings.Contains(norm, "/microsoft/windowsapps/") {
+			continue
+		}
+		if err := exec.Command(p, "--version").Run(); err == nil {
+			return p
+		}
+	}
+	t.Skip("python interpreter not available for server tests")
+	return ""
+}
+
+func newAPIRequest(method, target string, body io.Reader) *http.Request {
+	req := httptest.NewRequest(method, target, body)
+	req.Host = "localhost"
+	if method == http.MethodPost || method == http.MethodPut || method == http.MethodPatch {
+		req.Header.Set("Content-Type", "application/json")
+	}
+	return req
+}
+
+func modelPath(modelID string, suffix ...string) string {
+	p := "/api/models/" + url.PathEscape(modelID)
+	for _, s := range suffix {
+		p += s
+	}
+	return p
+}
+
 func newTestServer(t *testing.T, dialogs DesktopDialogs) *Server {
 	t.Helper()
-	t.Setenv("XDG_CONFIG_HOME", t.TempDir())
+	setIsolatedTestEnv(t)
 	cfgStore, err := config.NewStore()
 	if err != nil {
 		t.Fatalf("NewStore: %v", err)
@@ -46,8 +142,13 @@ func newTestServer(t *testing.T, dialogs DesktopDialogs) *Server {
 	if err != nil {
 		t.Fatalf("read worker.py: %v", err)
 	}
+	paramsBytes, err := os.ReadFile(filepath.Join("..", "..", "worker", "params.py"))
+	if err != nil {
+		t.Fatalf("read params.py: %v", err)
+	}
 	mgr := worker.NewManager(scriptBytes)
 	srv := New(cfgStore, mgr, dialogs)
+	srv.SetScaffoldAssets(os.DirFS(filepath.Join("..", "..", "examples", "demo_project")), paramsBytes)
 	t.Cleanup(func() { srv.Shutdown() })
 	return srv
 }
@@ -58,7 +159,7 @@ func TestConfigAndThemeHandlers(t *testing.T) {
 
 	// GET /api/config
 	rec := httptest.NewRecorder()
-	srv.Handler().ServeHTTP(rec, httptest.NewRequest(http.MethodGet, "/api/config", nil))
+	srv.Handler().ServeHTTP(rec, newAPIRequest(http.MethodGet, "/api/config", nil))
 	if rec.Code != http.StatusOK {
 		t.Fatalf("GET /api/config status = %d", rec.Code)
 	}
@@ -69,13 +170,19 @@ func TestConfigAndThemeHandlers(t *testing.T) {
 	if !cfgResp.HasDesktop {
 		t.Fatalf("expected has_desktop=true")
 	}
+	if cfgResp.OS != runtime.GOOS {
+		t.Fatalf("expected os=%q, got %q", runtime.GOOS, cfgResp.OS)
+	}
+	if cfgResp.Config.SchemaVersion != config.SchemaVersion {
+		t.Fatalf("expected schema_version=%d, got %d", config.SchemaVersion, cfgResp.Config.SchemaVersion)
+	}
 	if cfgResp.Config.Theme != "dark" {
 		t.Fatalf("expected default theme 'dark', got %q", cfgResp.Config.Theme)
 	}
 
 	// POST /api/config/theme
 	rec = httptest.NewRecorder()
-	req := httptest.NewRequest(http.MethodPost, "/api/config/theme", bytes.NewBufferString(`{"theme":"dracula"}`))
+	req := newAPIRequest(http.MethodPost, "/api/config/theme", bytes.NewBufferString(`{"theme":"dracula"}`))
 	srv.Handler().ServeHTTP(rec, req)
 	if rec.Code != http.StatusNoContent {
 		t.Fatalf("POST /api/config/theme status = %d", rec.Code)
@@ -83,7 +190,7 @@ func TestConfigAndThemeHandlers(t *testing.T) {
 
 	// Verify persisted theme
 	rec = httptest.NewRecorder()
-	srv.Handler().ServeHTTP(rec, httptest.NewRequest(http.MethodGet, "/api/config", nil))
+	srv.Handler().ServeHTTP(rec, newAPIRequest(http.MethodGet, "/api/config", nil))
 	if err := json.Unmarshal(rec.Body.Bytes(), &cfgResp); err != nil {
 		t.Fatalf("decode updated config: %v", err)
 	}
@@ -93,7 +200,7 @@ func TestConfigAndThemeHandlers(t *testing.T) {
 
 	// POST /api/dialogs/project
 	rec = httptest.NewRecorder()
-	req = httptest.NewRequest(http.MethodPost, "/api/dialogs/project", bytes.NewBufferString(`{}`))
+	req = newAPIRequest(http.MethodPost, "/api/dialogs/project", bytes.NewBufferString(`{}`))
 	srv.Handler().ServeHTTP(rec, req)
 	if rec.Code != http.StatusOK {
 		t.Fatalf("POST /api/dialogs/project status = %d", rec.Code)
@@ -111,7 +218,7 @@ func TestConfigAndThemeHandlers(t *testing.T) {
 
 	// POST /api/dialogs/export-dir
 	rec = httptest.NewRecorder()
-	req = httptest.NewRequest(http.MethodPost, "/api/dialogs/export-dir", bytes.NewBufferString(`{}`))
+	req = newAPIRequest(http.MethodPost, "/api/dialogs/export-dir", bytes.NewBufferString(`{}`))
 	srv.Handler().ServeHTTP(rec, req)
 	if rec.Code != http.StatusOK {
 		t.Fatalf("POST /api/dialogs/export-dir status = %d", rec.Code)
@@ -125,6 +232,7 @@ func TestConfigAndThemeHandlers(t *testing.T) {
 }
 
 func TestWorkerSchemaNullableWhenAndExportFilename(t *testing.T) {
+	pyExe := findTestPython(t)
 	projectDir := t.TempDir()
 	modelDir := filepath.Join(projectDir, "models", "demo_box")
 	utilsDir := filepath.Join(projectDir, "utils")
@@ -187,17 +295,17 @@ def create_demo_box(params: DemoBoxParams):
 	// Save project config to start worker
 	saveBody, _ := json.Marshal(map[string]any{
 		"libraries":   []config.Library{{ID: "test-lib", Name: "Test Lib", Path: projectDir}},
-		"python_path": "python3",
+		"python_path": pyExe,
 	})
 	rec := httptest.NewRecorder()
-	srv.Handler().ServeHTTP(rec, httptest.NewRequest(http.MethodPost, "/api/config", bytes.NewReader(saveBody)))
+	srv.Handler().ServeHTTP(rec, newAPIRequest(http.MethodPost, "/api/config", bytes.NewReader(saveBody)))
 	if rec.Code != http.StatusOK {
 		t.Fatalf("POST /api/config status = %d, body = %s", rec.Code, rec.Body.String())
 	}
 
 	// GET /api/models
 	rec = httptest.NewRecorder()
-	srv.Handler().ServeHTTP(rec, httptest.NewRequest(http.MethodGet, "/api/models", nil))
+	srv.Handler().ServeHTTP(rec, newAPIRequest(http.MethodGet, "/api/models", nil))
 	var listResp struct {
 		OK     bool               `json:"ok"`
 		Models []worker.ModelInfo `json:"models"`
@@ -205,13 +313,16 @@ def create_demo_box(params: DemoBoxParams):
 	if err := json.Unmarshal(rec.Body.Bytes(), &listResp); err != nil {
 		t.Fatalf("decode models: %v", err)
 	}
-	if !listResp.OK || len(listResp.Models) != 1 || listResp.Models[0].ID != "test-lib::demo_box" {
+	if !listResp.OK || len(listResp.Models) != 1 || listResp.Models[0].ID != "test-lib/demo_box" {
 		t.Fatalf("unexpected models list: %+v", listResp)
 	}
 
-	// GET /api/models/test-lib::demo_box
+	// GET /api/models/test-lib%2Fdemo_box
 	rec = httptest.NewRecorder()
-	srv.Handler().ServeHTTP(rec, httptest.NewRequest(http.MethodGet, "/api/models/test-lib::demo_box", nil))
+	srv.Handler().ServeHTTP(rec, newAPIRequest(http.MethodGet, modelPath("test-lib/demo_box"), nil))
+	if rec.Code != http.StatusOK {
+		t.Fatalf("GET model status = %d, body = %s", rec.Code, rec.Body.String())
+	}
 	var modelResp struct {
 		OK       bool                `json:"ok"`
 		Fields   []worker.ParamField `json:"fields"`
@@ -275,9 +386,9 @@ def create_demo_box(params: DemoBoxParams):
 	// Verify export_filename & default export dir (<library>/exports) via SaveFile
 	rec = httptest.NewRecorder()
 	exportBody := bytes.NewBufferString(`{"format":"stl","params":{"core":{"mode":"rect"}}}`)
-	srv.Handler().ServeHTTP(rec, httptest.NewRequest(http.MethodPost, "/api/models/test-lib::demo_box/export", exportBody))
+	srv.Handler().ServeHTTP(rec, newAPIRequest(http.MethodPost, modelPath("test-lib/demo_box", "/export"), exportBody))
 	if rec.Code != http.StatusOK {
-		t.Fatalf("POST /api/models/test-lib::demo_box/export status = %d", rec.Code)
+		t.Fatalf("POST export status = %d, body = %s", rec.Code, rec.Body.String())
 	}
 	if dialogs.lastSave != "demo_box_rect.stl" {
 		t.Fatalf("expected SaveFile default filename 'demo_box_rect.stl', got %q", dialogs.lastSave)
@@ -291,11 +402,11 @@ def create_demo_box(params: DemoBoxParams):
 	customExportDir := filepath.Join(t.TempDir(), "custom-exports")
 	saveBody, _ = json.Marshal(map[string]any{
 		"libraries":   []config.Library{{ID: "test-lib", Name: "Test Lib", Path: projectDir}},
-		"python_path": "python3",
+		"python_path": pyExe,
 		"export_dir":  customExportDir,
 	})
 	rec = httptest.NewRecorder()
-	srv.Handler().ServeHTTP(rec, httptest.NewRequest(http.MethodPost, "/api/config", bytes.NewReader(saveBody)))
+	srv.Handler().ServeHTTP(rec, newAPIRequest(http.MethodPost, "/api/config", bytes.NewReader(saveBody)))
 	if rec.Code != http.StatusOK {
 		t.Fatalf("POST /api/config with export_dir status = %d", rec.Code)
 	}
@@ -309,9 +420,9 @@ def create_demo_box(params: DemoBoxParams):
 
 	rec = httptest.NewRecorder()
 	exportBody = bytes.NewBufferString(`{"format":"step","params":{"core":{"mode":"round"}}}`)
-	srv.Handler().ServeHTTP(rec, httptest.NewRequest(http.MethodPost, "/api/models/test-lib::demo_box/export", exportBody))
+	srv.Handler().ServeHTTP(rec, newAPIRequest(http.MethodPost, modelPath("test-lib/demo_box", "/export"), exportBody))
 	if rec.Code != http.StatusOK {
-		t.Fatalf("POST /api/models/test-lib::demo_box/export (custom dir) status = %d", rec.Code)
+		t.Fatalf("POST export (custom dir) status = %d", rec.Code)
 	}
 	if dialogs.lastSaveDir != customExportDir {
 		t.Fatalf("expected SaveFile custom defaultDir %q, got %q", customExportDir, dialogs.lastSaveDir)
@@ -322,6 +433,7 @@ def create_demo_box(params: DemoBoxParams):
 }
 
 func TestWorkerListCoercionAndEmptyStringHandling(t *testing.T) {
+	pyExe := findTestPython(t)
 	projectDir := t.TempDir()
 	modelDir := filepath.Join(projectDir, "models", "list_demo")
 	if err := os.MkdirAll(modelDir, 0o755); err != nil {
@@ -355,24 +467,24 @@ def create_list_demo(params: ListDemoParams):
 	srv := newTestServer(t, dialogs)
 	saveBody, _ := json.Marshal(map[string]any{
 		"libraries":   []config.Library{{ID: "test-lib", Name: "Test Lib", Path: projectDir}},
-		"python_path": "python3",
+		"python_path": pyExe,
 	})
 	rec := httptest.NewRecorder()
-	srv.Handler().ServeHTTP(rec, httptest.NewRequest(http.MethodPost, "/api/config", bytes.NewReader(saveBody)))
+	srv.Handler().ServeHTTP(rec, newAPIRequest(http.MethodPost, "/api/config", bytes.NewReader(saveBody)))
 	if rec.Code != http.StatusOK {
 		t.Fatalf("POST /api/config status = %d", rec.Code)
 	}
 
 	// Empty string must coerce to None (not empty string)
 	rec = httptest.NewRecorder()
-	srv.Handler().ServeHTTP(rec, httptest.NewRequest(http.MethodPost, "/api/models/test-lib::list_demo/export", bytes.NewBufferString(`{"format":"stl","params":{"slots":{"z_positions":""}}}`)))
+	srv.Handler().ServeHTTP(rec, newAPIRequest(http.MethodPost, modelPath("test-lib/list_demo", "/export"), bytes.NewBufferString(`{"format":"stl","params":{"slots":{"z_positions":""}}}`)))
 	if dialogs.lastSave != "list_demo_auto.stl" {
 		t.Fatalf("expected empty string to coerce to None -> 'list_demo_auto.stl', got %q", dialogs.lastSave)
 	}
 
 	// Comma-separated string must coerce to List[float]
 	rec = httptest.NewRecorder()
-	srv.Handler().ServeHTTP(rec, httptest.NewRequest(http.MethodPost, "/api/models/test-lib::list_demo/export", bytes.NewBufferString(`{"format":"stl","params":{"slots":{"z_positions":"10, 25.0, 40"}}}`)))
+	srv.Handler().ServeHTTP(rec, newAPIRequest(http.MethodPost, modelPath("test-lib/list_demo", "/export"), bytes.NewBufferString(`{"format":"stl","params":{"slots":{"z_positions":"10, 25.0, 40"}}}`)))
 	if dialogs.lastSave != "list_demo_10_25_40.stl" {
 		t.Fatalf("expected CSV list coercion -> 'list_demo_10_25_40.stl', got %q", dialogs.lastSave)
 	}
@@ -402,13 +514,14 @@ def create_list_demo(params: ListDemoParams):
 		t.Fatalf("warm Reload failed: %v", err)
 	}
 	rec = httptest.NewRecorder()
-	srv.Handler().ServeHTTP(rec, httptest.NewRequest(http.MethodPost, "/api/models/test-lib::list_demo/export", bytes.NewBufferString(`{"format":"stl","params":{}}`)))
+	srv.Handler().ServeHTTP(rec, newAPIRequest(http.MethodPost, modelPath("test-lib/list_demo", "/export"), bytes.NewBufferString(`{"format":"stl","params":{}}`)))
 	if dialogs.lastSave != "list_demo_reloaded.stl" {
 		t.Fatalf("expected warm reload to update module -> 'list_demo_reloaded.stl', got %q", dialogs.lastSave)
 	}
 }
 
 func TestPresetsPinDeleteAndSurgicalUpdateDefaults(t *testing.T) {
+	pyExe := findTestPython(t)
 	projectDir := t.TempDir()
 	modelDir := filepath.Join(projectDir, "models", "clip_demo")
 	if err := os.MkdirAll(modelDir, 0o755); err != nil {
@@ -453,10 +566,10 @@ def create_clip_demo(params: ClipDemoParams):
 	srv := newTestServer(t, dialogs)
 	saveBody, _ := json.Marshal(map[string]any{
 		"libraries":   []config.Library{{ID: "test-lib", Name: "Test Lib", Path: projectDir}},
-		"python_path": "python3",
+		"python_path": pyExe,
 	})
 	rec := httptest.NewRecorder()
-	srv.Handler().ServeHTTP(rec, httptest.NewRequest(http.MethodPost, "/api/config", bytes.NewReader(saveBody)))
+	srv.Handler().ServeHTTP(rec, newAPIRequest(http.MethodPost, "/api/config", bytes.NewReader(saveBody)))
 	if rec.Code != http.StatusOK {
 		t.Fatalf("POST /api/config status = %d", rec.Code)
 	}
@@ -464,20 +577,20 @@ def create_clip_demo(params: ClipDemoParams):
 	// 1. Save a local preset, pin as startup default, promote to project, then delete
 	rec = httptest.NewRecorder()
 	savePresetReq := `{"label":"Thin Clip","description":"6mm","scope":"user","full_snapshot":false,"params":{"core":{"thickness":6.0,"angle":95.0}}}`
-	srv.Handler().ServeHTTP(rec, httptest.NewRequest(http.MethodPost, "/api/models/test-lib::clip_demo/presets", bytes.NewBufferString(savePresetReq)))
+	srv.Handler().ServeHTTP(rec, newAPIRequest(http.MethodPost, modelPath("test-lib/clip_demo", "/presets"), bytes.NewBufferString(savePresetReq)))
 	if rec.Code != http.StatusOK {
 		t.Fatalf("POST presets status = %d, body = %s", rec.Code, rec.Body.String())
 	}
 
 	rec = httptest.NewRecorder()
-	srv.Handler().ServeHTTP(rec, httptest.NewRequest(http.MethodPost, "/api/models/test-lib::clip_demo/presets/default", bytes.NewBufferString(`{"key":"thin_clip"}`)))
+	srv.Handler().ServeHTTP(rec, newAPIRequest(http.MethodPost, modelPath("test-lib/clip_demo", "/presets/default"), bytes.NewBufferString(`{"key":"thin_clip"}`)))
 	if rec.Code != http.StatusOK {
 		t.Fatalf("POST presets/default status = %d", rec.Code)
 	}
 
-	// GET /api/models/test-lib::clip_demo should return pinned default_preset_key
+	// GET /api/models/test-lib%2Fclip_demo should return pinned default_preset_key
 	rec = httptest.NewRecorder()
-	srv.Handler().ServeHTTP(rec, httptest.NewRequest(http.MethodGet, "/api/models/test-lib::clip_demo", nil))
+	srv.Handler().ServeHTTP(rec, newAPIRequest(http.MethodGet, modelPath("test-lib/clip_demo"), nil))
 	var detailResp struct {
 		OK               bool   `json:"ok"`
 		DefaultPresetKey string `json:"default_preset_key"`
@@ -489,7 +602,7 @@ def create_clip_demo(params: ClipDemoParams):
 	// Save same preset to project scope (replaces/clears shadowed user copy)
 	rec = httptest.NewRecorder()
 	saveProjReq := `{"label":"Thin Clip","description":"6mm shared","scope":"project","full_snapshot":true,"params":{"core":{"thickness":6.0,"angle":95.0}}}`
-	srv.Handler().ServeHTTP(rec, httptest.NewRequest(http.MethodPost, "/api/models/test-lib::clip_demo/presets", bytes.NewBufferString(saveProjReq)))
+	srv.Handler().ServeHTTP(rec, newAPIRequest(http.MethodPost, modelPath("test-lib/clip_demo", "/presets"), bytes.NewBufferString(saveProjReq)))
 	if rec.Code != http.StatusOK {
 		t.Fatalf("POST project preset status = %d, body = %s", rec.Code, rec.Body.String())
 	}
@@ -497,7 +610,7 @@ def create_clip_demo(params: ClipDemoParams):
 	// Rename pinned project preset and verify startup default pin follows the new key
 	rec = httptest.NewRecorder()
 	renameReq := `{"scope":"project","label":"Slim Clip","description":"6mm renamed"}`
-	srv.Handler().ServeHTTP(rec, httptest.NewRequest(http.MethodPatch, "/api/models/test-lib::clip_demo/presets/thin_clip", bytes.NewBufferString(renameReq)))
+	srv.Handler().ServeHTTP(rec, newAPIRequest(http.MethodPatch, modelPath("test-lib/clip_demo", "/presets/thin_clip"), bytes.NewBufferString(renameReq)))
 	if rec.Code != http.StatusOK {
 		t.Fatalf("PATCH rename preset status = %d, body = %s", rec.Code, rec.Body.String())
 	}
@@ -512,7 +625,7 @@ def create_clip_demo(params: ClipDemoParams):
 
 	// Delete project preset clears pinned default_preset_key
 	rec = httptest.NewRecorder()
-	srv.Handler().ServeHTTP(rec, httptest.NewRequest(http.MethodDelete, "/api/models/test-lib::clip_demo/presets/slim_clip?scope=project", nil))
+	srv.Handler().ServeHTTP(rec, newAPIRequest(http.MethodDelete, modelPath("test-lib/clip_demo", "/presets/slim_clip?scope=project"), nil))
 	if rec.Code != http.StatusOK {
 		t.Fatalf("DELETE preset status = %d, body = %s", rec.Code, rec.Body.String())
 	}
@@ -527,7 +640,7 @@ def create_clip_demo(params: ClipDemoParams):
 	// 2. Fail-closed test: attempting to update computed_gap (non-literal expression) must report unsupported and not write file
 	rec = httptest.NewRecorder()
 	badApply := `{"dry_run":false,"params":{"core":{"thickness":8.0,"computed_gap":5.0}}}`
-	srv.Handler().ServeHTTP(rec, httptest.NewRequest(http.MethodPost, "/api/models/test-lib::clip_demo/update-defaults", bytes.NewBufferString(badApply)))
+	srv.Handler().ServeHTTP(rec, newAPIRequest(http.MethodPost, modelPath("test-lib/clip_demo", "/update-defaults"), bytes.NewBufferString(badApply)))
 	var badResp worker.UpdateDefaultsResponse
 	if err := json.Unmarshal(rec.Body.Bytes(), &badResp); err != nil {
 		t.Fatalf("decode badResp: %v", err)
@@ -543,7 +656,7 @@ def create_clip_demo(params: ClipDemoParams):
 	// 3. Dry-run preview on safe literal changes
 	rec = httptest.NewRecorder()
 	previewReq := `{"dry_run":true,"params":{"core":{"thickness":10.5,"angle":110.0,"label_text":"prusa","enabled":false,"override":4.2}}}`
-	srv.Handler().ServeHTTP(rec, httptest.NewRequest(http.MethodPost, "/api/models/test-lib::clip_demo/update-defaults", bytes.NewBufferString(previewReq)))
+	srv.Handler().ServeHTTP(rec, newAPIRequest(http.MethodPost, modelPath("test-lib/clip_demo", "/update-defaults"), bytes.NewBufferString(previewReq)))
 	var previewResp worker.UpdateDefaultsResponse
 	if err := json.Unmarshal(rec.Body.Bytes(), &previewResp); err != nil {
 		t.Fatalf("decode previewResp: %v", err)
@@ -552,16 +665,24 @@ def create_clip_demo(params: ClipDemoParams):
 		t.Fatalf("unexpected preview response: %+v", previewResp)
 	}
 
-	// 4. Stale SHA-256 must abort without modifying file
+	// 4. Missing expected_sha256 on non-dry-run must be rejected with 400
+	rec = httptest.NewRecorder()
+	missingShaReq := `{"dry_run":false,"params":{"core":{"thickness":10.5}}}`
+	srv.Handler().ServeHTTP(rec, newAPIRequest(http.MethodPost, modelPath("test-lib/clip_demo", "/update-defaults"), bytes.NewBufferString(missingShaReq)))
+	if rec.Code != http.StatusBadRequest {
+		t.Fatalf("expected 400 when expected_sha256 is missing on dry_run=false, got %d (%s)", rec.Code, rec.Body.String())
+	}
+
+	// 5. Stale SHA-256 must abort without modifying file
 	rec = httptest.NewRecorder()
 	staleReq := `{"dry_run":false,"expected_sha256":"deadbeef","params":{"core":{"thickness":10.5}}}`
-	srv.Handler().ServeHTTP(rec, httptest.NewRequest(http.MethodPost, "/api/models/test-lib::clip_demo/update-defaults", bytes.NewBufferString(staleReq)))
+	srv.Handler().ServeHTTP(rec, newAPIRequest(http.MethodPost, modelPath("test-lib/clip_demo", "/update-defaults"), bytes.NewBufferString(staleReq)))
 	var staleResp worker.UpdateDefaultsResponse
 	if err := json.Unmarshal(rec.Body.Bytes(), &staleResp); err != nil || staleResp.OK {
 		t.Fatalf("expected stale sha256 to fail, got %+v", staleResp)
 	}
 
-	// 5. Apply with matching SHA-256 and verify surgical edits + preserved comments + reloaded defaults
+	// 6. Apply with matching SHA-256 and verify surgical edits + preserved comments + reloaded defaults
 	applyPayload, _ := json.Marshal(map[string]any{
 		"dry_run":         false,
 		"expected_sha256": previewResp.SHA256,
@@ -576,7 +697,7 @@ def create_clip_demo(params: ClipDemoParams):
 		},
 	})
 	rec = httptest.NewRecorder()
-	srv.Handler().ServeHTTP(rec, httptest.NewRequest(http.MethodPost, "/api/models/test-lib::clip_demo/update-defaults", bytes.NewReader(applyPayload)))
+	srv.Handler().ServeHTTP(rec, newAPIRequest(http.MethodPost, modelPath("test-lib/clip_demo", "/update-defaults"), bytes.NewReader(applyPayload)))
 	var applyResp worker.UpdateDefaultsResponse
 	if err := json.Unmarshal(rec.Body.Bytes(), &applyResp); err != nil {
 		t.Fatalf("decode applyResp: %v", err)
@@ -605,9 +726,9 @@ def create_clip_demo(params: ClipDemoParams):
 		}
 	}
 
-	// Subsequent GET /api/models/test-lib::clip_demo must reflect new canonical defaults immediately
+	// Subsequent GET /api/models/test-lib%2Fclip_demo must reflect new canonical defaults immediately
 	rec = httptest.NewRecorder()
-	srv.Handler().ServeHTTP(rec, httptest.NewRequest(http.MethodGet, "/api/models/test-lib::clip_demo", nil))
+	srv.Handler().ServeHTTP(rec, newAPIRequest(http.MethodGet, modelPath("test-lib/clip_demo"), nil))
 	var refreshed struct {
 		OK       bool           `json:"ok"`
 		Defaults map[string]any `json:"defaults"`
@@ -622,6 +743,7 @@ def create_clip_demo(params: ClipDemoParams):
 }
 
 func TestWorkerStructuredAndScalarListSchema(t *testing.T) {
+	pyExe := findTestPython(t)
 	projectDir := t.TempDir()
 	modelDir := filepath.Join(projectDir, "models", "cutout_demo")
 	if err := os.MkdirAll(modelDir, 0o755); err != nil {
@@ -670,17 +792,16 @@ def create_cutout_demo(params: CutoutDemoParams):
 	srv := newTestServer(t, dialogs)
 	saveBody, _ := json.Marshal(map[string]any{
 		"libraries":   []config.Library{{ID: "test-lib", Name: "Test Lib", Path: projectDir}},
-		"python_path": "python3",
+		"python_path": pyExe,
 	})
 	rec := httptest.NewRecorder()
-	srv.Handler().ServeHTTP(rec, httptest.NewRequest(http.MethodPost, "/api/config", bytes.NewReader(saveBody)))
+	srv.Handler().ServeHTTP(rec, newAPIRequest(http.MethodPost, "/api/config", bytes.NewReader(saveBody)))
 	if rec.Code != http.StatusOK {
 		t.Fatalf("POST /api/config status = %d", rec.Code)
 	}
 
-	// GET /api/models/test-lib::cutout_demo -> verify list schema introspection
 	rec = httptest.NewRecorder()
-	srv.Handler().ServeHTTP(rec, httptest.NewRequest(http.MethodGet, "/api/models/test-lib::cutout_demo", nil))
+	srv.Handler().ServeHTTP(rec, newAPIRequest(http.MethodGet, modelPath("test-lib/cutout_demo"), nil))
 	var modelResp struct {
 		OK       bool                `json:"ok"`
 		Fields   []worker.ParamField `json:"fields"`
@@ -728,9 +849,9 @@ def create_cutout_demo(params: CutoutDemoParams):
 
 	// Verify structured list payload coercion (multiple items + empty list)
 	rec = httptest.NewRecorder()
-	srv.Handler().ServeHTTP(rec, httptest.NewRequest(
+	srv.Handler().ServeHTTP(rec, newAPIRequest(
 		http.MethodPost,
-		"/api/models/test-lib::cutout_demo/export",
+		modelPath("test-lib/cutout_demo", "/export"),
 		bytes.NewBufferString(`{"format":"stl","params":{"cutouts":{"enabled":true,"items":[{"leg":"x","length":20},{"leg":"y","length":55,"depth":5}]}}}`),
 	))
 	if dialogs.lastSave != "cutout_demo_2_x20_y55.stl" {
@@ -738,9 +859,9 @@ def create_cutout_demo(params: CutoutDemoParams):
 	}
 
 	rec = httptest.NewRecorder()
-	srv.Handler().ServeHTTP(rec, httptest.NewRequest(
+	srv.Handler().ServeHTTP(rec, newAPIRequest(
 		http.MethodPost,
-		"/api/models/test-lib::cutout_demo/export",
+		modelPath("test-lib/cutout_demo", "/export"),
 		bytes.NewBufferString(`{"format":"stl","params":{"cutouts":{"enabled":true,"items":[]}}}`),
 	))
 	if dialogs.lastSave != "cutout_demo_0_none.stl" {
@@ -749,12 +870,11 @@ def create_cutout_demo(params: CutoutDemoParams):
 }
 
 func TestSetupOnboardingHandlers(t *testing.T) {
-	t.Setenv("HOME", t.TempDir())
 	srv := newTestServer(t, nil)
 
 	// Fresh config should request onboarding
 	rec := httptest.NewRecorder()
-	srv.Handler().ServeHTTP(rec, httptest.NewRequest(http.MethodGet, "/api/config", nil))
+	srv.Handler().ServeHTTP(rec, newAPIRequest(http.MethodGet, "/api/config", nil))
 	if rec.Code != http.StatusOK {
 		t.Fatalf("GET /api/config status = %d", rec.Code)
 	}
@@ -765,10 +885,13 @@ func TestSetupOnboardingHandlers(t *testing.T) {
 	if !cfgResp.NeedsOnboarding {
 		t.Fatalf("expected needs_onboarding=true for fresh config")
 	}
+	if cfgResp.HasDesktop {
+		t.Fatalf("expected has_desktop=false when dialogs=nil")
+	}
 
 	// GET /api/setup/defaults
 	rec = httptest.NewRecorder()
-	srv.Handler().ServeHTTP(rec, httptest.NewRequest(http.MethodGet, "/api/setup/defaults", nil))
+	srv.Handler().ServeHTTP(rec, newAPIRequest(http.MethodGet, "/api/setup/defaults", nil))
 	if rec.Code != http.StatusOK {
 		t.Fatalf("GET /api/setup/defaults status = %d", rec.Code)
 	}
@@ -795,7 +918,7 @@ func TestSetupOnboardingHandlers(t *testing.T) {
 
 	inspectBody, _ := json.Marshal(map[string]any{"path": projDir})
 	rec = httptest.NewRecorder()
-	srv.Handler().ServeHTTP(rec, httptest.NewRequest(http.MethodPost, "/api/setup/inspect-dir", bytes.NewReader(inspectBody)))
+	srv.Handler().ServeHTTP(rec, newAPIRequest(http.MethodPost, "/api/setup/inspect-dir", bytes.NewReader(inspectBody)))
 	if rec.Code != http.StatusOK {
 		t.Fatalf("POST /api/setup/inspect-dir status = %d", rec.Code)
 	}
@@ -817,7 +940,7 @@ func TestSetupOnboardingHandlers(t *testing.T) {
 	// POST /api/setup/probe
 	probeBody, _ := json.Marshal(map[string]any{"library_roots": []string{projDir}})
 	rec = httptest.NewRecorder()
-	srv.Handler().ServeHTTP(rec, httptest.NewRequest(http.MethodPost, "/api/setup/probe", bytes.NewReader(probeBody)))
+	srv.Handler().ServeHTTP(rec, newAPIRequest(http.MethodPost, "/api/setup/probe", bytes.NewReader(probeBody)))
 	if rec.Code != http.StatusOK {
 		t.Fatalf("POST /api/setup/probe status = %d", rec.Code)
 	}
@@ -827,7 +950,7 @@ func TestSetupOnboardingHandlers(t *testing.T) {
 		"libraries": []config.Library{{Name: "Sample Proj", Path: projDir}},
 	})
 	rec = httptest.NewRecorder()
-	srv.Handler().ServeHTTP(rec, httptest.NewRequest(http.MethodPost, "/api/setup/complete", bytes.NewReader(completeBody)))
+	srv.Handler().ServeHTTP(rec, newAPIRequest(http.MethodPost, "/api/setup/complete", bytes.NewReader(completeBody)))
 	if rec.Code != http.StatusOK {
 		t.Fatalf("POST /api/setup/complete status = %d", rec.Code)
 	}
@@ -846,6 +969,7 @@ func TestSetupOnboardingHandlers(t *testing.T) {
 }
 
 func TestPresetVerificationHandlers(t *testing.T) {
+	pyExe := findTestPython(t)
 	projectDir := t.TempDir()
 	modelDir := filepath.Join(projectDir, "models", "ver_demo")
 	if err := os.MkdirAll(modelDir, 0o755); err != nil {
@@ -873,10 +997,10 @@ def create_ver_demo(params: VerDemoParams):
 	srv := newTestServer(t, &stubDialogs{})
 	saveBody, _ := json.Marshal(map[string]any{
 		"libraries":   []config.Library{{ID: "test-lib", Name: "Test Lib", Path: projectDir}},
-		"python_path": "python3",
+		"python_path": pyExe,
 	})
 	rec := httptest.NewRecorder()
-	srv.Handler().ServeHTTP(rec, httptest.NewRequest(http.MethodPost, "/api/config", bytes.NewReader(saveBody)))
+	srv.Handler().ServeHTTP(rec, newAPIRequest(http.MethodPost, "/api/config", bytes.NewReader(saveBody)))
 	if rec.Code != http.StatusOK {
 		t.Fatalf("POST /api/config status = %d", rec.Code)
 	}
@@ -893,9 +1017,9 @@ def create_ver_demo(params: VerDemoParams):
 
 	// 1. Mark canonical default preset verified via PUT .../presets/default/verification
 	rec = httptest.NewRecorder()
-	srv.Handler().ServeHTTP(rec, httptest.NewRequest(
+	srv.Handler().ServeHTTP(rec, newAPIRequest(
 		http.MethodPut,
-		"/api/models/test-lib::ver_demo/presets/default/verification",
+		modelPath("test-lib/ver_demo", "/presets/default/verification"),
 		bytes.NewBufferString(`{"scope":"default","status":"verified","note":"Printed in PETG, exact fit"}`),
 	))
 	if rec.Code != http.StatusOK {
@@ -914,9 +1038,9 @@ def create_ver_demo(params: VerDemoParams):
 
 	// 2. Reject invalid verification status with 400
 	rec = httptest.NewRecorder()
-	srv.Handler().ServeHTTP(rec, httptest.NewRequest(
+	srv.Handler().ServeHTTP(rec, newAPIRequest(
 		http.MethodPut,
-		"/api/models/test-lib::ver_demo/presets/default/verification",
+		modelPath("test-lib/ver_demo", "/presets/default/verification"),
 		bytes.NewBufferString(`{"scope":"default","status":"bogus","note":""}`),
 	))
 	if rec.Code != http.StatusBadRequest {
@@ -925,9 +1049,9 @@ def create_ver_demo(params: VerDemoParams):
 
 	// 3. Save a project preset with verification metadata
 	rec = httptest.NewRecorder()
-	srv.Handler().ServeHTTP(rec, httptest.NewRequest(
+	srv.Handler().ServeHTTP(rec, newAPIRequest(
 		http.MethodPost,
-		"/api/models/test-lib::ver_demo/presets",
+		modelPath("test-lib/ver_demo", "/presets"),
 		bytes.NewBufferString(`{"label":"Wide Block","description":"60mm","scope":"project","params":{"core":{"width":60.0}},"verification":{"status":"usable","note":"Slightly tight on first layer"}}`),
 	))
 	if rec.Code != http.StatusOK {
@@ -946,9 +1070,9 @@ def create_ver_demo(params: VerDemoParams):
 
 	// 4. Update saved project preset verification to unusable
 	rec = httptest.NewRecorder()
-	srv.Handler().ServeHTTP(rec, httptest.NewRequest(
+	srv.Handler().ServeHTTP(rec, newAPIRequest(
 		http.MethodPut,
-		"/api/models/test-lib::ver_demo/presets/wide_block/verification",
+		modelPath("test-lib/ver_demo", "/presets/wide_block/verification"),
 		bytes.NewBufferString(`{"scope":"project","status":"unusable","note":"Interferes with bracket"}`),
 	))
 	if rec.Code != http.StatusOK {
@@ -957,9 +1081,9 @@ def create_ver_demo(params: VerDemoParams):
 
 	// 5. Applying update-defaults must downgrade canonical "default" status to unverified while preserving note
 	rec = httptest.NewRecorder()
-	srv.Handler().ServeHTTP(rec, httptest.NewRequest(
+	srv.Handler().ServeHTTP(rec, newAPIRequest(
 		http.MethodPost,
-		"/api/models/test-lib::ver_demo/update-defaults",
+		modelPath("test-lib/ver_demo", "/update-defaults"),
 		bytes.NewBufferString(`{"dry_run":true,"params":{"core":{"width":45.0}}}`),
 	))
 	var previewResp worker.UpdateDefaultsResponse
@@ -973,13 +1097,13 @@ def create_ver_demo(params: VerDemoParams):
 		"params":          map[string]any{"core": map[string]any{"width": 45.0}},
 	})
 	rec = httptest.NewRecorder()
-	srv.Handler().ServeHTTP(rec, httptest.NewRequest(http.MethodPost, "/api/models/test-lib::ver_demo/update-defaults", bytes.NewReader(applyBody)))
+	srv.Handler().ServeHTTP(rec, newAPIRequest(http.MethodPost, modelPath("test-lib/ver_demo", "/update-defaults"), bytes.NewReader(applyBody)))
 	if rec.Code != http.StatusOK {
 		t.Fatalf("apply update-defaults status = %d, body = %s", rec.Code, rec.Body.String())
 	}
 
 	rec = httptest.NewRecorder()
-	srv.Handler().ServeHTTP(rec, httptest.NewRequest(http.MethodGet, "/api/models/test-lib::ver_demo/presets", nil))
+	srv.Handler().ServeHTTP(rec, newAPIRequest(http.MethodGet, modelPath("test-lib/ver_demo", "/presets"), nil))
 	var afterUpdate struct {
 		OK      bool         `json:"ok"`
 		Presets []presetWire `json:"presets"`
@@ -996,6 +1120,7 @@ def create_ver_demo(params: VerDemoParams):
 }
 
 func TestSavePresetOverwritesHandKeyedPresetAndPreservesDefaultPin(t *testing.T) {
+	pyExe := findTestPython(t)
 	projectDir := t.TempDir()
 	modelDir := filepath.Join(projectDir, "models", "lid_demo")
 	if err := os.MkdirAll(modelDir, 0o755); err != nil {
@@ -1020,12 +1145,15 @@ def create_lid_demo(params: LidDemoParams):
 	}
 
 	seedPresets := `{
-  "anchor_round_6_cup": {
-    "label": "Anchor Hocking Round 6-Cup (1.5 qt)",
-    "description": "Initial bowl",
-    "params": {
-      "core": {
-        "diameter": 187.3
+  "schema_version": 1,
+  "presets": {
+    "anchor_round_6_cup": {
+      "label": "Anchor Hocking Round 6-Cup (1.5 qt)",
+      "description": "Initial bowl",
+      "params": {
+        "core": {
+          "diameter": 187.3
+        }
       }
     }
   }
@@ -1038,19 +1166,19 @@ def create_lid_demo(params: LidDemoParams):
 	srv := newTestServer(t, &stubDialogs{})
 	saveBody, _ := json.Marshal(map[string]any{
 		"libraries":   []config.Library{{ID: "test-lib", Name: "Test Lib", Path: projectDir}},
-		"python_path": "python3",
+		"python_path": pyExe,
 	})
 	rec := httptest.NewRecorder()
-	srv.Handler().ServeHTTP(rec, httptest.NewRequest(http.MethodPost, "/api/config", bytes.NewReader(saveBody)))
+	srv.Handler().ServeHTTP(rec, newAPIRequest(http.MethodPost, "/api/config", bytes.NewReader(saveBody)))
 	if rec.Code != http.StatusOK {
 		t.Fatalf("POST /api/config status = %d", rec.Code)
 	}
 
 	// Pin the hand-keyed preset as model default
 	rec = httptest.NewRecorder()
-	srv.Handler().ServeHTTP(rec, httptest.NewRequest(
+	srv.Handler().ServeHTTP(rec, newAPIRequest(
 		http.MethodPost,
-		"/api/models/test-lib::lid_demo/presets/default",
+		modelPath("test-lib/lid_demo", "/presets/default"),
 		bytes.NewBufferString(`{"key":"anchor_round_6_cup"}`),
 	))
 	if rec.Code != http.StatusOK {
@@ -1059,9 +1187,9 @@ def create_lid_demo(params: LidDemoParams):
 
 	// Overwrite by saving with the exact same name
 	rec = httptest.NewRecorder()
-	srv.Handler().ServeHTTP(rec, httptest.NewRequest(
+	srv.Handler().ServeHTTP(rec, newAPIRequest(
 		http.MethodPost,
-		"/api/models/test-lib::lid_demo/presets",
+		modelPath("test-lib/lid_demo", "/presets"),
 		bytes.NewBufferString(`{"label":"Anchor Hocking Round 6-Cup (1.5 qt)","description":"Tighter fit","scope":"project","params":{"core":{"diameter":186.2}}}`),
 	))
 	if rec.Code != http.StatusOK {
@@ -1093,9 +1221,9 @@ def create_lid_demo(params: LidDemoParams):
 
 	// Saving with a distinct name creates a new preset
 	rec = httptest.NewRecorder()
-	srv.Handler().ServeHTTP(rec, httptest.NewRequest(
+	srv.Handler().ServeHTTP(rec, newAPIRequest(
 		http.MethodPost,
-		"/api/models/test-lib::lid_demo/presets",
+		modelPath("test-lib/lid_demo", "/presets"),
 		bytes.NewBufferString(`{"label":"Anchor Hocking Round 6-Cup (Loose)","description":"Loose variant","scope":"project","params":{"core":{"diameter":188.0}}}`),
 	))
 	if rec.Code != http.StatusOK {
@@ -1110,13 +1238,12 @@ def create_lid_demo(params: LidDemoParams):
 }
 
 func TestMultiLibraryNestedFoldersIsolationAndExports(t *testing.T) {
+	pyExe := findTestPython(t)
 	base := t.TempDir()
-	// Two libraries with the SAME folder basename ("code-cad") in different parent dirs
 	libA := filepath.Join(base, "repos", "code-cad")
 	libB := filepath.Join(base, "downloads", "code-cad")
 	missingLib := filepath.Join(base, "offline", "unplugged")
 
-	// Library A: root model, flat canonical model, nested canonical model, deep non-matching model + its own components/tag.py
 	for _, dir := range []string{
 		filepath.Join(libA, "components"),
 		filepath.Join(libA, "models", "c_clip"),
@@ -1156,7 +1283,6 @@ def create_c_clip(params: CClipParams):
 		t.Fatal(err)
 	}
 
-	// Library B: same c_clip model name, DIFFERENT components/tag.py (tests namespace package isolation!)
 	for _, dir := range []string{
 		filepath.Join(libB, "components"),
 		filepath.Join(libB, "models", "c_clip"),
@@ -1181,10 +1307,10 @@ def create_c_clip(params: CClipParams):
 			{Path: libB},
 			{ID: "offline", Name: "Offline", Path: missingLib},
 		},
-		"python_path": "python3",
+		"python_path": pyExe,
 	})
 	rec := httptest.NewRecorder()
-	srv.Handler().ServeHTTP(rec, httptest.NewRequest(http.MethodPost, "/api/config", bytes.NewReader(saveBody)))
+	srv.Handler().ServeHTTP(rec, newAPIRequest(http.MethodPost, "/api/config", bytes.NewReader(saveBody)))
 	if rec.Code != http.StatusOK {
 		t.Fatalf("POST /api/config status = %d, body = %s", rec.Code, rec.Body.String())
 	}
@@ -1201,9 +1327,8 @@ def create_c_clip(params: CClipParams):
 		t.Fatalf("expected distinct IDs for same-named folders, got %+v", cfgResp.Config.Libraries)
 	}
 
-	// GET /api/models -> verify all models, clean folder extraction, and non-fatal library_errors
 	rec = httptest.NewRecorder()
-	srv.Handler().ServeHTTP(rec, httptest.NewRequest(http.MethodGet, "/api/models", nil))
+	srv.Handler().ServeHTTP(rec, newAPIRequest(http.MethodGet, "/api/models", nil))
 	var listResp struct {
 		OK            bool               `json:"ok"`
 		Models        []worker.ModelInfo `json:"models"`
@@ -1224,36 +1349,1180 @@ def create_c_clip(params: CClipParams):
 		byID[m.ID] = m
 	}
 
-	rootPart, ok := byID[libAID+"::root_part"]
+	rootPart, ok := byID[libAID+"/root_part"]
 	if !ok || len(rootPart.Folders) != 0 || rootPart.LocalID != "root_part" {
 		t.Fatalf("unexpected root_part metadata: %+v", rootPart)
 	}
-	binModel, ok := byID[libAID+"::gridfinity__bin"]
+	binModel, ok := byID[libAID+"/gridfinity/bin"]
 	if !ok || len(binModel.Folders) != 1 || binModel.Folders[0] != "gridfinity" || binModel.FolderLabels[0] != "Gridfinity" || binModel.LocalID != "gridfinity/bin" {
 		t.Fatalf("unexpected nested canonical bin metadata: %+v", binModel)
 	}
-	cornerModel, ok := byID[libAID+"::gridfinity__spacers__corner"]
+	cornerModel, ok := byID[libAID+"/gridfinity/spacers/corner"]
 	if !ok || len(cornerModel.Folders) != 2 || cornerModel.LocalID != "gridfinity/spacers/corner" {
 		t.Fatalf("unexpected deep corner metadata: %+v", cornerModel)
 	}
 
+	// Verify %2F nested model schema routing works cleanly
+	rec = httptest.NewRecorder()
+	srv.Handler().ServeHTTP(rec, newAPIRequest(http.MethodGet, modelPath(libAID+"/gridfinity/spacers/corner"), nil))
+	if rec.Code != http.StatusOK {
+		t.Fatalf("GET nested %%2F model status = %d, body = %s", rec.Code, rec.Body.String())
+	}
+
 	// Verify per-library components/ import isolation AND per-library default export folders
 	rec = httptest.NewRecorder()
-	srv.Handler().ServeHTTP(rec, httptest.NewRequest(http.MethodPost, "/api/models/"+libAID+"::c_clip/export", bytes.NewBufferString(`{"format":"stl","params":{"width":12}}`)))
+	srv.Handler().ServeHTTP(rec, newAPIRequest(http.MethodPost, modelPath(libAID+"/c_clip", "/export"), bytes.NewBufferString(`{"format":"stl","params":{"width":12}}`)))
 	if dialogs.lastSave != "c_clip_lib_a_12.stl" || dialogs.lastSaveDir != filepath.Join(libA, "exports") {
 		t.Fatalf("lib A export mismatch: file=%q dir=%q", dialogs.lastSave, dialogs.lastSaveDir)
 	}
 
 	rec = httptest.NewRecorder()
-	srv.Handler().ServeHTTP(rec, httptest.NewRequest(http.MethodPost, "/api/models/"+libBID+"::c_clip/export", bytes.NewBufferString(`{"format":"stl","params":{"width":14}}`)))
+	srv.Handler().ServeHTTP(rec, newAPIRequest(http.MethodPost, modelPath(libBID+"/c_clip", "/export"), bytes.NewBufferString(`{"format":"stl","params":{"width":14}}`)))
 	if dialogs.lastSave != "c_clip_lib_b_14.stl" || dialogs.lastSaveDir != filepath.Join(libB, "exports") {
 		t.Fatalf("lib B export mismatch (components isolation failed?): file=%q dir=%q", dialogs.lastSave, dialogs.lastSaveDir)
 	}
 
-	// Switch back to lib A to ensure module snapshot restoration stays isolated
 	rec = httptest.NewRecorder()
-	srv.Handler().ServeHTTP(rec, httptest.NewRequest(http.MethodPost, "/api/models/"+libAID+"::c_clip/export", bytes.NewBufferString(`{"format":"stl","params":{"width":16}}`)))
+	srv.Handler().ServeHTTP(rec, newAPIRequest(http.MethodPost, modelPath(libAID+"/c_clip", "/export"), bytes.NewBufferString(`{"format":"stl","params":{"width":16}}`)))
 	if dialogs.lastSave != "c_clip_lib_a_16.stl" || dialogs.lastSaveDir != filepath.Join(libA, "exports") {
 		t.Fatalf("lib A second export mismatch: file=%q dir=%q", dialogs.lastSave, dialogs.lastSaveDir)
+	}
+}
+
+func TestSecurityMiddleware(t *testing.T) {
+	srv := newTestServer(t, nil)
+	staticNext := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusOK)
+		_, _ = w.Write([]byte("static"))
+	})
+
+	// 1. Disallowed Host rejected with 403
+	for _, badHost := range []string{"evil.com", "evil.com:8080", "192.168.1.50:8080", "wails", ""} {
+		rec := httptest.NewRecorder()
+		req := httptest.NewRequest(http.MethodGet, "/api/config", nil)
+		req.Host = badHost
+		srv.Handler().ServeHTTP(rec, req)
+		if rec.Code != http.StatusForbidden {
+			t.Fatalf("expected 403 for Handler() Host=%q, got %d", badHost, rec.Code)
+		}
+		if rec.Header().Get("Content-Security-Policy") == "" || rec.Header().Get("X-Content-Type-Options") != "nosniff" {
+			t.Fatalf("expected security headers even on 403 response, got %v", rec.Header())
+		}
+	}
+
+	// Allowed hosts
+	for _, okHost := range []string{"localhost", "localhost:8080", "127.0.0.1:9000", "[::1]", "[::1]:8080", "wails.localhost"} {
+		rec := httptest.NewRecorder()
+		req := httptest.NewRequest(http.MethodGet, "/api/config", nil)
+		req.Host = okHost
+		srv.Handler().ServeHTTP(rec, req)
+		if rec.Code != http.StatusOK {
+			t.Fatalf("expected 200 for Host=%q, got %d (%s)", okHost, rec.Code, rec.Body.String())
+		}
+	}
+
+	// CODE_CAD_ALLOWED_HOSTS support
+	t.Setenv("CODE_CAD_ALLOWED_HOSTS", "cad.local, 10.0.0.5")
+	rec := httptest.NewRecorder()
+	req := httptest.NewRequest(http.MethodGet, "/api/config", nil)
+	req.Host = "cad.local:8443"
+	srv.Handler().ServeHTTP(rec, req)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("expected 200 for CODE_CAD_ALLOWED_HOSTS host, got %d", rec.Code)
+	}
+
+	// Wails internal host & origin permitted ONLY in DesktopMiddleware, rejected in Handler and ServerMiddleware
+	mw := srv.DesktopMiddleware(staticNext)
+	rec = httptest.NewRecorder()
+	req = httptest.NewRequest(http.MethodPost, "/api/config/theme", bytes.NewBufferString(`{"theme":"light"}`))
+	req.Host = "wails"
+	req.Header.Set("Origin", "wails://wails")
+	req.Header.Set("Content-Type", "application/json")
+	mw.ServeHTTP(rec, req)
+	if rec.Code != http.StatusNoContent {
+		t.Fatalf("expected DesktopMiddleware to allow wails host+origin, got %d (%s)", rec.Code, rec.Body.String())
+	}
+
+	serverMW := srv.ServerMiddleware(staticNext)
+	rec = httptest.NewRecorder()
+	req = httptest.NewRequest(http.MethodPost, "/api/config/theme", bytes.NewBufferString(`{"theme":"light"}`))
+	req.Host = "wails"
+	req.Header.Set("Origin", "wails://wails")
+	req.Header.Set("Content-Type", "application/json")
+	serverMW.ServeHTTP(rec, req)
+	if rec.Code != http.StatusForbidden {
+		t.Fatalf("expected ServerMiddleware to reject Host: wails, got %d (%s)", rec.Code, rec.Body.String())
+	}
+
+	rec = httptest.NewRecorder()
+	req = httptest.NewRequest(http.MethodPost, "/api/config/theme", bytes.NewBufferString(`{"theme":"light"}`))
+	req.Host = "localhost"
+	req.Header.Set("Origin", "wails://wails")
+	req.Header.Set("Content-Type", "application/json")
+	serverMW.ServeHTTP(rec, req)
+	if rec.Code != http.StatusForbidden {
+		t.Fatalf("expected ServerMiddleware to reject Origin: wails://wails, got %d (%s)", rec.Code, rec.Body.String())
+	}
+
+	// Static assets through Middleware receive CSP, nosniff, Referrer-Policy
+	rec = httptest.NewRecorder()
+	req = httptest.NewRequest(http.MethodGet, "/index.html", nil)
+	req.Host = "wails.localhost"
+	mw.ServeHTTP(rec, req)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("expected 200 on static asset, got %d", rec.Code)
+	}
+	if rec.Header().Get("Content-Security-Policy") != cspPolicy {
+		t.Fatalf("unexpected CSP header: %q", rec.Header().Get("Content-Security-Policy"))
+	}
+	if rec.Header().Get("Referrer-Policy") != "no-referrer" {
+		t.Fatalf("unexpected Referrer-Policy: %q", rec.Header().Get("Referrer-Policy"))
+	}
+	if rec.Header().Get("Cache-Control") != "" {
+		t.Fatalf("did not expect no-store Cache-Control on static asset, got %q", rec.Header().Get("Cache-Control"))
+	}
+
+	// /api/* gets Cache-Control: no-store
+	rec = httptest.NewRecorder()
+	srv.Handler().ServeHTTP(rec, newAPIRequest(http.MethodGet, "/api/config", nil))
+	if !strings.Contains(rec.Header().Get("Cache-Control"), "no-store") {
+		t.Fatalf("expected no-store Cache-Control on /api/config, got %q", rec.Header().Get("Cache-Control"))
+	}
+
+	// Cross-site Sec-Fetch-Site & Origin checks on mutating methods
+	for _, sfs := range []string{"cross-site", "same-site"} {
+		rec = httptest.NewRecorder()
+		req = newAPIRequest(http.MethodPost, "/api/config/theme", bytes.NewBufferString(`{"theme":"dark"}`))
+		req.Header.Set("Sec-Fetch-Site", sfs)
+		srv.Handler().ServeHTTP(rec, req)
+		if rec.Code != http.StatusForbidden {
+			t.Fatalf("expected 403 for Sec-Fetch-Site=%q, got %d", sfs, rec.Code)
+		}
+	}
+	for _, badOrigin := range []string{"null", "https://evil.example", "wails://wails", "file://"} {
+		rec = httptest.NewRecorder()
+		req = newAPIRequest(http.MethodPost, "/api/config/theme", bytes.NewBufferString(`{"theme":"dark"}`))
+		req.Header.Set("Origin", badOrigin)
+		srv.Handler().ServeHTTP(rec, req)
+		if rec.Code != http.StatusForbidden {
+			t.Fatalf("expected 403 for Handler() Origin=%q, got %d", badOrigin, rec.Code)
+		}
+	}
+	// DELETE with cross-site Origin rejected
+	rec = httptest.NewRecorder()
+	req = newAPIRequest(http.MethodDelete, modelPath("test/m", "/presets/foo"), nil)
+	req.Header.Set("Origin", "https://attacker.test")
+	srv.Handler().ServeHTTP(rec, req)
+	if rec.Code != http.StatusForbidden {
+		t.Fatalf("expected 403 on cross-site DELETE, got %d", rec.Code)
+	}
+
+	// Missing or wrong Content-Type on POST/PUT/PATCH -> 415
+	for _, method := range []string{http.MethodPost, http.MethodPut, http.MethodPatch} {
+		rec = httptest.NewRecorder()
+		req = httptest.NewRequest(method, "/api/config/theme", bytes.NewBufferString(`{"theme":"dark"}`))
+		req.Host = "localhost"
+		srv.Handler().ServeHTTP(rec, req)
+		if rec.Code != http.StatusUnsupportedMediaType {
+			t.Fatalf("expected 415 on %s without Content-Type, got %d", method, rec.Code)
+		}
+
+		rec = httptest.NewRecorder()
+		req = httptest.NewRequest(method, "/api/config/theme", bytes.NewBufferString(`{"theme":"dark"}`))
+		req.Host = "localhost"
+		req.Header.Set("Content-Type", "text/plain")
+		srv.Handler().ServeHTTP(rec, req)
+		if rec.Code != http.StatusUnsupportedMediaType {
+			t.Fatalf("expected 415 on %s with text/plain, got %d", method, rec.Code)
+		}
+	}
+
+	// Oversized JSON body (>2 MiB) -> 413 body_too_large
+	huge := `{"theme":"` + strings.Repeat("a", (2<<20)+1024) + `"}`
+	rec = httptest.NewRecorder()
+	srv.Handler().ServeHTTP(rec, newAPIRequest(http.MethodPost, "/api/config/theme", bytes.NewBufferString(huge)))
+	if rec.Code != http.StatusRequestEntityTooLarge {
+		t.Fatalf("expected 413 on >2MiB JSON body, got %d (%s)", rec.Code, rec.Body.String())
+	}
+	var errEnv struct {
+		OK   bool   `json:"ok"`
+		Code string `json:"code"`
+	}
+	if err := json.Unmarshal(rec.Body.Bytes(), &errEnv); err != nil || errEnv.OK || errEnv.Code != "body_too_large" {
+		t.Fatalf("unexpected 413 envelope: %s", rec.Body.String())
+	}
+}
+
+func TestModelIDValidationAndStrictPresetsError(t *testing.T) {
+	pyExe := findTestPython(t)
+	projectDir := t.TempDir()
+	modelDir := filepath.Join(projectDir, "models", "bad_presets")
+	if err := os.MkdirAll(modelDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(modelDir, "bad_presets.py"), []byte("def create_bad_presets(): return None\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	corruptJSON := "{not valid json"
+	presetsFile := filepath.Join(modelDir, "presets.json")
+	if err := os.WriteFile(presetsFile, []byte(corruptJSON), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	srv := newTestServer(t, &stubDialogs{})
+	saveBody, _ := json.Marshal(map[string]any{
+		"libraries":   []config.Library{{ID: "lib", Name: "Lib", Path: projectDir}},
+		"python_path": pyExe,
+	})
+	rec := httptest.NewRecorder()
+	srv.Handler().ServeHTTP(rec, newAPIRequest(http.MethodPost, "/api/config", bytes.NewReader(saveBody)))
+	if rec.Code != http.StatusOK {
+		t.Fatalf("POST /api/config status = %d", rec.Code)
+	}
+
+	// Invalid modelIDs rejected with 400 invalid_model_id
+	for _, badID := range []string{"single", "lib/..", "../secret", "lib/sub/../x", "lib:part", "lib\\part", "lib/bad\x07id"} {
+		rec = httptest.NewRecorder()
+		srv.Handler().ServeHTTP(rec, newAPIRequest(http.MethodGet, modelPath(badID), nil))
+		if rec.Code != http.StatusBadRequest {
+			t.Fatalf("expected 400 for invalid modelID %q, got %d (%s)", badID, rec.Code, rec.Body.String())
+		}
+	}
+
+	// Malformed presets.json returns 422 invalid_presets_file and is preserved untouched on disk
+	for _, endpoint := range []string{modelPath("lib/bad_presets"), modelPath("lib/bad_presets", "/presets")} {
+		rec = httptest.NewRecorder()
+		srv.Handler().ServeHTTP(rec, newAPIRequest(http.MethodGet, endpoint, nil))
+		if rec.Code != http.StatusUnprocessableEntity {
+			t.Fatalf("expected 422 on %s with malformed presets.json, got %d (%s)", endpoint, rec.Code, rec.Body.String())
+		}
+	}
+	diskBytes, err := os.ReadFile(presetsFile)
+	if err != nil || string(diskBytes) != corruptJSON {
+		t.Fatalf("expected malformed presets.json to remain untouched, got %q (err=%v)", string(diskBytes), err)
+	}
+}
+
+func TestSetWindowConcurrencyRace(t *testing.T) {
+	srv := newTestServer(t, &stubDialogs{})
+	var wg sync.WaitGroup
+	for i := 0; i < 8; i++ {
+		wg.Add(1)
+		go func(idx int) {
+			defer wg.Done()
+			for j := 0; j < 25; j++ {
+				if j%2 == 0 {
+					srv.SetWindow(&stubWindow{})
+				} else {
+					srv.SetWindow(nil)
+				}
+				rec := httptest.NewRecorder()
+				srv.Handler().ServeHTTP(rec, newAPIRequest(http.MethodPost, "/api/window/minimize", bytes.NewBufferString(`{}`)))
+				rec = httptest.NewRecorder()
+				srv.Handler().ServeHTTP(rec, newAPIRequest(http.MethodPost, "/api/window/toggle-maximize", bytes.NewBufferString(`{}`)))
+				rec = httptest.NewRecorder()
+				srv.Handler().ServeHTTP(rec, newAPIRequest(http.MethodGet, "/api/window/state", nil))
+				rec = httptest.NewRecorder()
+				srv.Handler().ServeHTTP(rec, newAPIRequest(http.MethodPost, "/api/window/close", bytes.NewBufferString(`{}`)))
+			}
+		}(i)
+	}
+	wg.Wait()
+}
+
+func TestConfigPartialUpdateAndCorruptInfo(t *testing.T) {
+	setIsolatedTestEnv(t)
+	cfgDir, err := config.ConfigDir()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(cfgDir, "config.json"), []byte("{corrupt"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	cfgStore, err := config.NewStore()
+	if err != nil {
+		t.Fatal(err)
+	}
+	scriptBytes, _ := os.ReadFile(filepath.Join("..", "..", "worker", "worker.py"))
+	srv := New(cfgStore, worker.NewManager(scriptBytes), nil)
+	t.Cleanup(func() { srv.Shutdown() })
+
+	// Corrupt config surfaces config_error and corrupt_backup_path
+	rec := httptest.NewRecorder()
+	srv.Handler().ServeHTTP(rec, newAPIRequest(http.MethodGet, "/api/config", nil))
+	if rec.Code != http.StatusOK {
+		t.Fatalf("GET /api/config status = %d", rec.Code)
+	}
+	var cfgResp configResponse
+	if err := json.Unmarshal(rec.Body.Bytes(), &cfgResp); err != nil {
+		t.Fatal(err)
+	}
+	if cfgResp.ConfigError == "" || cfgResp.CorruptBackupPath == "" {
+		t.Fatalf("expected config_error and corrupt_backup_path on corrupt config, got %+v", cfgResp)
+	}
+
+	// Partial update (onboarding_skipped + editor_command + slicer_command + export_quality) does not start worker
+	rec = httptest.NewRecorder()
+	srv.Handler().ServeHTTP(rec, newAPIRequest(http.MethodPost, "/api/config", bytes.NewBufferString(`{"onboarding_skipped":true,"editor_command":"code --wait","slicer_command":"prusaslicer","export_quality":"fine"}`)))
+	if rec.Code != http.StatusOK {
+		t.Fatalf("partial POST /api/config status = %d, body = %s", rec.Code, rec.Body.String())
+	}
+	if err := json.Unmarshal(rec.Body.Bytes(), &cfgResp); err != nil {
+		t.Fatal(err)
+	}
+	if !cfgResp.Config.OnboardingSkipped || cfgResp.NeedsOnboarding {
+		t.Fatalf("expected onboarding_skipped=true and needs_onboarding=false, got %+v", cfgResp)
+	}
+	if cfgResp.Config.EditorCommand != "code --wait" || cfgResp.Config.SlicerCommand != "prusaslicer" || cfgResp.Config.ExportQuality != "fine" {
+		t.Fatalf("unexpected persisted preferences: %+v", cfgResp.Config)
+	}
+	if cfgResp.WorkerRunning {
+		t.Fatalf("partial preference update should not start worker")
+	}
+
+	// Invalid export_quality rejected with 400
+	rec = httptest.NewRecorder()
+	srv.Handler().ServeHTTP(rec, newAPIRequest(http.MethodPost, "/api/config", bytes.NewBufferString(`{"export_quality":"ultra"}`)))
+	if rec.Code != http.StatusBadRequest {
+		t.Fatalf("expected 400 on invalid export_quality, got %d", rec.Code)
+	}
+}
+
+func TestSSEReliableControlEventsKeepaliveAndWorkerCrash(t *testing.T) {
+	srv := newTestServer(t, nil)
+	srv.sseKeepaliveTimeout = 30 * time.Millisecond
+
+	ts := httptest.NewServer(srv.Handler())
+	defer ts.Close()
+
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, ts.URL+"/events", nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	resp, err := ts.Client().Do(req)
+	if err != nil {
+		t.Fatalf("connect /events: %v", err)
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusOK {
+		t.Fatalf("SSE status = %d", resp.StatusCode)
+	}
+
+	type sseFrame struct {
+		id    string
+		event string
+		data  string
+	}
+	frames := make(chan sseFrame, 128)
+	keepalives := make(chan struct{}, 32)
+	go func() {
+		scanner := bufio.NewScanner(resp.Body)
+		var cur sseFrame
+		for scanner.Scan() {
+			line := scanner.Text()
+			if line == ": keepalive" {
+				select {
+				case keepalives <- struct{}{}:
+				default:
+				}
+				continue
+			}
+			if line == "" {
+				if cur.event != "" {
+					frames <- cur
+					cur = sseFrame{}
+				}
+				continue
+			}
+			if strings.HasPrefix(line, "id: ") {
+				cur.id = strings.TrimPrefix(line, "id: ")
+			} else if strings.HasPrefix(line, "event: ") {
+				cur.event = strings.TrimPrefix(line, "event: ")
+			} else if strings.HasPrefix(line, "data: ") {
+				cur.data = strings.TrimPrefix(line, "data: ")
+			}
+		}
+	}()
+
+	// Wait for initial connected frame with monotonic id
+	var first sseFrame
+	select {
+	case first = <-frames:
+	case <-time.After(2 * time.Second):
+		t.Fatal("timed out waiting for connected SSE event")
+	}
+	if first.event != "connected" || first.id == "" {
+		t.Fatalf("unexpected initial SSE frame: %+v", first)
+	}
+
+	// Verify keepalive arrives
+	select {
+	case <-keepalives:
+	case <-time.After(2 * time.Second):
+		t.Fatal("timed out waiting for SSE keepalive")
+	}
+
+	// Flood 500 setup-log lines, then send critical control events
+	for i := 0; i < 500; i++ {
+		srv.broadcastSSE("setup-log", map[string]any{"line": i})
+	}
+	srv.broadcastSSE("setup-progress", map[string]string{"stage": "done"})
+	srv.broadcastSSE("file-changed", map[string]string{"path": "/tmp/box.py"})
+	srv.broadcastSSE("worker-error", map[string]string{"error": "boom"})
+
+	seen := map[string]int{}
+	prevID, _ := strconv.Atoi(first.id)
+	deadline := time.After(3 * time.Second)
+	for seen["setup-progress"] == 0 || seen["file-changed"] == 0 || seen["worker-error"] == 0 {
+		select {
+		case f := <-frames:
+			idNum, err := strconv.Atoi(f.id)
+			if err != nil || idNum <= prevID {
+				t.Fatalf("expected strictly increasing SSE id > %d, got %q (frame %+v)", prevID, f.id, f)
+			}
+			prevID = idNum
+			seen[f.event]++
+		case <-deadline:
+			t.Fatalf("dropped control events under log burst; seen=%v", seen)
+		}
+	}
+
+	// Verify real unexpected worker exit triggers worker-error SSE event via SetOnUnexpectedExit
+	pyExe := findTestPython(t)
+	crashWorker := `
+import os, sys, threading, time
+from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
+
+class H(BaseHTTPRequestHandler):
+    def log_message(self, *args): pass
+    def do_GET(self):
+        self.send_response(200)
+        self.end_headers()
+
+srv = ThreadingHTTPServer(("127.0.0.1", 0), H)
+print(f"READY {srv.server_address[1]}", flush=True)
+threading.Timer(0.15, lambda: os._exit(1)).start()
+srv.serve_forever()
+`
+	crashMgr := worker.NewManager([]byte(crashWorker))
+	crashSrv := New(srv.cfgStore, crashMgr, nil)
+	defer crashSrv.Shutdown()
+
+	crashTS := httptest.NewServer(crashSrv.Handler())
+	defer crashTS.Close()
+
+	crashReq, _ := http.NewRequestWithContext(ctx, http.MethodGet, crashTS.URL+"/events", nil)
+	crashResp, err := crashTS.Client().Do(crashReq)
+	if err != nil {
+		t.Fatalf("connect crash SSE: %v", err)
+	}
+	defer crashResp.Body.Close()
+
+	crashFrames := make(chan sseFrame, 16)
+	go func() {
+		sc := bufio.NewScanner(crashResp.Body)
+		var cur sseFrame
+		for sc.Scan() {
+			line := sc.Text()
+			if line == "" {
+				if cur.event != "" {
+					crashFrames <- cur
+					cur = sseFrame{}
+				}
+				continue
+			}
+			if strings.HasPrefix(line, "id: ") {
+				cur.id = strings.TrimPrefix(line, "id: ")
+			} else if strings.HasPrefix(line, "event: ") {
+				cur.event = strings.TrimPrefix(line, "event: ")
+			} else if strings.HasPrefix(line, "data: ") {
+				cur.data = strings.TrimPrefix(line, "data: ")
+			}
+		}
+	}()
+
+	if err := crashMgr.Start(pyExe, nil); err != nil {
+		t.Fatalf("start crash worker: %v", err)
+	}
+	crashDeadline := time.After(3 * time.Second)
+	gotWorkerError := false
+	for !gotWorkerError {
+		select {
+		case f := <-crashFrames:
+			if f.event == "worker-error" && strings.Contains(f.data, "exited unexpectedly") {
+				gotWorkerError = true
+			}
+		case <-crashDeadline:
+			t.Fatal("timed out waiting for worker-error SSE event after unexpected worker exit")
+		}
+	}
+}
+
+func TestCancelRenderAndRenderRawStreaming(t *testing.T) {
+	pyExe := findTestPython(t)
+	setIsolatedTestEnv(t)
+	cfgStore, err := config.NewStore()
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	stubWorker := `
+import json, os, sys, time
+from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
+from urllib.parse import unquote
+
+TOKEN = os.environ.get("CODE_CAD_WORKER_TOKEN", "")
+
+class H(BaseHTTPRequestHandler):
+    def log_message(self, *args): pass
+    def _ok(self):
+        return self.headers.get("Authorization") == f"Bearer {TOKEN}"
+    def _send(self, obj, code=200):
+        b = json.dumps(obj, separators=(",", ":")).encode()
+        self.send_response(code)
+        self.send_header("Content-Type", "application/json")
+        self.send_header("Content-Length", str(len(b)))
+        self.end_headers()
+        self.wfile.write(b)
+    def do_GET(self):
+        if not self._ok(): return self._send({"ok": False}, 401)
+        if self.path == "/health": return self._send({"ok": True})
+        if self.path == "/models": return self._send({"ok": True, "models": []})
+        self._send({"ok": False}, 404)
+    def do_POST(self):
+        if not self._ok(): return self._send({"ok": False}, 401)
+        n = int(self.headers.get("Content-Length", "0") or 0)
+        body = json.loads(self.rfile.read(n)) if n else {}
+        if self.path == "/configure": return self._send({"ok": True, "models": [], "library_errors": {}})
+        if self.path == "/models/lib%2Fslow/render":
+            time.sleep(30)
+            return self._send({"ok": True})
+        if self.path == "/models/lib%2Ffast/render":
+            return self._send({"ok": True, "model_id": "lib/fast", "shapes": {"parts": []}, "raw_marker": 42})
+        if self.path == "/models/lib%2Fbroken/render":
+            return self._send({"ok": False, "error": "SyntaxError: bad", "traceback": "tb line 1"}, 422)
+        self._send({"ok": False, "error": "Unknown model: missing"}, 404)
+
+srv = ThreadingHTTPServer(("127.0.0.1", 0), H)
+print(f"READY {srv.server_address[1]}", flush=True)
+srv.serve_forever()
+`
+	mgr := worker.NewManager([]byte(stubWorker))
+	srv := New(cfgStore, mgr, nil)
+	t.Cleanup(func() { srv.Shutdown() })
+
+	libDir := t.TempDir()
+	_, err = cfgStore.Update(func(c *config.Config) {
+		c.Libraries = []config.Library{{ID: "lib", Name: "Lib", Path: libDir}}
+		c.PythonPath = pyExe
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	// RenderRaw streams raw JSON directly including custom fields without re-marshaling
+	rec := httptest.NewRecorder()
+	srv.Handler().ServeHTTP(rec, newAPIRequest(http.MethodPost, modelPath("lib/fast", "/render"), bytes.NewBufferString(`{"params":{}}`)))
+	if rec.Code != http.StatusOK || !bytes.Contains(rec.Body.Bytes(), []byte(`"raw_marker":42`)) {
+		t.Fatalf("expected raw streamed JSON, got %d %s", rec.Code, rec.Body.String())
+	}
+
+	// Model error returns 422 with standardized error envelope & traceback
+	rec = httptest.NewRecorder()
+	srv.Handler().ServeHTTP(rec, newAPIRequest(http.MethodPost, modelPath("lib/broken", "/render"), bytes.NewBufferString(`{"params":{}}`)))
+	if rec.Code != http.StatusUnprocessableEntity {
+		t.Fatalf("expected 422 on model error, got %d (%s)", rec.Code, rec.Body.String())
+	}
+	var errResp struct {
+		OK        bool   `json:"ok"`
+		Code      string `json:"code"`
+		Error     string `json:"error"`
+		Traceback string `json:"traceback"`
+	}
+	if err := json.Unmarshal(rec.Body.Bytes(), &errResp); err != nil || errResp.OK || errResp.Code != "model_build_error" || errResp.Traceback != "tb line 1" {
+		t.Fatalf("unexpected 422 envelope: %s", rec.Body.String())
+	}
+
+	// Start slow render in background and cancel it via POST /api/render/cancel
+	slowDone := make(chan int, 1)
+	go func() {
+		r := httptest.NewRecorder()
+		srv.Handler().ServeHTTP(r, newAPIRequest(http.MethodPost, modelPath("lib/slow", "/render"), bytes.NewBufferString(`{"params":{}}`)))
+		slowDone <- r.Code
+	}()
+	time.Sleep(100 * time.Millisecond)
+
+	rec = httptest.NewRecorder()
+	srv.Handler().ServeHTTP(rec, newAPIRequest(http.MethodPost, "/api/render/cancel", bytes.NewBufferString(`{}`)))
+	if rec.Code != http.StatusOK {
+		t.Fatalf("POST /api/render/cancel status = %d, body = %s", rec.Code, rec.Body.String())
+	}
+	var cancelResp struct {
+		OK        bool `json:"ok"`
+		Cancelled bool `json:"cancelled"`
+	}
+	if err := json.Unmarshal(rec.Body.Bytes(), &cancelResp); err != nil || !cancelResp.OK || !cancelResp.Cancelled {
+		t.Fatalf("unexpected cancel response: %s", rec.Body.String())
+	}
+
+	select {
+	case <-slowDone:
+	case <-time.After(3 * time.Second):
+		t.Fatal("slow render did not unblock after /api/render/cancel")
+	}
+
+	// Subsequent render succeeds on the respawned worker
+	rec = httptest.NewRecorder()
+	srv.Handler().ServeHTTP(rec, newAPIRequest(http.MethodPost, modelPath("lib/fast", "/render"), bytes.NewBufferString(`{"params":{}}`)))
+	if rec.Code != http.StatusOK {
+		t.Fatalf("render after cancel failed: %d %s", rec.Code, rec.Body.String())
+	}
+}
+
+func TestScaffoldDemoAndNewModel(t *testing.T) {
+	pyExe := findTestPython(t)
+	srv := newTestServer(t, nil)
+
+	// Configure python_path first so worker uses valid test Python
+	initCfg, _ := json.Marshal(map[string]any{"python_path": pyExe})
+	rec := httptest.NewRecorder()
+	srv.Handler().ServeHTTP(rec, newAPIRequest(http.MethodPost, "/api/config", bytes.NewReader(initCfg)))
+	if rec.Code != http.StatusOK {
+		t.Fatalf("init config status = %d", rec.Code)
+	}
+
+	// 1. Scaffold demo into fresh empty target dir
+	demoDir := filepath.Join(t.TempDir(), "my-demo")
+	demoBody, _ := json.Marshal(map[string]any{"mode": "demo", "target_dir": demoDir})
+	rec = httptest.NewRecorder()
+	srv.Handler().ServeHTTP(rec, newAPIRequest(http.MethodPost, "/api/models/scaffold", bytes.NewReader(demoBody)))
+	if rec.Code != http.StatusOK {
+		t.Fatalf("POST /api/models/scaffold demo status = %d, body = %s", rec.Code, rec.Body.String())
+	}
+	var demoResp struct {
+		OK        bool   `json:"ok"`
+		LibraryID string `json:"library_id"`
+		ModelID   string `json:"model_id"`
+		PyPath    string `json:"py_path"`
+	}
+	if err := json.Unmarshal(rec.Body.Bytes(), &demoResp); err != nil || !demoResp.OK {
+		t.Fatalf("unexpected demo scaffold resp: %s", rec.Body.String())
+	}
+	if demoResp.ModelID != demoResp.LibraryID+"/spool_cap" {
+		t.Fatalf("expected spool_cap model_id, got %+v", demoResp)
+	}
+	for _, rel := range []string{
+		"components/chamfer_base.py",
+		"models/spool_cap/spool_cap.py",
+		"models/spool_cap/presets.json",
+		"utils/params.py",
+	} {
+		if _, err := os.Stat(filepath.Join(demoDir, filepath.FromSlash(rel))); err != nil {
+			t.Fatalf("missing scaffolded demo file %s: %v", rel, err)
+		}
+	}
+
+	// Non-empty target dir returns 409 target_not_empty
+	rec = httptest.NewRecorder()
+	srv.Handler().ServeHTTP(rec, newAPIRequest(http.MethodPost, "/api/models/scaffold", bytes.NewReader(demoBody)))
+	if rec.Code != http.StatusConflict {
+		t.Fatalf("expected 409 on non-empty demo target_dir, got %d (%s)", rec.Code, rec.Body.String())
+	}
+
+	// 2. Scaffold new model validation + creation + conflict
+	for _, badName := range []string{"", "BadName", "1box", "../escape", "bad-name"} {
+		body, _ := json.Marshal(map[string]any{"mode": "new", "name": badName, "library_id": demoResp.LibraryID})
+		rec = httptest.NewRecorder()
+		srv.Handler().ServeHTTP(rec, newAPIRequest(http.MethodPost, "/api/models/scaffold", bytes.NewReader(body)))
+		if rec.Code != http.StatusBadRequest {
+			t.Fatalf("expected 400 for invalid model name %q, got %d", badName, rec.Code)
+		}
+	}
+
+	newBody, _ := json.Marshal(map[string]any{
+		"mode":       "new",
+		"name":       "cable_clip",
+		"library_id": demoResp.LibraryID,
+		"template":   "parametric",
+	})
+	rec = httptest.NewRecorder()
+	srv.Handler().ServeHTTP(rec, newAPIRequest(http.MethodPost, "/api/models/scaffold", bytes.NewReader(newBody)))
+	if rec.Code != http.StatusOK {
+		t.Fatalf("POST scaffold new status = %d, body = %s", rec.Code, rec.Body.String())
+	}
+	var newResp struct {
+		OK      bool   `json:"ok"`
+		ModelID string `json:"model_id"`
+		PyPath  string `json:"py_path"`
+	}
+	if err := json.Unmarshal(rec.Body.Bytes(), &newResp); err != nil || !newResp.OK || newResp.ModelID != demoResp.LibraryID+"/cable_clip" {
+		t.Fatalf("unexpected new model scaffold resp: %s", rec.Body.String())
+	}
+	if _, err := os.Stat(newResp.PyPath); err != nil {
+		t.Fatalf("expected new model file at %s: %v", newResp.PyPath, err)
+	}
+
+	// Duplicate new model returns 409 model_exists
+	rec = httptest.NewRecorder()
+	srv.Handler().ServeHTTP(rec, newAPIRequest(http.MethodPost, "/api/models/scaffold", bytes.NewReader(newBody)))
+	if rec.Code != http.StatusConflict {
+		t.Fatalf("expected 409 on duplicate new model, got %d (%s)", rec.Code, rec.Body.String())
+	}
+
+	// New model is discovered and its schema loads cleanly
+	rec = httptest.NewRecorder()
+	srv.Handler().ServeHTTP(rec, newAPIRequest(http.MethodGet, modelPath(newResp.ModelID), nil))
+	if rec.Code != http.StatusOK {
+		t.Fatalf("GET newly scaffolded model status = %d, body = %s", rec.Code, rec.Body.String())
+	}
+}
+
+func TestExportServerDownloadAndQualityValidation(t *testing.T) {
+	pyExe := findTestPython(t)
+	setIsolatedTestEnv(t)
+	cfgStore, err := config.NewStore()
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	stubWorker := `
+import json, os, sys
+from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
+
+TOKEN = os.environ.get("CODE_CAD_WORKER_TOKEN", "")
+
+class H(BaseHTTPRequestHandler):
+    def log_message(self, *args): pass
+    def _ok(self):
+        return self.headers.get("Authorization") == f"Bearer {TOKEN}"
+    def _send(self, obj, code=200):
+        b = json.dumps(obj).encode()
+        self.send_response(code)
+        self.send_header("Content-Type", "application/json")
+        self.send_header("Content-Length", str(len(b)))
+        self.end_headers()
+        self.wfile.write(b)
+    def do_POST(self):
+        if not self._ok(): return self._send({"ok": False}, 401)
+        n = int(self.headers.get("Content-Length", "0") or 0)
+        body = json.loads(self.rfile.read(n)) if n else {}
+        if self.path == "/configure": return self._send({"ok": True, "models": [], "library_errors": {}})
+        if self.path.endswith("/export-name"):
+            return self._send({"ok": True, "export_filename": "bracket_part", "library_id": "lib"})
+        if self.path.endswith("/export"):
+            payload = ("MESH:" + str(body.get("quality")) + ":" + str(body.get("format"))).encode()
+            self.send_response(200)
+            self.send_header("Content-Type", "application/octet-stream")
+            self.send_header("Content-Length", str(len(payload)))
+            self.end_headers()
+            self.wfile.write(payload)
+            return
+        self._send({"ok": False}, 404)
+
+srv = ThreadingHTTPServer(("127.0.0.1", 0), H)
+print(f"READY {srv.server_address[1]}", flush=True)
+srv.serve_forever()
+`
+	mgr := worker.NewManager([]byte(stubWorker))
+	srv := New(cfgStore, mgr, nil) // nil dialogs simulates -tags server mode
+	t.Cleanup(func() { srv.Shutdown() })
+
+	libDir := t.TempDir()
+	_, _ = cfgStore.Update(func(c *config.Config) {
+		c.Libraries = []config.Library{{ID: "lib", Name: "Lib", Path: libDir}}
+		c.PythonPath = pyExe
+	})
+
+	// Server mode download streams attachment with sanitized Content-Disposition
+	rec := httptest.NewRecorder()
+	srv.Handler().ServeHTTP(rec, newAPIRequest(
+		http.MethodPost,
+		modelPath("lib/bracket", "/export"),
+		bytes.NewBufferString(`{"format":"stl","quality":"fine","filename":"../../evil\"; hack.stl","params":{}}`),
+	))
+	if rec.Code != http.StatusOK {
+		t.Fatalf("expected 200 browser download, got %d (%s)", rec.Code, rec.Body.String())
+	}
+	if rec.Header().Get("Content-Type") != "application/octet-stream" {
+		t.Fatalf("unexpected Content-Type: %q", rec.Header().Get("Content-Type"))
+	}
+	disp := rec.Header().Get("Content-Disposition")
+	if !strings.HasPrefix(disp, "attachment;") || strings.Contains(disp, "..") || strings.Contains(disp, "/") {
+		t.Fatalf("unsafe Content-Disposition header: %q", disp)
+	}
+	if rec.Body.String() != "MESH:fine:stl" {
+		t.Fatalf("unexpected exported bytes: %q", rec.Body.String())
+	}
+
+	// Validation rejections (400)
+	badPayloads := []string{
+		`{"format":"obj","params":{}}`,
+		`{"format":"stl","quality":"ultra","params":{}}`,
+		`{"format":"stl","quality":"custom","params":{}}`,
+		`{"format":"stl","quality":"custom","linear_deflection":-0.1,"angular_deflection":0.2,"params":{}}`,
+		`{"format":"stl","quality":"custom","linear_deflection":0.1,"angular_deflection":9.9,"params":{}}`,
+	}
+	for _, body := range badPayloads {
+		rec = httptest.NewRecorder()
+		srv.Handler().ServeHTTP(rec, newAPIRequest(http.MethodPost, modelPath("lib/bracket", "/export"), bytes.NewBufferString(body)))
+		if rec.Code != http.StatusBadRequest {
+			t.Fatalf("expected 400 for export payload %s, got %d (%s)", body, rec.Code, rec.Body.String())
+		}
+	}
+}
+
+func TestDesktopActionsContainmentAndServerMode(t *testing.T) {
+	base := t.TempDir()
+	libDir := filepath.Join(base, "lib")
+	exportDir := filepath.Join(base, "exports")
+	outsideDir := filepath.Join(base, "outside")
+	for _, d := range []string{libDir, exportDir, outsideDir} {
+		if err := os.MkdirAll(d, 0o755); err != nil {
+			t.Fatal(err)
+		}
+	}
+	modelPy := filepath.Join(libDir, "box.py")
+	exportStl := filepath.Join(exportDir, "box.stl")
+	secretFile := filepath.Join(outsideDir, "secret.py")
+	for _, f := range []string{modelPy, exportStl, secretFile} {
+		if err := os.WriteFile(f, []byte("data"), 0o644); err != nil {
+			t.Fatal(err)
+		}
+	}
+	symlinkEscape := filepath.Join(libDir, "escape.py")
+	if err := os.Symlink(secretFile, symlinkEscape); err != nil {
+		t.Skipf("symlinks unsupported on this platform: %v", err)
+	}
+
+	// 1. Server mode (dialogs == nil) returns 400 desktop_unavailable
+	srvNoDesktop := newTestServer(t, nil)
+	for _, ep := range []string{"/api/desktop/open-editor", "/api/desktop/reveal-file", "/api/desktop/open-slicer"} {
+		body, _ := json.Marshal(map[string]string{"path": modelPy})
+		rec := httptest.NewRecorder()
+		srvNoDesktop.Handler().ServeHTTP(rec, newAPIRequest(http.MethodPost, ep, bytes.NewReader(body)))
+		if rec.Code != http.StatusBadRequest {
+			t.Fatalf("expected 400 in server mode for %s, got %d (%s)", ep, rec.Code, rec.Body.String())
+		}
+	}
+
+	// 2. Desktop mode enforces containment and executes tokenized commands without shell
+	srv := newTestServer(t, &stubDialogs{})
+	var ranCmd string
+	var ranArgs []string
+	srv.desktopRunner = func(name string, args ...string) error {
+		ranCmd = name
+		ranArgs = append([]string(nil), args...)
+		return nil
+	}
+
+	_, err := srv.cfgStore.Update(func(c *config.Config) {
+		c.Libraries = []config.Library{{ID: "lib", Name: "Lib", Path: libDir}}
+		c.ExportDir = exportDir
+		c.EditorCommand = `code --wait "{file}"`
+		c.SlicerCommand = `prusa-slicer`
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	// Outside file -> 403 forbidden_path
+	for _, forbidden := range []string{secretFile, symlinkEscape} {
+		body, _ := json.Marshal(map[string]string{"path": forbidden})
+		rec := httptest.NewRecorder()
+		srv.Handler().ServeHTTP(rec, newAPIRequest(http.MethodPost, "/api/desktop/open-editor", bytes.NewReader(body)))
+		if rec.Code != http.StatusForbidden {
+			t.Fatalf("expected 403 for path %q, got %d (%s)", forbidden, rec.Code, rec.Body.String())
+		}
+	}
+
+	// open-editor must reject exportDir files (only library roots allowed)
+	expBody, _ := json.Marshal(map[string]string{"path": exportStl})
+	rec := httptest.NewRecorder()
+	srv.Handler().ServeHTTP(rec, newAPIRequest(http.MethodPost, "/api/desktop/open-editor", bytes.NewReader(expBody)))
+	if rec.Code != http.StatusForbidden {
+		t.Fatalf("expected 403 for exportStl in open-editor, got %d", rec.Code)
+	}
+
+	// open-slicer rejects .py files -> 400 invalid_slicer_file
+	pyBody, _ := json.Marshal(map[string]string{"path": modelPy})
+	rec = httptest.NewRecorder()
+	srv.Handler().ServeHTTP(rec, newAPIRequest(http.MethodPost, "/api/desktop/open-slicer", bytes.NewReader(pyBody)))
+	if rec.Code != http.StatusBadRequest {
+		t.Fatalf("expected 400 for .py in open-slicer, got %d (%s)", rec.Code, rec.Body.String())
+	}
+
+	// Valid open-editor runs tokenized command
+	rec = httptest.NewRecorder()
+	srv.Handler().ServeHTTP(rec, newAPIRequest(http.MethodPost, "/api/desktop/open-editor", bytes.NewReader(pyBody)))
+	if rec.Code != http.StatusOK {
+		t.Fatalf("open-editor status = %d, body = %s", rec.Code, rec.Body.String())
+	}
+	resolvedPy, _ := filepath.EvalSymlinks(modelPy)
+	if ranCmd != "code" || len(ranArgs) != 2 || ranArgs[0] != "--wait" || ranArgs[1] != resolvedPy {
+		t.Fatalf("unexpected editor command: cmd=%q args=%v", ranCmd, ranArgs)
+	}
+
+	// Valid open-slicer on exportStl
+	rec = httptest.NewRecorder()
+	srv.Handler().ServeHTTP(rec, newAPIRequest(http.MethodPost, "/api/desktop/open-slicer", bytes.NewReader(expBody)))
+	if rec.Code != http.StatusOK {
+		t.Fatalf("open-slicer status = %d, body = %s", rec.Code, rec.Body.String())
+	}
+	resolvedStl, _ := filepath.EvalSymlinks(exportStl)
+	if ranCmd != "prusa-slicer" || len(ranArgs) != 1 || ranArgs[0] != resolvedStl {
+		t.Fatalf("unexpected slicer command: cmd=%q args=%v", ranCmd, ranArgs)
+	}
+
+	// Valid reveal-file on exportStl
+	rec = httptest.NewRecorder()
+	srv.Handler().ServeHTTP(rec, newAPIRequest(http.MethodPost, "/api/desktop/reveal-file", bytes.NewReader(expBody)))
+	if rec.Code != http.StatusOK {
+		t.Fatalf("reveal-file status = %d, body = %s", rec.Code, rec.Body.String())
+	}
+}
+
+func TestSaveConfigAndSetupCompleteBroadcastWorkerErrorSSE(t *testing.T) {
+	srv := newTestServer(t, nil)
+	ts := httptest.NewServer(srv.Handler())
+	defer ts.Close()
+
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, ts.URL+"/events", nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	resp, err := ts.Client().Do(req)
+	if err != nil {
+		t.Fatalf("connect /events: %v", err)
+	}
+	defer resp.Body.Close()
+
+	type sseFrame struct {
+		event string
+		data  string
+	}
+	frames := make(chan sseFrame, 32)
+	go func() {
+		sc := bufio.NewScanner(resp.Body)
+		var cur sseFrame
+		for sc.Scan() {
+			line := sc.Text()
+			if line == "" {
+				if cur.event != "" {
+					frames <- cur
+					cur = sseFrame{}
+				}
+				continue
+			}
+			if strings.HasPrefix(line, "event: ") {
+				cur.event = strings.TrimPrefix(line, "event: ")
+			} else if strings.HasPrefix(line, "data: ") {
+				cur.data = strings.TrimPrefix(line, "data: ")
+			}
+		}
+	}()
+
+	select {
+	case f := <-frames:
+		if f.event != "connected" {
+			t.Fatalf("expected connected frame first, got %+v", f)
+		}
+	case <-time.After(2 * time.Second):
+		t.Fatal("timed out waiting for connected SSE frame")
+	}
+
+	libDir := t.TempDir()
+	badPython := filepath.Join(t.TempDir(), "does-not-exist-python")
+
+	// 1. handleSaveConfig broadcasts worker-error SSE when worker startup fails
+	saveBody, _ := json.Marshal(map[string]any{
+		"libraries":   []config.Library{{ID: "lib", Name: "Lib", Path: libDir}},
+		"python_path": badPython,
+	})
+	rec := httptest.NewRecorder()
+	srv.Handler().ServeHTTP(rec, newAPIRequest(http.MethodPost, "/api/config", bytes.NewReader(saveBody)))
+	if rec.Code != http.StatusOK {
+		t.Fatalf("POST /api/config status = %d, body = %s", rec.Code, rec.Body.String())
+	}
+
+	waitWorkerErr := func(label string) {
+		deadline := time.After(2 * time.Second)
+		for {
+			select {
+			case f := <-frames:
+				if f.event == "worker-error" {
+					var payload map[string]string
+					if err := json.Unmarshal([]byte(f.data), &payload); err != nil || payload["error"] == "" {
+						t.Fatalf("%s: invalid worker-error SSE payload: %q", label, f.data)
+					}
+					return
+				}
+			case <-deadline:
+				t.Fatalf("%s: timed out waiting for worker-error SSE event", label)
+			}
+		}
+	}
+	waitWorkerErr("handleSaveConfig")
+
+	// 2. handleSetupComplete broadcasts worker-error SSE when worker startup fails
+	completeBody, _ := json.Marshal(map[string]any{
+		"libraries":   []config.Library{{ID: "lib", Name: "Lib", Path: libDir}},
+		"python_path": badPython + "-2",
+	})
+	rec = httptest.NewRecorder()
+	srv.Handler().ServeHTTP(rec, newAPIRequest(http.MethodPost, "/api/setup/complete", bytes.NewReader(completeBody)))
+	if rec.Code != http.StatusOK {
+		t.Fatalf("POST /api/setup/complete status = %d, body = %s", rec.Code, rec.Body.String())
+	}
+	waitWorkerErr("handleSetupComplete")
+}
+
+func TestScaffoldRejectsSymlinks(t *testing.T) {
+	srv := newTestServer(t, nil)
+	base := t.TempDir()
+
+	// 1. mode: "demo" rejects symlinked empty directory
+	outsideEmpty := filepath.Join(base, "outside-empty")
+	if err := os.MkdirAll(outsideEmpty, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	symDemo := filepath.Join(base, "sym-demo")
+	if err := os.Symlink(outsideEmpty, symDemo); err != nil {
+		t.Skipf("symlinks unsupported on this platform: %v", err)
+	}
+
+	demoBody, _ := json.Marshal(map[string]any{"mode": "demo", "target_dir": symDemo})
+	rec := httptest.NewRecorder()
+	srv.Handler().ServeHTTP(rec, newAPIRequest(http.MethodPost, "/api/models/scaffold", bytes.NewReader(demoBody)))
+	if rec.Code != http.StatusConflict {
+		t.Fatalf("expected 409 for symlinked demo target_dir, got %d (%s)", rec.Code, rec.Body.String())
+	}
+	if entries, err := os.ReadDir(outsideEmpty); err != nil || len(entries) != 0 {
+		t.Fatalf("expected outside directory to remain untouched, entries=%v err=%v", entries, err)
+	}
+
+	// 2. mode: "demo" rejects non-existent subdir under a symlinked parent
+	nestedUnderSym := filepath.Join(symDemo, "nested_demo")
+	nestedBody, _ := json.Marshal(map[string]any{"mode": "demo", "target_dir": nestedUnderSym})
+	rec = httptest.NewRecorder()
+	srv.Handler().ServeHTTP(rec, newAPIRequest(http.MethodPost, "/api/models/scaffold", bytes.NewReader(nestedBody)))
+	if rec.Code != http.StatusConflict {
+		t.Fatalf("expected 409 for demo target under symlinked parent, got %d (%s)", rec.Code, rec.Body.String())
+	}
+
+	// 3. mode: "new" rejects symlinked models/ folder inside configured library
+	libDir := filepath.Join(base, "lib")
+	outsideModels := filepath.Join(base, "outside-models")
+	if err := os.MkdirAll(libDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.MkdirAll(outsideModels, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Symlink(outsideModels, filepath.Join(libDir, "models")); err != nil {
+		t.Fatal(err)
+	}
+	_, err := srv.cfgStore.Update(func(c *config.Config) {
+		c.Libraries = []config.Library{{ID: "lib", Name: "Lib", Path: libDir}}
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	newBody, _ := json.Marshal(map[string]any{
+		"mode":       "new",
+		"library_id": "lib",
+		"name":       "my_part",
+		"template":   "parametric",
+	})
+	rec = httptest.NewRecorder()
+	srv.Handler().ServeHTTP(rec, newAPIRequest(http.MethodPost, "/api/models/scaffold", bytes.NewReader(newBody)))
+	if rec.Code != http.StatusConflict {
+		t.Fatalf("expected 409 for symlinked models/ in mode=new, got %d (%s)", rec.Code, rec.Body.String())
+	}
+	if entries, err := os.ReadDir(outsideModels); err != nil || len(entries) != 0 {
+		t.Fatalf("expected outsideModels to remain empty, entries=%v err=%v", entries, err)
+	}
+}
+
+func TestSanitizeExportStem(t *testing.T) {
+	// Windows reserved device names (case-insensitive, with or without extension/sub-extension)
+	for _, reserved := range []string{"CON", "con", "CON.stl", "prn", "AUX.step", "nul.3mf", "COM1", "com9", "LPT1", "lpt9.stl", "CON.part"} {
+		got := sanitizeExportStem(reserved, "model")
+		if !strings.HasPrefix(got, "export_") {
+			t.Errorf("sanitizeExportStem(%q) = %q, expected 'export_' prefix", reserved, got)
+		}
+	}
+
+	// Non-reserved names remain unprefixed
+	for in, want := range map[string]string{
+		"CON0":        "CON0",
+		"COM10":       "COM10",
+		"config":      "config",
+		"bracket.stl": "bracket",
+		"../../a/b":   "b",
+		"...":         "model",
+	} {
+		if got := sanitizeExportStem(in, "model"); got != want {
+			t.Errorf("sanitizeExportStem(%q) = %q, want %q", in, got, want)
+		}
+	}
+
+	// Length clamped to <= 120 chars
+	long := strings.Repeat("a", 400)
+	gotLong := sanitizeExportStem(long, "model")
+	if len(gotLong) != 120 {
+		t.Fatalf("expected length 120, got %d (%q)", len(gotLong), gotLong)
+	}
+
+	longReserved := "CON." + strings.Repeat("x", 150)
+	gotLongReserved := sanitizeExportStem(longReserved, "model")
+	if !strings.HasPrefix(gotLongReserved, "export_CON.") || len(gotLongReserved) > 120 {
+		t.Fatalf("expected prefixed and <=120 chars for %q, got len=%d (%q)", longReserved, len(gotLongReserved), gotLongReserved)
+	}
+}
+
+func TestServerShutdownWithActiveWatcherEdits(t *testing.T) {
+	pyExe := findTestPython(t)
+	srv := newTestServer(t, nil)
+
+	libDir := t.TempDir()
+	pyFile := filepath.Join(libDir, "box.py")
+	if err := os.WriteFile(pyFile, []byte("def create_box(): return None\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	saveBody, _ := json.Marshal(map[string]any{
+		"libraries":   []config.Library{{ID: "lib", Name: "Lib", Path: libDir}},
+		"python_path": pyExe,
+	})
+	rec := httptest.NewRecorder()
+	srv.Handler().ServeHTTP(rec, newAPIRequest(http.MethodPost, "/api/config", bytes.NewReader(saveBody)))
+	if rec.Code != http.StatusOK {
+		t.Fatalf("POST /api/config status = %d, body = %s", rec.Code, rec.Body.String())
+	}
+
+	// Trigger watcher edits right before and concurrently with Shutdown()
+	for i := 0; i < 5; i++ {
+		if err := os.WriteFile(pyFile, []byte("x = "+strconv.Itoa(i)+"\n"), 0o644); err != nil {
+			t.Fatal(err)
+		}
+		time.Sleep(30 * time.Millisecond)
+	}
+
+	// Wait just past one debounce tick so handlePyFileChanged may be in-flight during Shutdown()
+	time.Sleep(240 * time.Millisecond)
+	srv.Shutdown()
+
+	// Wait past another debounce window to verify no callback respawns the worker after Shutdown()
+	time.Sleep(350 * time.Millisecond)
+	running, _ := srv.worker.Status()
+	if running {
+		t.Fatal("expected worker to remain stopped after Server.Shutdown() despite active watcher edits")
 	}
 }

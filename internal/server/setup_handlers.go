@@ -3,7 +3,6 @@ package server
 import (
 	"context"
 	"errors"
-	"io"
 	"net/http"
 	"path/filepath"
 	"strings"
@@ -48,8 +47,7 @@ func (s *Server) handleSetupInspectDir(w http.ResponseWriter, r *http.Request) {
 	var req struct {
 		Path string `json:"path"`
 	}
-	if err := decodeJSON(r, &req); err != nil && err != io.EOF {
-		writeJSON(w, http.StatusBadRequest, map[string]any{"ok": false, "error": "invalid JSON body"})
+	if !decodeJSON(w, r, &req, true) {
 		return
 	}
 	info := setup.InspectProjectDir(req.Path)
@@ -64,8 +62,7 @@ func (s *Server) handleSetupProbe(w http.ResponseWriter, r *http.Request) {
 		LibraryRoots []string `json:"library_roots"`
 		PythonPath   string   `json:"python_path"`
 	}
-	if err := decodeJSON(r, &req); err != nil && err != io.EOF {
-		writeJSON(w, http.StatusBadRequest, map[string]any{"ok": false, "error": "invalid JSON body"})
+	if !decodeJSON(w, r, &req, true) {
 		return
 	}
 
@@ -78,15 +75,15 @@ func (s *Server) handleSetupDownloadProject(w http.ResponseWriter, r *http.Reque
 		TargetDir      string `json:"target_dir"`
 		ArchiveURL     string `json:"archive_url"`
 		AllowOverwrite bool   `json:"allow_overwrite"`
+		ExpectedSHA256 string `json:"expected_sha256"`
 	}
-	if err := decodeJSON(r, &req); err != nil {
-		writeJSON(w, http.StatusBadRequest, map[string]any{"ok": false, "error": "invalid JSON body"})
+	if !decodeJSON(w, r, &req, false) {
 		return
 	}
 
 	ctx, cleanup, err := s.beginSetupTask(r.Context())
 	if err != nil {
-		writeJSON(w, http.StatusConflict, map[string]any{"ok": false, "error": err.Error()})
+		writeError(w, http.StatusConflict, "setup_conflict", err.Error())
 		return
 	}
 	defer cleanup()
@@ -95,6 +92,7 @@ func (s *Server) handleSetupDownloadProject(w http.ResponseWriter, r *http.Reque
 		ArchiveURL:     req.ArchiveURL,
 		TargetDir:      req.TargetDir,
 		AllowOverwrite: req.AllowOverwrite,
+		ExpectedSHA256: req.ExpectedSHA256,
 	}, func(p setup.DownloadProgress) {
 		s.broadcastSSE("setup-progress", map[string]any{
 			"task":             "download",
@@ -111,7 +109,7 @@ func (s *Server) handleSetupDownloadProject(w http.ResponseWriter, r *http.Reque
 			writeJSON(w, http.StatusOK, map[string]any{"ok": false, "cancelled": true, "error": "Download cancelled"})
 			return
 		}
-		writeJSON(w, http.StatusOK, map[string]any{"ok": false, "error": err.Error()})
+		writeError(w, http.StatusUnprocessableEntity, "download_failed", err.Error())
 		return
 	}
 
@@ -130,8 +128,7 @@ func (s *Server) handleSetupInstallEnv(w http.ResponseWriter, r *http.Request) {
 		BasePython   string   `json:"base_python"`
 		UseUV        *bool    `json:"use_uv"`
 	}
-	if err := decodeJSON(r, &req); err != nil {
-		writeJSON(w, http.StatusBadRequest, map[string]any{"ok": false, "error": "invalid JSON body"})
+	if !decodeJSON(w, r, &req, false) {
 		return
 	}
 
@@ -142,7 +139,7 @@ func (s *Server) handleSetupInstallEnv(w http.ResponseWriter, r *http.Request) {
 
 	ctx, cleanup, err := s.beginSetupTask(r.Context())
 	if err != nil {
-		writeJSON(w, http.StatusConflict, map[string]any{"ok": false, "error": err.Error()})
+		writeError(w, http.StatusConflict, "setup_conflict", err.Error())
 		return
 	}
 	defer cleanup()
@@ -172,7 +169,7 @@ func (s *Server) handleSetupInstallEnv(w http.ResponseWriter, r *http.Request) {
 			writeJSON(w, http.StatusOK, map[string]any{"ok": false, "cancelled": true, "error": "Installation cancelled"})
 			return
 		}
-		writeJSON(w, http.StatusOK, map[string]any{"ok": false, "error": err.Error()})
+		writeError(w, http.StatusUnprocessableEntity, "install_failed", err.Error())
 		return
 	}
 
@@ -199,8 +196,7 @@ func (s *Server) handleSetupComplete(w http.ResponseWriter, r *http.Request) {
 		ExportDir  string           `json:"export_dir"`
 		PythonPath string           `json:"python_path"`
 	}
-	if err := decodeJSON(r, &req); err != nil && err != io.EOF {
-		writeJSON(w, http.StatusBadRequest, map[string]any{"ok": false, "error": "invalid JSON body"})
+	if !decodeJSON(w, r, &req, true) {
 		return
 	}
 
@@ -224,38 +220,21 @@ func (s *Server) handleSetupComplete(w http.ResponseWriter, r *http.Request) {
 		c.OnboardingCompleted = true
 	})
 	if err != nil {
-		writeJSON(w, http.StatusInternalServerError, map[string]any{"ok": false, "error": err.Error()})
+		writeError(w, http.StatusInternalServerError, "config_save_error", err.Error())
 		return
 	}
 
 	var workerErr error
 	if roots := cfg.LibraryRoots(); len(roots) > 0 {
 		workerErr = s.worker.ConfigureOrRestart(r.Context(), cfg.ResolvePython(), librarySpecs(cfg))
+		if workerErr != nil {
+			s.broadcastSSE("worker-error", map[string]string{"error": workerErr.Error()})
+		}
 		_ = s.watcher.Watch(roots)
 	} else {
 		s.watcher.Stop()
 	}
 
 	health, healthErr := s.worker.Health(r.Context())
-	running, lastErr := s.worker.Status()
-	if workerErr != nil {
-		lastErr = workerErr.Error()
-	}
-	healthErrStr := ""
-	if healthErr != nil {
-		healthErrStr = healthErr.Error()
-	}
-
-	writeJSON(w, http.StatusOK, configResponse{
-		Config:            cfg,
-		ResolvedPython:    cfg.ResolvePython(),
-		ResolvedExportDir: cfg.ResolveExportDir(""),
-		NeedsOnboarding:   cfg.NeedsOnboarding(),
-		HasDesktop:        s.dialogs != nil,
-		WorkerRunning:     running,
-		WorkerStarting:    s.worker.Starting(),
-		WorkerError:       lastErr,
-		Health:            health,
-		HealthError:       healthErrStr,
-	})
+	writeJSON(w, http.StatusOK, s.buildConfigResponse(cfg, health, workerErr, healthErr))
 }

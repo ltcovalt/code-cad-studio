@@ -30,6 +30,7 @@ type PythonCandidate struct {
 	HasOCPTessellate bool   `json:"has_ocp_tessellate"`
 	HasPip           bool   `json:"has_pip"`
 	HasVenv          bool   `json:"has_venv"`
+	HasEnsurePip     bool   `json:"has_ensurepip"`
 	SysPrefix        string `json:"sys_prefix,omitempty"`
 	Error            string `json:"error,omitempty"`
 }
@@ -61,6 +62,7 @@ print(json.dumps({
     "has_ocp_tessellate": importlib.util.find_spec("ocp_tessellate") is not None,
     "has_pip": importlib.util.find_spec("pip") is not None,
     "has_venv": importlib.util.find_spec("venv") is not None,
+    "has_ensurepip": importlib.util.find_spec("ensurepip") is not None,
 }))`
 
 type probeJSON struct {
@@ -73,12 +75,100 @@ type probeJSON struct {
 	HasOCPTessellate bool   `json:"has_ocp_tessellate"`
 	HasPip           bool   `json:"has_pip"`
 	HasVenv          bool   `json:"has_venv"`
+	HasEnsurePip     bool   `json:"has_ensurepip"`
 }
 
 type rawCandidate struct {
 	path   string
 	source string
 	detail string
+}
+
+// FindUV locates the `uv` executable on PATH or in standard per-OS installation directories.
+func FindUV() (string, bool) {
+	home, _ := os.UserHomeDir()
+	if home == "" && runtime.GOOS == "windows" {
+		home = strings.TrimSpace(os.Getenv("USERPROFILE"))
+	}
+	return findUVForOS(
+		runtime.GOOS,
+		home,
+		strings.TrimSpace(os.Getenv("LOCALAPPDATA")),
+		strings.TrimSpace(os.Getenv("ProgramFiles")),
+		exec.LookPath,
+	)
+}
+
+func findUVForOS(
+	goos string,
+	home string,
+	localAppData string,
+	programFiles string,
+	lookPath func(string) (string, error),
+) (string, bool) {
+	if lookPath != nil {
+		if p, err := lookPath("uv"); err == nil && strings.TrimSpace(p) != "" {
+			return p, true
+		}
+	}
+
+	var candidates []string
+	if goos == "windows" {
+		if home != "" {
+			candidates = append(candidates,
+				filepath.Join(home, ".local", "bin", "uv.exe"),
+				filepath.Join(home, ".cargo", "bin", "uv.exe"),
+			)
+		}
+		if localAppData != "" {
+			candidates = append(candidates,
+				filepath.Join(localAppData, "uv", "uv.exe"),
+				filepath.Join(localAppData, "Programs", "uv", "uv.exe"),
+			)
+		}
+		if programFiles != "" {
+			candidates = append(candidates, filepath.Join(programFiles, "uv", "uv.exe"))
+		}
+	} else {
+		if home != "" {
+			candidates = append(candidates,
+				filepath.Join(home, ".local", "bin", "uv"),
+				filepath.Join(home, ".cargo", "bin", "uv"),
+			)
+		}
+		candidates = append(candidates,
+			"/opt/homebrew/bin/uv",
+			"/usr/local/bin/uv",
+			"/usr/bin/uv",
+		)
+	}
+
+	for _, c := range candidates {
+		if c == "" {
+			continue
+		}
+		if isExecutableFile(c, goos) {
+			return c, true
+		}
+	}
+	return "", false
+}
+
+func isExecutableFile(p, goos string) bool {
+	st, err := os.Stat(p)
+	if err != nil || st.IsDir() {
+		return false
+	}
+	if goos == "windows" {
+		return true
+	}
+	return st.Mode()&0o111 != 0
+}
+
+// isWindowsStoreStub returns true for Windows Store App Execution Alias python*.exe stubs.
+func isWindowsStoreStub(p string) bool {
+	norm := strings.ToLower(strings.ReplaceAll(strings.TrimSpace(p), `\`, "/"))
+	return strings.Contains(norm, "/microsoft/windowsapps/")
 }
 
 // FindRequirementsFiles returns deduplicated requirements.txt files present in libraryRoots.
@@ -116,12 +206,12 @@ func Probe(ctx context.Context, libraryRoots []string, explicitPython string) Pr
 		RequirementsFiles: FindRequirementsFiles(libraryRoots),
 	}
 
-	if uvPath, err := exec.LookPath("uv"); err == nil && uvPath != "" {
+	if uvPath, ok := FindUV(); ok {
 		res.HasUV = true
 		res.UVPath = uvPath
 	}
 
-	raw := collectCandidatePaths(libraryRoots, explicitPython)
+	raw := collectCandidatePaths(ctx, libraryRoots, explicitPython)
 	if len(raw) == 0 {
 		return res
 	}
@@ -178,6 +268,7 @@ func ProbeExecutable(ctx context.Context, pythonPath, source, sourceDetail strin
 	defer cancel()
 
 	cmd := exec.CommandContext(probeCtx, cleanPath, "-c", probeSnippet)
+	configureCmd(cmd)
 	var stdout, stderr bytes.Buffer
 	cmd.Stdout = &stdout
 	cmd.Stderr = &stderr
@@ -207,18 +298,60 @@ func ProbeExecutable(ctx context.Context, pythonPath, source, sourceDetail strin
 	cand.HasOCPTessellate = parsed.HasOCPTessellate
 	cand.HasPip = parsed.HasPip
 	cand.HasVenv = parsed.HasVenv
+	cand.HasEnsurePip = parsed.HasEnsurePip
 	cand.SysPrefix = parsed.SysPrefix
 	return cand
 }
 
 var versionedPythonRe = regexp.MustCompile(`^python3\.(\d+)$`)
 
-// findVersionedPythons scans directories for python3.<minor> binaries (e.g. python3.14, python3.15)
-// and returns them ordered from newest minor version to oldest.
+// pythonMinorPriority ranks Python versions by build123d/OCP wheel compatibility
+// (tested compatible minors 3.12/3.13 > 3.11/3.10 > bleeding-edge 3.14/3.15+).
+func pythonMinorPriority(major, minor int) int {
+	if major < 3 {
+		return -200
+	}
+	if major > 3 {
+		return 10
+	}
+	switch {
+	case minor == 12:
+		return 100
+	case minor == 13:
+		return 95
+	case minor == 11:
+		return 85
+	case minor == 10:
+		return 80
+	case minor == 14:
+		return 40
+	case minor >= 15:
+		return 20
+	default:
+		return -100
+	}
+}
+
+func parseMajorMinor(version string) (int, int, bool) {
+	parts := strings.Split(strings.TrimSpace(version), ".")
+	if len(parts) < 2 {
+		return 0, 0, false
+	}
+	maj, err1 := strconv.Atoi(parts[0])
+	min, err2 := strconv.Atoi(parts[1])
+	if err1 != nil || err2 != nil {
+		return 0, 0, false
+	}
+	return maj, min, true
+}
+
+// findVersionedPythons scans directories for python3.<minor> binaries
+// and returns them ordered by tested compatibility priority (3.12 > 3.13 > 3.11 > 3.10 > 3.14 > 3.15+).
 func findVersionedPythons(dirs []string) []string {
 	type entry struct {
 		path  string
 		minor int
+		prio  int
 	}
 	var found []entry
 	seen := map[string]struct{}{}
@@ -248,11 +381,18 @@ func findVersionedPythons(dirs []string) []string {
 				continue
 			}
 			seen[full] = struct{}{}
-			found = append(found, entry{path: full, minor: minor})
+			found = append(found, entry{
+				path:  full,
+				minor: minor,
+				prio:  pythonMinorPriority(3, minor),
+			})
 		}
 	}
 
 	sort.SliceStable(found, func(i, j int) bool {
+		if found[i].prio != found[j].prio {
+			return found[i].prio > found[j].prio
+		}
 		return found[i].minor > found[j].minor
 	})
 	out := make([]string, 0, len(found))
@@ -262,13 +402,68 @@ func findVersionedPythons(dirs []string) []string {
 	return out
 }
 
-func collectCandidatePaths(libraryRoots []string, explicitPython string) []rawCandidate {
+func parsePyLauncherOutput(out string) []string {
+	var paths []string
+	for _, rawLine := range strings.Split(out, "\n") {
+		line := strings.TrimSpace(rawLine)
+		if line == "" {
+			continue
+		}
+		// py.exe -0p lines look like: " -V:3.12 *        C:\Python312\python.exe"
+		if idx := strings.Index(line, "\t"); idx >= 0 {
+			line = strings.TrimSpace(line[idx:])
+		}
+		fields := strings.Fields(line)
+		if len(fields) == 0 {
+			continue
+		}
+		// Path may contain spaces; look for token starting with drive letter or UNC
+		exePath := ""
+		for i, f := range fields {
+			if len(f) >= 3 && f[1] == ':' && (f[2] == '\\' || f[2] == '/') {
+				exePath = strings.Join(fields[i:], " ")
+				break
+			}
+		}
+		if exePath == "" {
+			last := fields[len(fields)-1]
+			if strings.HasSuffix(strings.ToLower(last), ".exe") {
+				exePath = last
+			}
+		}
+		if exePath != "" {
+			paths = append(paths, strings.Trim(exePath, `"`))
+		}
+	}
+	return paths
+}
+
+func discoverPyLauncherPaths(ctx context.Context) []string {
+	pyExe, err := exec.LookPath("py.exe")
+	if err != nil || pyExe == "" {
+		return nil
+	}
+	cctx, cancel := context.WithTimeout(ctx, 2*time.Second)
+	defer cancel()
+	cmd := exec.CommandContext(cctx, pyExe, "-0p")
+	configureCmd(cmd)
+	out, err := cmd.Output()
+	if err != nil {
+		return nil
+	}
+	return parsePyLauncherOutput(string(out))
+}
+
+func collectCandidatePaths(ctx context.Context, libraryRoots []string, explicitPython string) []rawCandidate {
 	var out []rawCandidate
 	seenPath := map[string]struct{}{}
 
 	add := func(p, source, detail string) {
 		p = ExpandPath(p)
 		if p == "" {
+			return
+		}
+		if source != "configured" && isWindowsStoreStub(p) {
 			return
 		}
 		if !filepath.IsAbs(p) {
@@ -280,6 +475,9 @@ func collectCandidatePaths(libraryRoots []string, explicitPython string) []rawCa
 				return
 			}
 			p = resolved
+			if source != "configured" && isWindowsStoreStub(p) {
+				return
+			}
 		} else {
 			st, err := os.Stat(p)
 			if err != nil || st.IsDir() {
@@ -348,7 +546,22 @@ func collectCandidatePaths(libraryRoots []string, explicitPython string) []rawCa
 	}
 
 	if runtime.GOOS == "windows" {
+		for _, p := range discoverPyLauncherPaths(ctx) {
+			add(p, "system", "")
+		}
+		if appData := strings.TrimSpace(os.Getenv("APPDATA")); appData != "" {
+			uvMatches, _ := filepath.Glob(filepath.Join(appData, "uv", "python", "*", "python.exe"))
+			sort.Sort(sort.Reverse(sort.StringSlice(uvMatches)))
+			for _, m := range uvMatches {
+				add(m, "system", "")
+			}
+		}
 		if localAppData := strings.TrimSpace(os.Getenv("LOCALAPPDATA")); localAppData != "" {
+			uvMatches, _ := filepath.Glob(filepath.Join(localAppData, "uv", "python", "*", "python.exe"))
+			sort.Sort(sort.Reverse(sort.StringSlice(uvMatches)))
+			for _, m := range uvMatches {
+				add(m, "system", "")
+			}
 			matches, _ := filepath.Glob(filepath.Join(localAppData, "Programs", "Python", "Python3*", "python.exe"))
 			sort.Sort(sort.Reverse(sort.StringSlice(matches)))
 			for _, m := range matches {
@@ -415,6 +628,9 @@ func candidateScore(c PythonCandidate, hasUV bool) int {
 	score := 0
 	if c.VersionOK {
 		score += 100
+		if maj, min, ok := parseMajorMinor(c.Version); ok {
+			score += pythonMinorPriority(maj, min) / 2
+		}
 	}
 	if c.VersionOK && c.HasBuild123d {
 		score += 500
@@ -422,7 +638,7 @@ func candidateScore(c PythonCandidate, hasUV bool) int {
 			score += 20
 		}
 	}
-	if c.VersionOK && (c.HasVenv || hasUV) {
+	if c.VersionOK && (hasUV || (c.HasVenv && c.HasEnsurePip)) {
 		score += 30
 	}
 	if c.HasPip {
@@ -453,7 +669,14 @@ func pickRecommended(candidates []PythonCandidate, hasUV bool) *PythonCandidate 
 	}
 	for i := range candidates {
 		c := candidates[i]
-		if c.Error == "" && c.VersionOK && (c.HasVenv || hasUV) {
+		if c.Error == "" && c.VersionOK && (hasUV || (c.HasVenv && c.HasEnsurePip)) {
+			cp := c
+			return &cp
+		}
+	}
+	for i := range candidates {
+		c := candidates[i]
+		if c.Error == "" && c.VersionOK && c.HasVenv {
 			cp := c
 			return &cp
 		}

@@ -37,6 +37,11 @@ type InstallResult struct {
 	UsedUV     bool            `json:"used_uv"`
 }
 
+var defaultCADPackages = []string{
+	"build123d>=0.8,<1.0",
+	"ocp_tessellate>=3.0,<4.0",
+}
+
 // InstallEnvironment creates Studio's shared managed virtual environment (or TargetVenvDir)
 // and installs build123d + ocp_tessellate (plus any library requirements.txt files),
 // streaming live output via onEvent.
@@ -66,7 +71,7 @@ func InstallEnvironment(
 
 	uvPath := ""
 	if opts.UseUV {
-		if p, err := exec.LookPath("uv"); err == nil && p != "" {
+		if p, ok := FindUV(); ok {
 			uvPath = p
 		}
 	}
@@ -75,9 +80,46 @@ func InstallEnvironment(
 		return InstallResult{}, errors.New("a Python 3.10+ interpreter is required to create a virtual environment")
 	}
 
-	// Step 1: Create virtual environment (reuse if already valid)
+	// Step 1: Validate existing virtual environment before reuse, or create a clean one.
 	venvPython := VenvPythonPath(venvDir)
-	if _, err := os.Stat(venvPython); err != nil {
+	needCreate := true
+	if _, err := os.Stat(venvPython); err == nil {
+		emit(InstallEvent{
+			Stage:   "creating_venv",
+			Message: fmt.Sprintf("Validating existing virtual environment at %s...", venvDir),
+		})
+		existing := ProbeExecutable(ctx, venvPython, "studio_venv", "")
+		if existing.Error == "" && existing.VersionOK && (uvPath != "" || existing.HasPip) {
+			needCreate = false
+			emit(InstallEvent{
+				Stage:   "creating_venv",
+				Message: fmt.Sprintf("Using existing virtual environment at %s...", venvDir),
+			})
+		} else {
+			emit(InstallEvent{
+				Stage:   "creating_venv",
+				Message: fmt.Sprintf("Existing virtual environment at %s is broken or incomplete; recreating...", venvDir),
+			})
+			if rerr := os.RemoveAll(venvDir); rerr != nil {
+				return InstallResult{}, fmt.Errorf("remove broken virtual environment: %w", rerr)
+			}
+		}
+	}
+
+	if needCreate {
+		if uvPath == "" {
+			baseCand := ProbeExecutable(ctx, basePython, "configured", "")
+			if baseCand.Error != "" {
+				return InstallResult{}, fmt.Errorf("probe base python (%s): %s", basePython, baseCand.Error)
+			}
+			if !baseCand.VersionOK {
+				return InstallResult{}, fmt.Errorf("base python %s (%s) must be Python 3.10 or newer", basePython, baseCand.Version)
+			}
+			if !baseCand.HasVenv || !baseCand.HasEnsurePip {
+				return InstallResult{}, fmt.Errorf("Python %s is missing venv/ensurepip support; install python3-venv or uv to create virtual environments", basePython)
+			}
+		}
+
 		emit(InstallEvent{
 			Stage:   "creating_venv",
 			Message: fmt.Sprintf("Creating shared Studio virtual environment at %s...", venvDir),
@@ -95,31 +137,25 @@ func InstallEnvironment(
 				return InstallResult{}, fmt.Errorf("create virtual environment: %w", err)
 			}
 		}
-	} else {
-		emit(InstallEvent{
-			Stage:   "creating_venv",
-			Message: fmt.Sprintf("Using existing virtual environment at %s...", venvDir),
-		})
 	}
 
 	if _, err := os.Stat(venvPython); err != nil {
 		return InstallResult{}, fmt.Errorf("virtual environment python not found at %s", venvPython)
 	}
 
-	// Step 2: Install build123d + ocp_tessellate
+	// Step 2: Install pinned build123d + ocp_tessellate ranges
 	emit(InstallEvent{
 		Stage:   "installing_packages",
 		Message: "Installing build123d and ocp_tessellate (this may take a few minutes)...",
 	})
 
-	packages := []string{"build123d", "ocp_tessellate"}
 	if uvPath != "" {
-		args := append([]string{"pip", "install", "--python", venvPython}, packages...)
+		args := append([]string{"pip", "install", "--python", venvPython}, defaultCADPackages...)
 		if err := runStreamingCmd(ctx, workDir, uvPath, args, "installing_packages", emit); err != nil {
 			return InstallResult{}, fmt.Errorf("install packages with uv: %w", err)
 		}
 	} else {
-		args := append([]string{"-m", "pip", "install", "--disable-pip-version-check", "--progress-bar", "off"}, packages...)
+		args := append([]string{"-m", "pip", "install", "--disable-pip-version-check", "--progress-bar", "off"}, defaultCADPackages...)
 		if err := runStreamingCmd(ctx, workDir, venvPython, args, "installing_packages", emit); err != nil {
 			return InstallResult{}, fmt.Errorf("install packages with pip: %w", err)
 		}
@@ -181,6 +217,7 @@ func runStreamingCmd(
 	emit func(InstallEvent),
 ) error {
 	cmd := exec.CommandContext(ctx, binary, args...)
+	configureCmd(cmd)
 	if workDir != "" {
 		if st, err := os.Stat(workDir); err == nil && st.IsDir() {
 			cmd.Dir = workDir
@@ -220,6 +257,7 @@ func runStreamingCmd(
 				LogLine: line,
 			})
 		}
+		_, _ = io.Copy(io.Discard, pr)
 	}()
 
 	waitErr := cmd.Wait()
