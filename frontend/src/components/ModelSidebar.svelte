@@ -1,6 +1,9 @@
 <script lang="ts">
+  import type { TreeFolderNode } from '../lib/modelTree';
   import { studio } from '../lib/studioState.svelte';
+  import type { ModelInfo } from '../lib/types';
   import Alert from './Alert.svelte';
+  import ExplorerContextMenu, { type ExplorerContextTarget } from './ExplorerContextMenu.svelte';
   import ModelTreeNodes from './ModelTreeNodes.svelte';
   import NewModelModal from './NewModelModal.svelte';
 
@@ -11,6 +14,13 @@
   let { style = '' }: Props = $props();
 
   let newModelOpen = $state(false);
+  let newModelLibraryId = $state<string | undefined>(undefined);
+  let contextMenu = $state<{
+    open: boolean;
+    x: number;
+    y: number;
+    target: ExplorerContextTarget | null;
+  }>({ open: false, x: 0, y: 0, target: null });
   let scaffoldingDemo = $state(false);
   let demoError = $state('');
 
@@ -20,6 +30,39 @@
     if (keys.length === 0) return false;
     return keys.every((k) => Boolean(studio.collapsedFolders[k]));
   });
+
+  function openNewModel(libraryId?: string) {
+    newModelLibraryId = libraryId;
+    newModelOpen = true;
+  }
+
+  function closeNewModel() {
+    newModelOpen = false;
+    newModelLibraryId = undefined;
+  }
+
+  function handleModelContextMenu(event: MouseEvent, model: ModelInfo) {
+    contextMenu = {
+      open: true,
+      x: event.clientX,
+      y: event.clientY,
+      target: { kind: 'model', model },
+    };
+  }
+
+  function handleLibraryContextMenu(event: MouseEvent, node: TreeFolderNode) {
+    contextMenu = {
+      open: true,
+      x: event.clientX,
+      y: event.clientY,
+      target: { kind: 'library', node },
+    };
+  }
+
+  function closeContextMenu() {
+    if (!contextMenu.open) return;
+    contextMenu = { ...contextMenu, open: false };
+  }
 
   async function handleCreateDemo() {
     if (scaffoldingDemo) return;
@@ -52,7 +95,7 @@
             class="btn btn-ghost btn-xs btn-square"
             title="New Model"
             aria-label="New Model"
-            onclick={() => (newModelOpen = true)}
+            onclick={() => openNewModel()}
           >
             <svg
               xmlns="http://www.w3.org/2000/svg"
@@ -181,7 +224,7 @@
               <span class="loading loading-spinner loading-xs"></span>
               Creating…
             {:else}
-              Create Demo Project
+              Create Demo Library
             {/if}
           </button>
           <button
@@ -218,16 +261,33 @@
           <button
             type="button"
             class="btn btn-xs btn-outline"
-            onclick={() => (newModelOpen = true)}
+            onclick={() => openNewModel()}
           >
             + New Model
           </button>
         {/if}
       </div>
     {:else}
-      <ModelTreeNodes nodes={studio.modelTree} />
+      <ModelTreeNodes
+        nodes={studio.modelTree}
+        onModelContextMenu={handleModelContextMenu}
+        onLibraryContextMenu={handleLibraryContextMenu}
+      />
     {/if}
   </div>
 </section>
 
-<NewModelModal open={newModelOpen} onClose={() => (newModelOpen = false)} />
+<ExplorerContextMenu
+  open={contextMenu.open}
+  x={contextMenu.x}
+  y={contextMenu.y}
+  target={contextMenu.target}
+  onClose={closeContextMenu}
+  onNewModel={(libId) => openNewModel(libId)}
+/>
+
+<NewModelModal
+  open={newModelOpen}
+  initialLibraryId={newModelLibraryId}
+  onClose={closeNewModel}
+/>

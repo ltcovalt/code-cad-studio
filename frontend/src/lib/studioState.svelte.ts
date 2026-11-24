@@ -112,6 +112,7 @@ export class StudioState {
   settingsOpen = $state(false);
   savePresetModalOpen = $state(false);
   managePresetsModalOpen = $state(false);
+  exportModalOpen = $state(false);
   reloadedVisible = $state(false);
 
   // Models & Explorer tree
@@ -187,6 +188,7 @@ export class StudioState {
   presets = $state<Preset[]>([]);
   selectedPresetKey = $state('default');
   defaultPresetKey = $state('');
+  defaultExportFilename = $state('');
   exportFilename = $state('');
   exportFilenameEdited = $state(false);
   exportQuality = $state<ExportQuality>('standard');
@@ -345,6 +347,11 @@ export class StudioState {
     this.exportFilenameEdited = true;
   }
 
+  resetExportFilename(): void {
+    this.exportFilename = this.defaultExportFilename;
+    this.exportFilenameEdited = false;
+  }
+
   setExportQuality(quality: ExportQuality): void {
     this.exportQuality = quality;
     this.config = { ...this.config, export_quality: quality };
@@ -427,8 +434,10 @@ export class StudioState {
     this.presets = [];
     this.defaultPresetKey = '';
     this.selectedPresetKey = 'default';
+    this.defaultExportFilename = '';
     this.exportFilename = '';
     this.exportFilenameEdited = false;
+    this.exportModalOpen = false;
     this.lastExportPath = '';
     this.modelLoadError = '';
     this.modelLoadTraceback = '';
@@ -542,6 +551,8 @@ export class StudioState {
     this.modelLoadError = '';
     this.modelLoadTraceback = '';
     this.lastExportPath = '';
+    this.defaultExportFilename = '';
+    this.exportFilename = '';
     this.exportFilenameEdited = false;
     this.pendingRender = null;
     this.cancelPendingRender();
@@ -618,6 +629,7 @@ export class StudioState {
       }
 
       const stemFallback = resp.model.local_id?.split('/').pop() || modelId;
+      this.defaultExportFilename = stemFallback;
       this.exportFilename = stemFallback;
       this.exportFilenameEdited = false;
       this.lastRenderedKey = '';
@@ -773,8 +785,11 @@ export class StudioState {
       }
 
       this.lastRenderedKey = renderKey;
-      if (resp.export_filename && !this.exportFilenameEdited) {
-        this.exportFilename = resp.export_filename;
+      if (resp.export_filename) {
+        this.defaultExportFilename = resp.export_filename;
+        if (!this.exportFilenameEdited) {
+          this.exportFilename = resp.export_filename;
+        }
       }
 
       if (resp.shapes) {
@@ -1002,11 +1017,19 @@ export class StudioState {
       angular_deflection?: number;
       filename?: string;
     }
-  ): Promise<void> {
+  ): Promise<{
+    ok: boolean;
+    cancelled?: boolean;
+    path?: string;
+    size?: number;
+    error?: string;
+    traceback?: string;
+  }> {
     const modelId = this.activeModelId;
-    if (!modelId) return;
+    if (!modelId) {
+      return { ok: false, error: 'No active model selected' };
+    }
     this.exporting = true;
-    this.lastExportPath = '';
     try {
       const quality = options?.quality ?? this.exportQuality ?? this.config.export_quality ?? 'standard';
       const filename = options?.filename ?? (this.exportFilename.trim() || undefined);
@@ -1016,33 +1039,46 @@ export class StudioState {
         ...(filename ? { filename } : {}),
       });
       if (!resp.ok) {
+        this.lastExportPath = '';
+        const error = resp.error || 'Export failed';
         this.status = {
           kind: 'error',
-          error: resp.error || 'Export failed',
+          error,
           traceback: resp.traceback,
         };
-      } else if (resp.cancelled) {
-        this.status = { kind: 'message', message: 'Export cancelled' };
-      } else {
-        if (this.hasDesktop && resp.path) {
-          this.lastExportPath = resp.path;
-        }
-        const name = resp.path ? resp.path.split(/[\\/]/).pop() || resp.path : `${modelId}.${format}`;
-        const kb = Math.ceil((resp.size ?? 0) / 1024);
-        this.status = { kind: 'message', message: `Exported ${name} (${kb} KB)` };
+        return { ok: false, error, traceback: resp.traceback };
       }
+      if (resp.cancelled) {
+        return { ok: true, cancelled: true };
+      }
+      if (this.hasDesktop && resp.path) {
+        this.lastExportPath = resp.path;
+      } else {
+        this.lastExportPath = '';
+      }
+      const name = resp.path ? resp.path.split(/[\\/]/).pop() || resp.path : `${modelId}.${format}`;
+      const kb = Math.ceil((resp.size ?? 0) / 1024);
+      this.status = { kind: 'message', message: `Exported ${name} (${kb} KB)` };
+      return { ok: true, cancelled: false, path: resp.path, size: resp.size };
     } catch (err) {
+      this.lastExportPath = '';
+      const error = err instanceof Error ? err.message : String(err);
+      const traceback = err instanceof ApiRequestError ? err.traceback : undefined;
       this.status = {
         kind: 'error',
-        error: err instanceof Error ? err.message : String(err),
-        traceback: err instanceof ApiRequestError ? err.traceback : undefined,
+        error,
+        traceback,
       };
+      return { ok: false, error, traceback };
     } finally {
       this.exporting = false;
     }
   }
 
-  async scaffoldDemo(targetDir?: string): Promise<ScaffoldResponse> {
+  async scaffoldDemo(
+    targetDir?: string,
+    options?: { selectModel?: boolean }
+  ): Promise<ScaffoldResponse> {
     const resp = await api.scaffoldModel({
       mode: 'demo',
       ...(targetDir ? { target_dir: targetDir } : {}),
@@ -1055,10 +1091,13 @@ export class StudioState {
     } else {
       await this.refreshModels();
     }
-    if (resp.model_id) {
-      await this.selectModel(resp.model_id);
-    } else if (!this.activeModelId && this.models.length > 0) {
-      await this.selectModel(this.models[0].id);
+    const shouldSelect = options?.selectModel ?? true;
+    if (shouldSelect) {
+      if (resp.model_id) {
+        await this.selectModel(resp.model_id);
+      } else if (!this.activeModelId && this.models.length > 0) {
+        await this.selectModel(this.models[0].id);
+      }
     }
     return resp;
   }
@@ -1082,8 +1121,8 @@ export class StudioState {
     return resp;
   }
 
-  async openActiveModelInEditor(): Promise<void> {
-    const targetPath = this.activeModel?.py_path || this.activeModel?.path;
+  async openModelInEditor(path?: string): Promise<void> {
+    const targetPath = path || this.activeModel?.py_path || this.activeModel?.path;
     if (!this.hasDesktop || !targetPath) return;
     try {
       const resp = await api.openInEditor(targetPath);
@@ -1098,13 +1137,13 @@ export class StudioState {
     }
   }
 
-  async revealActiveModel(): Promise<void> {
-    const targetPath = this.activeModel?.py_path || this.activeModel?.path;
+  async revealPath(path?: string): Promise<void> {
+    const targetPath = path || this.activeModel?.py_path || this.activeModel?.path;
     if (!this.hasDesktop || !targetPath) return;
     try {
       const resp = await api.revealFile(targetPath);
       if (!resp.ok) {
-        this.status = { kind: 'error', error: resp.error || 'Failed to reveal model file' };
+        this.status = { kind: 'error', error: resp.error || 'Failed to reveal file' };
       }
     } catch (err) {
       this.status = {
@@ -1112,6 +1151,14 @@ export class StudioState {
         error: err instanceof Error ? err.message : String(err),
       };
     }
+  }
+
+  async openActiveModelInEditor(): Promise<void> {
+    return this.openModelInEditor();
+  }
+
+  async revealActiveModel(): Promise<void> {
+    return this.revealPath();
   }
 
   async revealLastExport(): Promise<void> {

@@ -5,10 +5,11 @@
 
   interface Props {
     open: boolean;
+    initialLibraryId?: string;
     onClose: () => void;
   }
 
-  let { open, onClose }: Props = $props();
+  let { open, initialLibraryId, onClose }: Props = $props();
 
   let dialogEl: HTMLDialogElement | undefined = $state();
   let nameInputEl: HTMLInputElement | undefined = $state();
@@ -30,9 +31,11 @@
     modelName = '';
     template = 'parametric';
     formError = '';
-    const activeLib = studio.activeModel?.library_id;
     const libs = studio.config.libraries ?? [];
-    if (activeLib && libs.some((l) => l.id === activeLib)) {
+    const activeLib = studio.activeModel?.library_id;
+    if (initialLibraryId && libs.some((l) => l.id === initialLibraryId)) {
+      libraryId = initialLibraryId;
+    } else if (activeLib && libs.some((l) => l.id === activeLib)) {
       libraryId = activeLib;
     } else {
       libraryId = libs[0]?.id ?? '';

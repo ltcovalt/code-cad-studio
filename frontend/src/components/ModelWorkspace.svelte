@@ -1,30 +1,15 @@
 <script lang="ts">
   import { splitFields } from '../lib/params';
   import { studio } from '../lib/studioState.svelte';
-  import type { ExportQuality } from '../lib/types';
   import Alert from './Alert.svelte';
   import ParamField from './ParamField.svelte';
   import PresetBar from './PresetBar.svelte';
-  import StatusBar from './StatusBar.svelte';
 
   let split = $derived(splitFields(studio.fields));
   let isBusy = $derived(studio.rendering || studio.exporting || studio.modelLoading);
   let hasModelError = $derived(
     studio.activeModel?.kind === 'error' || Boolean(studio.modelLoadError)
   );
-  let exportDisabled = $derived(isBusy || studio.status.kind === 'error' || hasModelError);
-  let activeBreadcrumb = $derived.by(() => {
-    const model = studio.activeModel;
-    if (!model) return '';
-    const parts: string[] = [];
-    if ((studio.config.libraries?.length ?? 0) > 1 && model.library_name) {
-      parts.push(model.library_name);
-    }
-    if (model.folder_labels && model.folder_labels.length > 0) {
-      parts.push(...model.folder_labels);
-    }
-    return parts.join(' / ');
-  });
 </script>
 
 <section
@@ -67,110 +52,44 @@
     </div>
   {:else}
     <div class="flex flex-col h-full overflow-hidden">
-      <!-- Model Title, Path, Desktop Actions & Presets -->
-      <div class="p-3 border-b border-base-300 shrink-0 space-y-2">
-        <div class="flex items-start justify-between gap-2">
-          <div class="min-w-0 flex-1">
-            {#if activeBreadcrumb}
-              <div class="text-[11px] opacity-60 truncate" title={activeBreadcrumb}>
-                {activeBreadcrumb}
-              </div>
-            {/if}
-            <h2 class="font-semibold text-sm truncate">{studio.activeModel.name}</h2>
-            <div
-              class="text-[11px] font-mono opacity-55 truncate"
-              title={studio.activeModel.py_path || studio.activeModel.rel_path}
+      <!-- Parameters Header & Presets -->
+      <div class="p-2.5 pb-2 border-b border-base-300/70 shrink-0 space-y-2">
+        <div class="flex items-center justify-between gap-1 min-h-6">
+          <span class="text-xs font-semibold uppercase tracking-wider opacity-70 truncate">
+            Parameters
+          </span>
+          {#if !hasModelError && studio.activeModel.kind !== 'script'}
+            <button
+              type="button"
+              class="btn btn-xs btn-square h-6 w-6 min-h-0 {studio.showDescriptions
+                ? 'btn-soft btn-primary'
+                : 'btn-ghost opacity-60 hover:opacity-100'}"
+              aria-pressed={studio.showDescriptions}
+              aria-label={studio.showDescriptions
+                ? 'Hide parameter descriptions'
+                : 'Show parameter descriptions'}
+              title={studio.showDescriptions
+                ? 'Parameter descriptions shown inline (click for hover tooltips)'
+                : 'Parameter descriptions in hover tooltips (click to show inline)'}
+              onclick={() => studio.toggleShowDescriptions()}
             >
-              {studio.activeModel.rel_path}
-            </div>
-            {#if studio.modelDescription}
-              <p class="text-[11px] opacity-65 truncate mt-0.5" title={studio.modelDescription}>
-                {studio.modelDescription}
-              </p>
-            {/if}
-          </div>
-          <div class="flex items-center gap-0.5 shrink-0">
-            {#if isBusy}
-              <span class="loading loading-spinner loading-xs text-primary mr-1"></span>
-            {/if}
-            {#if studio.hasDesktop}
-              <button
-                type="button"
-                class="btn btn-ghost btn-xs btn-square h-6 w-6 min-h-0 opacity-70 hover:opacity-100"
-                title="Open in Editor"
-                aria-label="Open model in editor"
-                onclick={() => void studio.openActiveModelInEditor()}
+              <svg
+                xmlns="http://www.w3.org/2000/svg"
+                class="h-3.5 w-3.5"
+                viewBox="0 0 24 24"
+                fill="none"
+                stroke="currentColor"
+                stroke-width="2"
+                stroke-linecap="round"
+                stroke-linejoin="round"
+                aria-hidden="true"
               >
-                <svg
-                  xmlns="http://www.w3.org/2000/svg"
-                  class="h-3.5 w-3.5"
-                  viewBox="0 0 24 24"
-                  fill="none"
-                  stroke="currentColor"
-                  stroke-width="2"
-                  stroke-linecap="round"
-                  stroke-linejoin="round"
-                  aria-hidden="true"
-                >
-                  <path d="M12 20h9" />
-                  <path d="M16.5 3.5a2.12 2.12 0 0 1 3 3L7 19l-4 1 1-4Z" />
-                </svg>
-              </button>
-              <button
-                type="button"
-                class="btn btn-ghost btn-xs btn-square h-6 w-6 min-h-0 opacity-70 hover:opacity-100"
-                title="Reveal in Folder"
-                aria-label="Reveal model file in folder"
-                onclick={() => void studio.revealActiveModel()}
-              >
-                <svg
-                  xmlns="http://www.w3.org/2000/svg"
-                  class="h-3.5 w-3.5"
-                  viewBox="0 0 24 24"
-                  fill="none"
-                  stroke="currentColor"
-                  stroke-width="2"
-                  stroke-linecap="round"
-                  stroke-linejoin="round"
-                  aria-hidden="true"
-                >
-                  <path d="M20 20a2 2 0 0 0 2-2V8a2 2 0 0 0-2-2h-7.9a2 2 0 0 1-1.69-.9L9.6 3.9A2 2 0 0 0 7.93 3H4a2 2 0 0 0-2 2v13a2 2 0 0 0 2 2Z" />
-                </svg>
-              </button>
-            {/if}
-            {#if !hasModelError && studio.activeModel.kind !== 'script'}
-              <button
-                type="button"
-                class="btn btn-xs btn-square h-6 w-6 min-h-0 {studio.showDescriptions
-                  ? 'btn-soft btn-primary'
-                  : 'btn-ghost opacity-60 hover:opacity-100'}"
-                aria-pressed={studio.showDescriptions}
-                aria-label={studio.showDescriptions
-                  ? 'Hide parameter descriptions'
-                  : 'Show parameter descriptions'}
-                title={studio.showDescriptions
-                  ? 'Parameter descriptions shown inline (click for hover tooltips)'
-                  : 'Parameter descriptions in hover tooltips (click to show inline)'}
-                onclick={() => studio.toggleShowDescriptions()}
-              >
-                <svg
-                  xmlns="http://www.w3.org/2000/svg"
-                  class="h-3.5 w-3.5"
-                  viewBox="0 0 24 24"
-                  fill="none"
-                  stroke="currentColor"
-                  stroke-width="2"
-                  stroke-linecap="round"
-                  stroke-linejoin="round"
-                  aria-hidden="true"
-                >
-                  <circle cx="12" cy="12" r="10" />
-                  <path d="M12 16v-4" />
-                  <path d="M12 8h.01" />
-                </svg>
-              </button>
-            {/if}
-          </div>
+                <circle cx="12" cy="12" r="10" />
+                <path d="M12 16v-4" />
+                <path d="M12 8h.01" />
+              </svg>
+            </button>
+          {/if}
         </div>
         {#if !hasModelError && studio.activeModel.kind !== 'script'}
           <PresetBar />
@@ -249,103 +168,6 @@
             />
           {/each}
         {/if}
-      </div>
-
-      <!-- Export & Status Footer -->
-      <div class="p-3 border-t border-base-300 bg-base-200/50 shrink-0 space-y-2">
-        <div class="flex items-center gap-1.5">
-          <input
-            type="text"
-            aria-label="Export filename"
-            value={studio.exportFilename}
-            disabled={hasModelError || studio.exporting}
-            oninput={(e) => studio.setExportFilename((e.currentTarget as HTMLInputElement).value)}
-            placeholder="export_filename"
-            title="Export filename stem"
-            class="input input-bordered input-xs flex-1 min-w-0 font-mono text-[11px]"
-          />
-          <select
-            aria-label="STL/3MF tessellation quality"
-            title="STL / 3MF mesh quality"
-            class="select select-bordered select-xs text-[11px] h-6 min-h-6 shrink-0"
-            value={studio.exportQuality}
-            disabled={hasModelError || studio.exporting}
-            onchange={(e) =>
-              studio.setExportQuality((e.currentTarget as HTMLSelectElement).value as ExportQuality)}
-          >
-            <option value="draft">Draft</option>
-            <option value="standard">Standard</option>
-            <option value="fine">Fine</option>
-            {#if studio.exportQuality === 'custom'}
-              <option value="custom">Custom</option>
-            {/if}
-          </select>
-        </div>
-
-        <div class="flex items-center gap-1.5">
-          <span
-            class="text-[11px] font-semibold uppercase opacity-60 mr-auto flex items-center gap-1.5 truncate"
-            title={studio.exportFilename ? `Filename: ${studio.exportFilename}` : 'Export'}
-          >
-            <span>Export</span>
-            {#if studio.exporting}
-              <span class="loading loading-spinner loading-xs text-primary"></span>
-            {/if}
-          </span>
-          <button
-            type="button"
-            class="btn btn-xs btn-neutral"
-            disabled={exportDisabled}
-            title={studio.exportFilename ? `${studio.exportFilename}.step` : 'Export STEP'}
-            onclick={() => studio.exportActiveModel('step')}
-          >
-            .STEP
-          </button>
-          <button
-            type="button"
-            class="btn btn-xs btn-neutral"
-            disabled={exportDisabled}
-            title={studio.exportFilename ? `${studio.exportFilename}.stl` : 'Export STL'}
-            onclick={() => studio.exportActiveModel('stl')}
-          >
-            .STL
-          </button>
-          <button
-            type="button"
-            class="btn btn-xs btn-neutral"
-            disabled={exportDisabled}
-            title={studio.exportFilename ? `${studio.exportFilename}.3mf` : 'Export 3MF'}
-            onclick={() => studio.exportActiveModel('3mf')}
-          >
-            .3MF
-          </button>
-        </div>
-
-        {#if studio.lastExportPath && studio.hasDesktop}
-          <div class="flex items-center justify-end gap-1.5">
-            <button
-              type="button"
-              class="btn btn-xs btn-ghost border border-base-300 h-6 min-h-6"
-              onclick={() => void studio.revealLastExport()}
-            >
-              Reveal
-            </button>
-            <button
-              type="button"
-              class="btn btn-xs btn-ghost border border-base-300 h-6 min-h-6"
-              onclick={() => void studio.openLastExportInSlicer()}
-            >
-              Open in Slicer
-            </button>
-          </div>
-        {/if}
-
-        <StatusBar
-          status={studio.status}
-          rendering={studio.rendering}
-          buildStartedAt={studio.buildStartedAt}
-          onCancelBuild={() => void studio.cancelActiveBuild()}
-        />
       </div>
     </div>
   {/if}

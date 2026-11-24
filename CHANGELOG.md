@@ -7,6 +7,41 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+- **Viewport Bottom Status & Action Bar:** Added a dedicated status bar beneath
+  the 3D viewport showing the active filename, quick desktop actions (Edit,
+  OS-aware Reveal, Rebuild), live build timer & Cancel button, bounding box &
+  timing telemetry, an expandable full-width build error/traceback drawer, and
+  a single **`Export…`** action (`Ctrl/Cmd+E`).
+- **Export Modal:** Consolidated `.STEP`, `.STL`, and `.3MF` export into a
+  labeled modal with format cards, filename stem + extension preview, mesh
+  quality presets (`Draft`, `Standard`, `Fine`, and `Custom` deflections), and
+  post-export Reveal / Open in Slicer actions.
+- **Explorer Right-Click Context Menu:** Added context menus on models (Open in
+  Editor, Reveal, Copy Relative Path, Export…, Rebuild) and libraries (New
+  Model…, Reveal Library Folder, Refresh Libraries).
+
+### Changed
+- **Consolidated Default Library Directory:** Default managed downloads and
+  built-in offline demo projects now live under `~/Documents/code-cad-studio/`
+  (`code-cad` and `demo`).
+- **Decluttered Parameters & Refined Highlights:** Stripped redundant model
+  metadata and export controls from the Parameters pane, added subtle data-pill
+  model counts, unified active Explorer & dropdown highlights to subtle base
+  shading with a primary checkmark, and softened form-control focus rings.
+- **Standardized Library Terminology:** Replaced mixed "model folder" /
+  "repository" copy and removed unnecessary git references from setup prompts.
+
+### Fixed
+- **Non-Destructive Offline Demo:** Adding the built-in offline demo from
+  Onboarding or Settings now appends alongside existing/draft libraries instead
+  of replacing them or skipping Step 1.
+- **Silent Native Dialog Cancellation (Windows):** Closing or cancelling native
+  file/folder pickers no longer surfaces a `"cancelled by user"` error banner.
+- **Windows Case-Insensitive Path Deduplication:** Resolved canonical on-disk
+  casing during local library detection and normalized Windows path comparisons
+  so already-added libraries are not re-detected or duplicated with `(repos)`.
+
 ## [0.1.0-alpha] - 2026-11-23
 
 Initial public pre-release of **Code CAD Studio**, a local-first parametric 3D

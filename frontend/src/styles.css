@@ -165,3 +165,36 @@ dialog.studio-dialog {
   max-height: calc(100vh - 2rem);
   overflow: visible;
 }
+
+/* Refined, theme-aware focus highlight for form fields (replaces bold 2px daisyUI default outline) */
+.input:focus,
+.input:focus-within,
+.select:focus,
+.select:focus-within,
+.textarea:focus,
+.textarea:focus-within {
+  outline-width: 1px;
+  outline-style: solid;
+  outline-offset: 1px;
+  outline-color: color-mix(in oklab, var(--color-primary) 50%, transparent);
+  border-color: color-mix(in oklab, var(--color-primary) 65%, transparent);
+}
+
+.input-error:focus,
+.input-error:focus-within,
+.select-error:focus,
+.select-error:focus-within,
+.textarea-error:focus,
+.textarea-error:focus-within {
+  outline-color: color-mix(in oklab, var(--color-error) 55%, transparent);
+  border-color: color-mix(in oklab, var(--color-error) 70%, transparent);
+}
+
+.checkbox:focus-visible,
+.radio:focus-visible,
+.toggle:focus-visible {
+  outline-width: 1px;
+  outline-style: solid;
+  outline-offset: 2px;
+  outline-color: color-mix(in oklab, var(--color-primary) 55%, transparent);
+}

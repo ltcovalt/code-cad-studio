@@ -1,14 +1,17 @@
 <script lang="ts">
-  import type { TreeNode } from '../lib/modelTree';
+  import type { TreeFolderNode, TreeNode } from '../lib/modelTree';
   import { studio } from '../lib/studioState.svelte';
+  import type { ModelInfo } from '../lib/types';
   import ModelTreeNodes from './ModelTreeNodes.svelte';
 
   interface Props {
     nodes: TreeNode[];
     depth?: number;
+    onModelContextMenu?: (event: MouseEvent, model: ModelInfo) => void;
+    onLibraryContextMenu?: (event: MouseEvent, node: TreeFolderNode) => void;
   }
 
-  let { nodes, depth = 0 }: Props = $props();
+  let { nodes, depth = 0, onModelContextMenu, onLibraryContextMenu }: Props = $props();
 </script>
 
 <div class="space-y-0.5">
@@ -23,6 +26,12 @@
           aria-expanded={!collapsed}
           title={node.error ? `${node.path || node.label}\n${node.error}` : (node.path || node.label)}
           onclick={() => studio.toggleFolder(node.key)}
+          oncontextmenu={isLibrary
+            ? (e) => {
+                e.preventDefault();
+                onLibraryContextMenu?.(e, node);
+              }
+            : undefined}
         >
           <!-- Chevron -->
           <svg
@@ -97,7 +106,10 @@
               !
             </span>
           {:else}
-            <span class="text-[10px] opacity-50 tabular-nums shrink-0 pr-0.5">
+            <span
+              class="rounded-full bg-base-content/10 text-base-content/70 px-1.5 py-0.5 text-[10px] font-medium leading-none tabular-nums shrink-0"
+              title="{node.modelCount} model{node.modelCount === 1 ? '' : 's'}"
+            >
               {node.modelCount}
             </span>
           {/if}
@@ -114,24 +126,36 @@
                 No models found
               </div>
             {:else}
-              <ModelTreeNodes nodes={node.children} depth={depth + 1} />
+              <ModelTreeNodes
+                nodes={node.children}
+                depth={depth + 1}
+                {onModelContextMenu}
+                {onLibraryContextMenu}
+              />
             {/if}
           </div>
         {/if}
       </div>
     {:else}
+      {@const isActive = studio.activeModelId === node.model.id}
       <button
         type="button"
-        class="btn btn-ghost btn-xs w-full justify-start text-left h-auto py-1.5 px-2 font-normal flex flex-col items-start gap-0.5"
-        class:btn-active={studio.activeModelId === node.model.id}
+        class="w-full flex flex-col items-start gap-0.5 rounded-field px-2 py-1.5 text-left transition-colors cursor-pointer select-none focus:outline-none focus-visible:outline-2 focus-visible:outline-primary {isActive
+          ? 'bg-base-content/10 text-base-content font-semibold'
+          : 'text-base-content hover:bg-base-content/10 font-normal'}"
+        aria-current={isActive ? 'true' : undefined}
         title={node.model.kind === 'error' && node.model.parse_error
           ? `${node.model.rel_path}\n${node.model.parse_error}`
           : node.model.rel_path}
         onclick={() => studio.selectModel(node.model.id)}
+        oncontextmenu={(e) => {
+          e.preventDefault();
+          onModelContextMenu?.(e, node.model);
+        }}
       >
         <div class="flex items-center gap-1.5 w-full min-w-0">
           <span
-            class="font-medium text-xs truncate flex-1 min-w-0"
+            class="text-xs truncate flex-1 min-w-0 {isActive ? 'font-semibold' : 'font-medium'}"
             class:text-error={node.model.kind === 'error'}
           >
             {node.model.name}
@@ -151,11 +175,26 @@
               Script
             </span>
           {/if}
+          {#if isActive}
+            <svg
+              xmlns="http://www.w3.org/2000/svg"
+              class="h-3.5 w-3.5 shrink-0 text-primary"
+              fill="none"
+              viewBox="0 0 24 24"
+              stroke="currentColor"
+              stroke-width="2.5"
+              stroke-linecap="round"
+              stroke-linejoin="round"
+              aria-hidden="true"
+            >
+              <path d="M20 6 9 17l-5-5" />
+            </svg>
+          {/if}
         </div>
         {#if node.model.kind === 'error' && node.model.parse_error}
-          <span class="text-[11px] text-error/85 truncate w-full">{node.model.parse_error}</span>
+          <span class="text-[11px] font-normal text-error/85 truncate w-full">{node.model.parse_error}</span>
         {:else if node.model.description}
-          <span class="text-[11px] opacity-60 truncate w-full">{node.model.description}</span>
+          <span class="text-[11px] font-normal opacity-60 truncate w-full">{node.model.description}</span>
         {/if}
       </button>
     {/if}

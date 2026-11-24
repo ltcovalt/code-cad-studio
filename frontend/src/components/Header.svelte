@@ -148,7 +148,7 @@
           <button
             type="button"
             class="w-full flex items-center justify-between gap-2 px-2.5 py-1.5 rounded-field text-xs transition-colors cursor-pointer text-left {layoutMode === 'stacked'
-              ? 'bg-primary/15 text-primary font-semibold'
+              ? 'bg-base-content/10 text-base-content font-semibold'
               : 'text-base-content hover:bg-base-content/10 font-normal'}"
             aria-current={layoutMode === 'stacked' ? 'true' : undefined}
             onclick={() => selectLayout('stacked')}
@@ -192,7 +192,7 @@
           <button
             type="button"
             class="w-full flex items-center justify-between gap-2 px-2.5 py-1.5 rounded-field text-xs transition-colors cursor-pointer text-left {layoutMode === 'side-by-side'
-              ? 'bg-primary/15 text-primary font-semibold'
+              ? 'bg-base-content/10 text-base-content font-semibold'
               : 'text-base-content hover:bg-base-content/10 font-normal'}"
             aria-current={layoutMode === 'side-by-side' ? 'true' : undefined}
             onclick={() => selectLayout('side-by-side')}
@@ -236,7 +236,7 @@
           <button
             type="button"
             class="w-full flex items-center justify-between gap-2 px-2.5 py-1.5 rounded-field text-xs transition-colors cursor-pointer text-left {layoutMode === 'right'
-              ? 'bg-primary/15 text-primary font-semibold'
+              ? 'bg-base-content/10 text-base-content font-semibold'
               : 'text-base-content hover:bg-base-content/10 font-normal'}"
             aria-current={layoutMode === 'right' ? 'true' : undefined}
             onclick={() => selectLayout('right')}
@@ -317,7 +317,7 @@
             <button
               type="button"
               class="w-full flex items-center justify-between gap-2 px-2.5 py-1.5 rounded-field text-xs transition-colors cursor-pointer text-left {isSelected
-                ? 'bg-primary/15 text-primary font-semibold'
+                ? 'bg-base-content/10 text-base-content font-semibold'
                 : 'text-base-content hover:bg-base-content/10 font-normal'}"
               aria-current={isSelected ? 'true' : undefined}
               onclick={() => selectTheme(themeOption.id)}

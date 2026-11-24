@@ -103,7 +103,27 @@ describe('StudioState', () => {
 
   beforeEach(() => {
     vi.clearAllMocks();
-    localStorage.clear();
+    if (typeof localStorage === 'undefined' || typeof localStorage.clear !== 'function') {
+      const store = new Map<string, string>();
+      vi.stubGlobal('localStorage', {
+        getItem: (k: string) => store.get(k) ?? null,
+        setItem: (k: string, v: string) => {
+          store.set(k, String(v));
+        },
+        removeItem: (k: string) => {
+          store.delete(k);
+        },
+        clear: () => {
+          store.clear();
+        },
+        key: (i: number) => Array.from(store.keys())[i] ?? null,
+        get length() {
+          return store.size;
+        },
+      });
+    } else {
+      localStorage.clear();
+    }
     state = new StudioState();
     state.config = {
       libraries: [{ id: 'lib', name: 'Lib', path: '/lib' }],
@@ -118,7 +138,7 @@ describe('StudioState', () => {
   });
 
   afterEach(() => {
-    state.destroy();
+    state?.destroy();
   });
 
   it('queues pendingRender when viewport attaches after initial render completes', async () => {
@@ -323,5 +343,151 @@ describe('StudioState', () => {
       '',
       { onboarding_skipped: true }
     );
+  });
+
+  it('tracks defaultExportFilename and supports resetExportFilename', async () => {
+    state.attachViewport(fakeViewport as unknown as CadViewportController);
+    const box = makeModel('lib/box', '/lib/box/box.py');
+    mockApi.getModel.mockResolvedValueOnce(makeDetail(box, 50));
+    mockApi.renderModel
+      .mockResolvedValueOnce({
+        ok: true,
+        shapes: { id: '/box' },
+        export_filename: 'box_50mm',
+      })
+      .mockResolvedValueOnce({
+        ok: true,
+        shapes: { id: '/box2' },
+        export_filename: 'box_80mm',
+      });
+
+    await state.selectModel('lib/box');
+    expect(state.defaultExportFilename).toBe('box_50mm');
+    expect(state.exportFilename).toBe('box_50mm');
+    expect(state.exportFilenameEdited).toBe(false);
+
+    // User edits filename; subsequent render updates defaultExportFilename without clobbering user input
+    state.setExportFilename('my_custom_box');
+    expect(state.exportFilename).toBe('my_custom_box');
+    expect(state.exportFilenameEdited).toBe(true);
+
+    state.updateParam('width', 80, 'preview');
+    await state.triggerRender(false, true);
+    expect(state.defaultExportFilename).toBe('box_80mm');
+    expect(state.exportFilename).toBe('my_custom_box');
+    expect(state.exportFilenameEdited).toBe(true);
+
+    // Reset restores the latest defaultExportFilename
+    state.resetExportFilename();
+    expect(state.exportFilename).toBe('box_80mm');
+    expect(state.exportFilenameEdited).toBe(false);
+  });
+
+  it('scaffoldDemo respects options.selectModel', async () => {
+    const demoModel = makeModel('demo/box', '/demo/box/box.py');
+    mockApi.scaffoldModel.mockResolvedValue({
+      ok: true,
+      target_dir: '/demo',
+      library_id: 'demo',
+      model_id: 'demo/box',
+    });
+    mockApi.listModels.mockResolvedValue({
+      ok: true,
+      libraries: [{ id: 'demo', name: 'demo', path: '/demo' }],
+      models: [demoModel],
+    });
+
+    // selectModel: false skips selecting model (used by onboarding wizard)
+    await state.scaffoldDemo('/demo', { selectModel: false });
+    expect(mockApi.getModel).not.toHaveBeenCalled();
+    expect(state.activeModelId).toBeNull();
+
+    // Default behavior selects the scaffolded model
+    mockApi.getModel.mockResolvedValueOnce(makeDetail(demoModel, 40));
+    mockApi.renderModel.mockResolvedValueOnce({ ok: true, shapes: { id: '/demo' } });
+    await state.scaffoldDemo('/demo');
+    expect(mockApi.getModel).toHaveBeenCalledWith('demo/box');
+    expect(state.activeModelId).toBe('demo/box');
+  });
+
+  it('generalizes openModelInEditor and revealPath with active model defaults', async () => {
+    state.hasDesktop = true;
+    const box = makeModel('lib/box', '/lib/box/box.py');
+    state.activeModel = box;
+    mockApi.openInEditor.mockResolvedValue({ ok: true });
+    mockApi.revealFile.mockResolvedValue({ ok: true });
+
+    await state.openActiveModelInEditor();
+    expect(mockApi.openInEditor).toHaveBeenLastCalledWith('/lib/box/box.py');
+
+    await state.openModelInEditor('/lib/other/other.py');
+    expect(mockApi.openInEditor).toHaveBeenLastCalledWith('/lib/other/other.py');
+
+    await state.revealActiveModel();
+    expect(mockApi.revealFile).toHaveBeenLastCalledWith('/lib/box/box.py');
+
+    await state.revealPath('/lib/other');
+    expect(mockApi.revealFile).toHaveBeenLastCalledWith('/lib/other');
+  });
+
+  it('exportActiveModel returns structured results for success, cancel, and error', async () => {
+    state.hasDesktop = true;
+    const noModel = await state.exportActiveModel('stl');
+    expect(noModel).toEqual({ ok: false, error: 'No active model selected' });
+
+    const box = makeModel('lib/box', '/lib/box/box.py');
+    mockApi.getModel.mockResolvedValueOnce(makeDetail(box, 50));
+    mockApi.renderModel.mockResolvedValueOnce({
+      ok: true,
+      shapes: { id: '/box' },
+      export_filename: 'box_50mm',
+      build_time_ms: 10,
+      tessellate_time_ms: 5,
+    });
+    await state.selectModel('lib/box');
+
+    // Success
+    mockApi.exportModel.mockResolvedValueOnce({
+      ok: true,
+      cancelled: false,
+      path: '/exports/box_50mm.stl',
+      size: 2048,
+    });
+    const okRes = await state.exportActiveModel('stl', { quality: 'fine' });
+    expect(okRes).toEqual({
+      ok: true,
+      cancelled: false,
+      path: '/exports/box_50mm.stl',
+      size: 2048,
+    });
+    expect(state.lastExportPath).toBe('/exports/box_50mm.stl');
+    expect(state.status).toEqual({ kind: 'message', message: 'Exported box_50mm.stl (2 KB)' });
+    expect(state.exporting).toBe(false);
+
+    // Cancelled preserves previous status & lastExportPath silently
+    mockApi.exportModel.mockResolvedValueOnce({ ok: true, cancelled: true });
+    const cancelRes = await state.exportActiveModel('step');
+    expect(cancelRes).toEqual({ ok: true, cancelled: true });
+    expect(state.lastExportPath).toBe('/exports/box_50mm.stl');
+    expect(state.status).toEqual({ kind: 'message', message: 'Exported box_50mm.stl (2 KB)' });
+
+    // Error response
+    mockApi.exportModel.mockResolvedValueOnce({
+      ok: false,
+      error: 'Geometry invalid',
+      traceback: 'Traceback...',
+    });
+    const errRes = await state.exportActiveModel('3mf');
+    expect(errRes).toEqual({
+      ok: false,
+      error: 'Geometry invalid',
+      traceback: 'Traceback...',
+    });
+    expect(state.lastExportPath).toBe('');
+    expect(state.status).toEqual({
+      kind: 'error',
+      error: 'Geometry invalid',
+      traceback: 'Traceback...',
+    });
   });
 });

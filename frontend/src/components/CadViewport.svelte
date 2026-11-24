@@ -2,6 +2,7 @@
   import { onMount } from 'svelte';
   import type { CadViewportController } from '../lib/cadViewer';
   import { studio } from '../lib/studioState.svelte';
+  import ViewportStatusBar from './ViewportStatusBar.svelte';
 
   let containerEl: HTMLDivElement | undefined = $state();
   let viewportLoading = $state(true);
@@ -57,43 +58,47 @@
   });
 </script>
 
-<main class="flex-1 relative min-w-0 min-h-0 bg-base-100 overflow-hidden p-2">
-  <div id="cad-viewer-root" bind:this={containerEl}></div>
+<main class="flex-1 flex flex-col min-w-0 min-h-0 bg-base-100 overflow-hidden">
+  <div class="flex-1 relative min-w-0 min-h-0 p-2">
+    <div id="cad-viewer-root" bind:this={containerEl}></div>
 
-  {#if contextLost}
-    <div
-      class="absolute inset-0 z-20 flex items-center justify-center bg-base-100/90 backdrop-blur-xs p-4"
-      role="alert"
-    >
-      <div class="card bg-base-200 border border-error/40 shadow-lg max-w-sm p-4 text-center space-y-3">
-        <div class="text-sm font-semibold text-error">3D Viewport Context Lost</div>
-        <p class="text-xs opacity-75">
-          The WebGL graphics context was interrupted by the system or GPU driver.
-        </p>
-        <div>
-          <button
-            type="button"
-            class="btn btn-primary btn-xs"
-            onclick={() => void handleReloadViewport()}
-          >
-            Reload Viewport
-          </button>
+    {#if contextLost}
+      <div
+        class="absolute inset-0 z-20 flex items-center justify-center bg-base-100/90 backdrop-blur-xs p-4"
+        role="alert"
+      >
+        <div class="card bg-base-200 border border-error/40 shadow-lg max-w-sm p-4 text-center space-y-3">
+          <div class="text-sm font-semibold text-error">3D Viewport Context Lost</div>
+          <p class="text-xs opacity-75">
+            The WebGL graphics context was interrupted by the system or GPU driver.
+          </p>
+          <div>
+            <button
+              type="button"
+              class="btn btn-primary btn-xs"
+              onclick={() => void handleReloadViewport()}
+            >
+              Reload Viewport
+            </button>
+          </div>
         </div>
       </div>
-    </div>
-  {:else if viewportLoading}
-    <div class="absolute inset-0 flex items-center justify-center pointer-events-none">
-      <div class="flex items-center gap-2 text-xs opacity-60">
-        <span class="loading loading-spinner loading-xs text-primary"></span>
-        <span>Initializing 3D Viewport…</span>
+    {:else if viewportLoading}
+      <div class="absolute inset-0 flex items-center justify-center pointer-events-none">
+        <div class="flex items-center gap-2 text-xs opacity-60">
+          <span class="loading loading-spinner loading-xs text-primary"></span>
+          <span>Initializing 3D Viewport…</span>
+        </div>
       </div>
-    </div>
-  {:else if !studio.hasMesh}
-    <div class="absolute inset-0 flex items-center justify-center pointer-events-none">
-      <div class="text-center opacity-50 space-y-1">
-        <div class="text-lg font-semibold">3D CAD Viewport</div>
-        <div class="text-xs">Select a model from the sidebar to render</div>
+    {:else if !studio.hasMesh}
+      <div class="absolute inset-0 flex items-center justify-center pointer-events-none">
+        <div class="text-center opacity-50 space-y-1">
+          <div class="text-lg font-semibold">3D CAD Viewport</div>
+          <div class="text-xs">Select a model from the sidebar to render</div>
+        </div>
       </div>
-    </div>
-  {/if}
+    {/if}
+  </div>
+
+  <ViewportStatusBar />
 </main>

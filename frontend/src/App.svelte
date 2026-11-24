@@ -2,6 +2,7 @@
   import { onMount } from 'svelte';
   import Alert from './components/Alert.svelte';
   import CadViewport from './components/CadViewport.svelte';
+  import ExportModal from './components/ExportModal.svelte';
   import Header from './components/Header.svelte';
   import ManagePresetsModal from './components/ManagePresetsModal.svelte';
   import ModelSidebar from './components/ModelSidebar.svelte';
@@ -244,6 +245,7 @@
       studio.settingsOpen ||
       studio.savePresetModalOpen ||
       studio.managePresetsModalOpen ||
+      studio.exportModalOpen ||
       document.querySelector('dialog[open]')
     ) {
       return;
@@ -274,6 +276,22 @@
       e.preventDefault();
       if (studio.activeModel && studio.activeModel.kind !== 'error' && !studio.modelLoadError) {
         studio.savePresetModalOpen = true;
+      }
+      return;
+    }
+
+    if (mod && !e.altKey && key === 'e') {
+      e.preventDefault();
+      if (
+        studio.activeModel &&
+        studio.activeModel.kind !== 'error' &&
+        !studio.modelLoadError &&
+        !studio.rendering &&
+        !studio.exporting &&
+        !studio.modelLoading &&
+        studio.status.kind !== 'error'
+      ) {
+        studio.exportModalOpen = true;
       }
       return;
     }
@@ -386,6 +404,7 @@
 <SettingsModal />
 <SavePresetModal />
 <ManagePresetsModal />
+<ExportModal />
 
 <style>
   #workspace-root[data-layout='stacked'] > :global(#models-pane) {
