@@ -23,22 +23,31 @@ from collections import OrderedDict
 import dataclasses
 import enum
 import hashlib
+import hmac
 import importlib
+from importlib import metadata as importlib_metadata
 import importlib.util
 import inspect
 import json
 import math
 import os
 import re
+import secrets
 import sys
 import tempfile
 import threading
 import time
 import traceback
+import types
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
-from typing import Any, Literal, Union, get_args, get_origin, get_type_hints
+from typing import Any, ForwardRef, Literal, Union, get_args, get_origin, get_type_hints
 from urllib.parse import unquote, urlparse
+
+try:
+    import annotationlib as _annotationlib
+except ImportError:  # Python < 3.14
+    _annotationlib = None  # type: ignore[assignment]
 
 # Warmed up on a background thread right after the HTTP server prints READY,
 # so directory discovery (GET /models) returns immediately without blocking on
@@ -49,6 +58,73 @@ HAS_OCP_TESSELLATE = False
 _CAD_WARMUP_DONE = threading.Event()
 _CAD_WARMUP_STARTED = False
 _CAD_WARMUP_LOCK = threading.Lock()
+
+MAX_REQUEST_BYTES = 2 * 1024 * 1024
+ALLOWED_LOOPBACK_HOSTS = {"127.0.0.1", "localhost", "[::1]", "::1"}
+MAX_RENDER_CACHE = 24
+MAX_RENDER_CACHE_BYTES = 128 * 1024 * 1024
+ALLOWED_EXPORT_FORMATS = {"stl", "step", "stp", "3mf"}
+EXPORT_QUALITY_PRESETS: dict[str, tuple[float, float]] = {
+    "draft": (0.02, 0.3),
+    "standard": (0.001, 0.1),
+    "fine": (0.0005, 0.05),
+}
+
+
+class _HttpError(Exception):
+    def __init__(self, status: int, message: str, extra: dict[str, Any] | None = None) -> None:
+        super().__init__(message)
+        self.status = status
+        self.message = message
+        self.extra = extra or {}
+
+
+def _package_version(dist_name: str) -> str:
+    try:
+        return importlib_metadata.version(dist_name)
+    except Exception:
+        return ""
+
+
+def _validate_model_id(model_id: str) -> None:
+    if not isinstance(model_id, str) or not model_id:
+        raise _HttpError(400, "Invalid model id")
+    if any(ord(ch) < 32 for ch in model_id):
+        raise _HttpError(400, "Invalid model id")
+    if "\\" in model_id or ":" in model_id:
+        raise _HttpError(400, "Invalid model id")
+    if model_id.startswith("/") or model_id.endswith("/") or "//" in model_id:
+        raise _HttpError(400, "Invalid model id")
+    parts = model_id.split("/")
+    if len(parts) < 2:
+        raise _HttpError(400, "Invalid model id")
+    if any(seg in ("", ".", "..") for seg in parts):
+        raise _HttpError(400, "Invalid model id")
+
+
+def _replace_with_retry(
+    src: Path,
+    dst: Path,
+    attempts: int = 8,
+    initial_delay: float = 0.05,
+) -> None:
+    """Atomically replace dst with src, retrying transient Windows AV/editor locks."""
+    delay = initial_delay
+    for attempt in range(attempts):
+        try:
+            os.replace(src, dst)
+            return
+        except PermissionError:
+            if attempt >= attempts - 1:
+                raise
+            time.sleep(delay)
+            delay *= 1.5
+        except OSError as exc:
+            if getattr(exc, "winerror", None) in (5, 32) and attempt < attempts - 1:
+                time.sleep(delay)
+                delay *= 1.5
+                continue
+            raise
 
 
 def _warmup_cad_imports() -> None:
@@ -131,18 +207,49 @@ def humanize_class_name(name: str) -> str:
     return spaced or "Item"
 
 
-def _discover_script_metadata(
-    py_file: Path,
-    library_id: str,
-    library_name: str,
-    library_root: Path,
-) -> dict[str, Any] | None:
-    """Statically inspect a .py file via AST to see if it looks like a CAD model."""
+def _tree_uses_build123d(tree: ast.AST) -> bool:
+    """Return True if an AST imports build123d/ocp_vscode/ocp_viewer or calls show()/show_object()."""
+    for node in ast.walk(tree):
+        if isinstance(node, ast.Import):
+            for alias in node.names:
+                name = alias.name
+                if name == "build123d" or name.startswith("build123d.") or name in ("ocp_vscode", "ocp_viewer"):
+                    return True
+        elif isinstance(node, ast.ImportFrom):
+            mod = node.module or ""
+            if mod == "build123d" or mod.startswith("build123d.") or mod in ("ocp_vscode", "ocp_viewer"):
+                return True
+        elif isinstance(node, ast.Call):
+            if isinstance(node.func, ast.Name) and node.func.id in ("show", "show_object"):
+                return True
+    return False
+
+
+def _inspect_script_ast(py_file: Path) -> dict[str, Any] | None:
+    """Parse a .py file and classify it into parametric, script, error, or None (non-CAD)."""
     try:
-        source = py_file.read_text(encoding="utf-8")
-        tree = ast.parse(source, filename=str(py_file))
-    except Exception:
+        source = py_file.read_text(encoding="utf-8-sig")
+    except OSError:
         return None
+    except UnicodeDecodeError as exc:
+        return {
+            "kind": "error",
+            "parse_error": f"Encoding error: {exc}",
+            "description": "",
+            "params_class": "",
+            "entrypoint": "",
+        }
+
+    try:
+        tree = ast.parse(source, filename=str(py_file))
+    except SyntaxError as exc:
+        return {
+            "kind": "error",
+            "parse_error": f"SyntaxError (line {exc.lineno or '?'}): {exc.msg}",
+            "description": "",
+            "params_class": "",
+            "entrypoint": "",
+        }
 
     params_classes: list[str] = []
     create_funcs: list[str] = []
@@ -158,9 +265,54 @@ def _discover_script_metadata(
             elif node.name in ("build", "generate", "create"):
                 fallback_funcs.append(node.name)
 
-    if not create_funcs and not fallback_funcs:
-        return None
+    docstring = ast.get_docstring(tree) or ""
+    first_line = docstring.splitlines()[0].strip() if docstring else ""
+    stem = py_file.stem
 
+    if create_funcs or fallback_funcs:
+        expected_fn = f"create_{stem}"
+        if expected_fn in create_funcs:
+            entrypoint = expected_fn
+        elif create_funcs:
+            entrypoint = create_funcs[-1]
+        else:
+            entrypoint = fallback_funcs[0]
+
+        expected_cls = "".join(part.capitalize() for part in stem.split("_")) + "Params"
+        if expected_cls in params_classes:
+            params_class = expected_cls
+        elif params_classes:
+            params_class = params_classes[-1]
+        else:
+            params_class = ""
+
+        return {
+            "kind": "parametric",
+            "parse_error": "",
+            "description": first_line,
+            "params_class": params_class,
+            "entrypoint": entrypoint,
+        }
+
+    if _tree_uses_build123d(tree):
+        return {
+            "kind": "script",
+            "parse_error": "",
+            "description": first_line,
+            "params_class": "",
+            "entrypoint": "",
+        }
+
+    return None
+
+
+def _build_model_info(
+    py_file: Path,
+    library_id: str,
+    library_name: str,
+    library_root: Path,
+    ast_info: dict[str, Any],
+) -> dict[str, Any]:
     rel = py_file.relative_to(library_root)
     parts = list(rel.parts)
     if parts and parts[0] == "models":
@@ -176,26 +328,12 @@ def _discover_script_metadata(
 
     local_segments = [*category_folders, stem]
     local_id = "/".join(local_segments)
-    model_id = f"{library_id}::{'__'.join(local_segments)}"
-
-    docstring = ast.get_docstring(tree) or ""
-    first_line = docstring.splitlines()[0].strip() if docstring else ""
-
-    expected_fn = f"create_{stem}"
-    if expected_fn in create_funcs:
-        entrypoint = expected_fn
-    elif create_funcs:
-        entrypoint = create_funcs[-1]
-    else:
-        entrypoint = fallback_funcs[0]
-    # Prefer the class matching <ModelName>Params, else the last *Params class (since sub-dataclasses precede the root)
-    expected_cls = "".join(part.capitalize() for part in stem.split("_")) + "Params"
-    if expected_cls in params_classes:
-        params_class = expected_cls
-    elif params_classes:
-        params_class = params_classes[-1]
-    else:
-        params_class = ""
+    model_id = f"{library_id}/{local_id}"
+    presets_path = (
+        py_file.parent / "presets.json"
+        if py_file.parent.name == stem
+        else py_file.parent / f"{stem}.presets.json"
+    )
 
     return {
         "id": model_id,
@@ -207,29 +345,110 @@ def _discover_script_metadata(
         "name": humanize_name(stem),
         "path": str(py_file),
         "rel_path": rel.as_posix(),
-        "description": first_line,
-        "params_class": params_class,
-        "entrypoint": entrypoint,
+        "presets_path": str(presets_path),
+        "description": ast_info["description"],
+        "params_class": ast_info["params_class"],
+        "entrypoint": ast_info["entrypoint"],
+        "kind": ast_info["kind"],
+        "parse_error": ast_info["parse_error"],
         "dir": str(py_file.parent),
     }
 
 
-def _unwrap_optional(tp: Any) -> tuple[Any, bool]:
+def _discover_script_metadata(
+    py_file: Path,
+    library_id: str,
+    library_name: str,
+    library_root: Path,
+) -> dict[str, Any] | None:
+    """Statically inspect a .py file via AST to see if it looks like a CAD model."""
+    ast_info = _inspect_script_ast(py_file)
+    if ast_info is None:
+        return None
+    return _build_model_info(py_file, library_id, library_name, library_root, ast_info)
+
+
+def _is_union_type(tp: Any) -> bool:
     origin = get_origin(tp)
-    if origin is Union:
+    union_type = getattr(types, "UnionType", None)
+    return origin is Union or (union_type is not None and origin is union_type)
+
+
+def _unwrap_optional(tp: Any) -> tuple[Any, bool]:
+    if _is_union_type(tp):
         args = get_args(tp)
         non_none = [a for a in args if a is not type(None)]
         has_none = len(non_none) < len(args)
-        if has_none and len(non_none) == 1:
-            return non_none[0], True
-    # Python 3.10+ X | None
-    if str(origin) == "types.UnionType":
-        args = get_args(tp)
-        non_none = [a for a in args if a is not type(None)]
-        has_none = len(non_none) < len(args)
-        if has_none and len(non_none) == 1:
-            return non_none[0], True
+        if has_none:
+            if len(non_none) == 1:
+                return non_none[0], True
+            if len(non_none) > 1:
+                return Union[tuple(non_none)], True
     return tp, False
+
+
+def _evaluate_annotation(
+    ann: Any,
+    globalns: dict[str, Any],
+    localns: dict[str, Any] | None = None,
+) -> Any:
+    if isinstance(ann, str):
+        return eval(ann, globalns, localns if localns is not None else globalns)
+    if hasattr(ann, "evaluate"):
+        return ann.evaluate(globals=globalns, locals=localns)
+    if isinstance(ann, ForwardRef):
+        return ann._evaluate(globalns, localns, recursive_guard=frozenset())
+    return ann
+
+
+def _get_raw_annotations(obj: Any) -> dict[str, Any]:
+    if _annotationlib is not None:
+        try:
+            return dict(inspect.get_annotations(obj, format=_annotationlib.Format.FORWARDREF))
+        except Exception:
+            pass
+    try:
+        return dict(inspect.get_annotations(obj))
+    except Exception:
+        return {}
+
+
+def _safe_get_type_hints(obj: Any) -> dict[str, Any]:
+    """Resolve type hints per-field so one unresolvable forward-ref never drops sibling hints."""
+    try:
+        return get_type_hints(obj)
+    except Exception:
+        pass
+
+    hints: dict[str, Any] = {}
+    if inspect.isclass(obj):
+        for base in reversed(obj.__mro__):
+            if base is object:
+                continue
+            mod = sys.modules.get(getattr(base, "__module__", ""))
+            base_globals = vars(mod) if mod is not None else {}
+            raw_anns = _get_raw_annotations(base)
+            for name, ann in raw_anns.items():
+                try:
+                    hints[name] = _evaluate_annotation(ann, base_globals)
+                except Exception:
+                    try:
+                        hints[name] = _evaluate_annotation(ann, base_globals, dict(vars(base)))
+                    except Exception:
+                        continue
+        return hints
+
+    func_globals = getattr(obj, "__globals__", None)
+    if func_globals is None:
+        mod = sys.modules.get(getattr(obj, "__module__", ""))
+        func_globals = vars(mod) if mod is not None else {}
+    raw_anns = _get_raw_annotations(obj)
+    for name, ann in raw_anns.items():
+        try:
+            hints[name] = _evaluate_annotation(ann, func_globals)
+        except Exception:
+            continue
+    return hints
 
 
 def _serialize_default(val: Any) -> Any:
@@ -343,6 +562,27 @@ def _introspect_list_item(
         item_info["type"] = "str"
         item_info["default"] = None if elem_nullable else ""
         return item_info
+    if _is_union_type(elem_unwrapped):
+        members = get_args(elem_unwrapped)
+        if members and all(m in (int, float) for m in members):
+            is_float_union = float in members
+            item_info["type"] = "float" if is_float_union else "int"
+            default_num: int | float = (
+                (float(meta["min"]) if is_float_union else int(meta["min"]))
+                if "min" in meta
+                else (0.0 if is_float_union else 0)
+            )
+            item_info["default"] = None if elem_nullable else default_num
+            item_info["step"] = meta.get("step", 0.5 if is_float_union else 1)
+            if "min" in meta:
+                item_info["min"] = meta["min"]
+            if "max" in meta:
+                item_info["max"] = meta["max"]
+            return item_info
+        if str in members:
+            item_info["type"] = "str"
+            item_info["default"] = None if elem_nullable else ""
+            return item_info
 
     return None
 
@@ -352,10 +592,7 @@ def _introspect_dataclass(
     prefix: str = "",
 ) -> tuple[list[dict[str, Any]], dict[str, Any]]:
     """Introspect a @dataclass into UI schema fields and canonical default dict."""
-    try:
-        hints = get_type_hints(cls)
-    except Exception:
-        hints = {}
+    hints = _safe_get_type_hints(cls)
 
     instance = cls()
     fields_schema: list[dict[str, Any]] = []
@@ -456,6 +693,21 @@ def _introspect_dataclass(
                 field_info["min"] = meta["min"]
             if "max" in meta:
                 field_info["max"] = meta["max"]
+        elif _is_union_type(unwrapped) and all(m in (int, float) for m in get_args(unwrapped)):
+            members = get_args(unwrapped)
+            is_float_union = float in members
+            field_info["type"] = "float" if is_float_union else "int"
+            num_default = (
+                (float(default_val) if is_float_union else int(default_val))
+                if default_val is not None
+                else (0.0 if is_float_union else 0)
+            )
+            bounds = _infer_numeric_bounds(f.name, num_default, is_int=not is_float_union)
+            field_info["step"] = meta.get("step", bounds["step"])
+            if "min" in meta:
+                field_info["min"] = meta["min"]
+            if "max" in meta:
+                field_info["max"] = meta["max"]
         else:
             field_info["type"] = "str"
             field_info["default"] = None if (is_nullable and serialized_default is None) else ("" if serialized_default is None else str(serialized_default))
@@ -468,10 +720,7 @@ def _introspect_dataclass(
 def _introspect_function_signature(func: Any) -> tuple[list[dict[str, Any]], dict[str, Any]]:
     """Fallback introspection for scripts with build(a: float = 10.0, ...) functions."""
     sig = inspect.signature(func)
-    try:
-        hints = get_type_hints(func)
-    except Exception:
-        hints = {}
+    hints = _safe_get_type_hints(func)
 
     fields_schema: list[dict[str, Any]] = []
     defaults: dict[str, Any] = {}
@@ -517,6 +766,19 @@ def _introspect_function_signature(func: Any) -> tuple[list[dict[str, Any]], dic
             field_info["type"] = "float"
             field_info["step"] = 0.5
             field_info["default"] = None if (is_nullable and default_val is None) else (float(default_val) if default_val is not None else 0.0)
+        elif _is_union_type(unwrapped) and all(m in (int, float) for m in get_args(unwrapped)):
+            is_float_union = float in get_args(unwrapped)
+            field_info["type"] = "float" if is_float_union else "int"
+            field_info["step"] = 0.5 if is_float_union else 1
+            field_info["default"] = (
+                None
+                if (is_nullable and default_val is None)
+                else (
+                    (float(default_val) if is_float_union else int(default_val))
+                    if default_val is not None
+                    else (0.0 if is_float_union else 0)
+                )
+            )
         else:
             field_info["type"] = "str"
             field_info["default"] = None if (is_nullable and default_val is None) else ("" if default_val is None else str(default_val))
@@ -526,10 +788,93 @@ def _introspect_function_signature(func: Any) -> tuple[list[dict[str, Any]], dic
     return fields_schema, defaults
 
 
+def _coerce_union_value(
+    val: Any,
+    union_args: tuple[Any, ...],
+    is_nullable: bool,
+    default_val: Any,
+) -> Any:
+    has_bool = bool in union_args
+    has_int = int in union_args
+    has_float = float in union_args
+    has_str = str in union_args
+
+    if isinstance(val, bool):
+        if has_bool:
+            return val
+    elif isinstance(val, int):
+        if has_int:
+            return val
+        if has_float:
+            return float(val)
+    elif isinstance(val, float):
+        if has_float:
+            return val
+        if has_int:
+            return int(round(val))
+    elif isinstance(val, str):
+        stripped = val.strip()
+        if stripped == "":
+            if not has_str:
+                return None if (is_nullable or default_val is None) else default_val
+            return ""
+        if has_str:
+            return val
+    elif isinstance(val, dict):
+        for member in union_args:
+            if dataclasses.is_dataclass(member):
+                return _instantiate_dataclass(member, val)
+    elif isinstance(val, (list, tuple)):
+        for member in union_args:
+            m_origin = get_origin(member)
+            if m_origin in (list, tuple) or member in (list, tuple):
+                return _coerce_value(val, member, default_val)
+
+    for member in union_args:
+        if inspect.isclass(member) and issubclass(member, enum.Enum):
+            for enum_member in member:
+                if enum_member.value == val or str(enum_member.value) == str(val) or enum_member.name == str(val):
+                    return enum_member
+        elif get_origin(member) is Literal:
+            for choice in get_args(member):
+                if choice == val or str(choice) == str(val):
+                    return choice
+
+    if isinstance(val, str) and not has_str:
+        stripped = val.strip()
+        if has_bool and stripped.lower() in ("true", "false", "1", "0", "on", "off", "yes", "no"):
+            return stripped.lower() in ("true", "1", "on", "yes")
+        if has_int:
+            try:
+                return int(stripped)
+            except ValueError:
+                if not has_float:
+                    try:
+                        return int(round(float(stripped)))
+                    except ValueError:
+                        pass
+        if has_float:
+            try:
+                return float(stripped)
+            except ValueError:
+                pass
+        for member in union_args:
+            m_origin = get_origin(member)
+            if m_origin in (list, tuple) or member in (list, tuple):
+                return _coerce_value(val, member, default_val)
+
+    if has_str:
+        return str(val)
+    return None if is_nullable else default_val
+
+
 def _coerce_value(val: Any, target_type: Any, default_val: Any) -> Any:
     unwrapped, is_nullable = _unwrap_optional(target_type)
     if val is None:
         return None if is_nullable else default_val
+
+    if _is_union_type(unwrapped):
+        return _coerce_union_value(val, get_args(unwrapped), is_nullable, default_val)
 
     if dataclasses.is_dataclass(unwrapped) or dataclasses.is_dataclass(default_val):
         cls = unwrapped if dataclasses.is_dataclass(unwrapped) else type(default_val)
@@ -551,7 +896,8 @@ def _coerce_value(val: Any, target_type: Any, default_val: Any) -> Any:
                 return c
         return default_val
 
-    if origin in (list, tuple):
+    seq_type = origin if origin in (list, tuple) else (unwrapped if unwrapped in (list, tuple) else None)
+    if seq_type is not None:
         if isinstance(val, str):
             stripped = val.strip()
             if stripped == "":
@@ -565,8 +911,8 @@ def _coerce_value(val: Any, target_type: Any, default_val: Any) -> Any:
             except Exception:
                 val = [part.strip() for part in stripped.strip("[]()").split(",") if part.strip()]
         if isinstance(val, (list, tuple)):
-            elem_args = get_args(unwrapped)
-            if origin is tuple and elem_args and not (len(elem_args) == 2 and elem_args[1] is Ellipsis):
+            elem_args = get_args(unwrapped) if origin in (list, tuple) else ()
+            if seq_type is tuple and elem_args and not (len(elem_args) == 2 and elem_args[1] is Ellipsis):
                 coerced_items = [
                     _coerce_value(item, elem_args[i] if i < len(elem_args) else Any, None)
                     for i, item in enumerate(val)
@@ -577,14 +923,17 @@ def _coerce_value(val: Any, target_type: Any, default_val: Any) -> Any:
                 _coerce_value(item, elem_type, None) if elem_type is not Any else item
                 for item in val
             ]
-            return tuple(coerced_items) if origin is tuple else coerced_items
+            return tuple(coerced_items) if seq_type is tuple else coerced_items
         return None if is_nullable else default_val
 
     if unwrapped is bool or isinstance(default_val, bool):
         if isinstance(val, bool):
             return val
         if isinstance(val, str):
-            return val.lower() in ("true", "1", "on", "yes")
+            stripped = val.strip()
+            if stripped == "":
+                return None if (is_nullable or default_val is None) else default_val
+            return stripped.lower() in ("true", "1", "on", "yes")
         return bool(val)
 
     if unwrapped is int or (isinstance(default_val, int) and not isinstance(default_val, bool)):
@@ -602,10 +951,7 @@ def _coerce_value(val: Any, target_type: Any, default_val: Any) -> Any:
 
 def _instantiate_dataclass(cls: type, overrides: dict[str, Any]) -> Any:
     """Instantiate a dataclass safely, filtering unknown keys and coercing types."""
-    try:
-        hints = get_type_hints(cls)
-    except Exception:
-        hints = {}
+    hints = _safe_get_type_hints(cls)
     default_instance = cls()
     valid_fields = {f.name: f for f in dataclasses.fields(cls)}
     kwargs: dict[str, Any] = {}
@@ -660,7 +1006,11 @@ def _format_python_literal(val: Any) -> str:
         return repr(float(rounded))
     if isinstance(val, str):
         return json.dumps(val, ensure_ascii=False)
-    if isinstance(val, (list, tuple)):
+    if isinstance(val, tuple):
+        if len(val) == 1:
+            return f"({_format_python_literal(val[0])},)"
+        return "(" + ", ".join(_format_python_literal(v) for v in val) + ")"
+    if isinstance(val, list):
         return "[" + ", ".join(_format_python_literal(v) for v in val) + "]"
     raise ValueError(f"unsupported literal type: {type(val).__name__}")
 
@@ -699,10 +1049,7 @@ def _collect_default_changes(
     prefix: str = "",
 ) -> list[dict[str, Any]]:
     """Return leaf parameter changes comparing overrides against canonical dataclass defaults."""
-    try:
-        hints = get_type_hints(cls)
-    except Exception:
-        hints = {}
+    hints = _safe_get_type_hints(cls)
 
     default_instance = cls()
     changes: list[dict[str, Any]] = []
@@ -746,11 +1093,13 @@ def _plan_dataclass_default_updates(
     """Plan surgical UTF-8 byte-span replacements for changed dataclass default literals."""
     raw_bytes = py_path.read_bytes()
     file_sha256 = hashlib.sha256(raw_bytes).hexdigest()
-    source = raw_bytes.decode("utf-8")
+    bom_len = 3 if raw_bytes.startswith(b"\xef\xbb\xbf") else 0
+    body_bytes = raw_bytes[bom_len:]
+    source = body_bytes.decode("utf-8")
     tree = ast.parse(source, filename=str(py_path))
 
     line_starts = [0]
-    for line_b in raw_bytes.splitlines(keepends=True):
+    for line_b in body_bytes.splitlines(keepends=True):
         line_starts.append(line_starts[-1] + len(line_b))
 
     class_defs: dict[str, list[ast.ClassDef]] = {}
@@ -822,9 +1171,9 @@ def _plan_dataclass_default_updates(
             unsupported_out.append({"path": path, "reason": str(exc)})
             continue
 
-        start_b = line_starts[expr.lineno - 1] + expr.col_offset
-        end_b = line_starts[expr.end_lineno - 1] + expr.end_col_offset
-        if start_b < 0 or end_b <= start_b or end_b > len(raw_bytes):
+        start_b = bom_len + line_starts[expr.lineno - 1] + expr.col_offset
+        end_b = bom_len + line_starts[expr.end_lineno - 1] + expr.end_col_offset
+        if start_b < bom_len or end_b <= start_b or end_b > len(raw_bytes):
             unsupported_out.append({"path": path, "reason": "invalid source byte span"})
             continue
 
@@ -857,17 +1206,16 @@ def _sanitize_filename_stem(raw: str, fallback: str) -> str:
     return stem or fallback
 
 
-def _to_json_safe(obj: Any) -> Any:
-    """Recursively convert numpy arrays / tuples into plain JSON-serializable lists."""
-    if hasattr(obj, "tolist"):
-        return obj.tolist()
-    if isinstance(obj, dict):
-        return {str(k): _to_json_safe(v) for k, v in obj.items()}
-    if isinstance(obj, (list, tuple)):
-        return [_to_json_safe(v) for v in obj]
-    if isinstance(obj, float) and (math.isnan(obj) or math.isinf(obj)):
-        return 0.0
-    return obj
+def _finite_float(val: Any) -> float:
+    f = float(val)
+    return f if math.isfinite(f) else 0.0
+
+
+@dataclasses.dataclass
+class _CapturedShape:
+    shape: Any
+    label: str = ""
+    color: Any = None
 
 
 def _color_to_hex(color: Any, fallback: str) -> tuple[str, float]:
@@ -892,7 +1240,9 @@ def _color_to_hex(color: Any, fallback: str) -> tuple[str, float]:
 
 
 def _unwrap_shape(obj: Any) -> Any:
-    """Unwrap BuildPart/BuildSketch/BuildLine or Shape wrappers."""
+    """Unwrap _CapturedShape / BuildPart / BuildSketch / BuildLine or Shape wrappers."""
+    if isinstance(obj, _CapturedShape):
+        obj = obj.shape
     if hasattr(obj, "part") and getattr(obj, "part") is not None:
         return obj.part
     if hasattr(obj, "sketch") and getattr(obj, "sketch") is not None:
@@ -907,10 +1257,31 @@ def _collect_named_parts(result: Any, root_name: str) -> list[tuple[str, Any, st
     parts: list[tuple[str, Any, str, float]] = []
 
     def add_item(name: str, item: Any, idx: int) -> None:
+        explicit_color = None
+        if isinstance(item, _CapturedShape):
+            if item.label:
+                name = item.label
+            explicit_color = item.color
+            item = item.shape
+        if isinstance(item, (list, tuple)):
+            for sub_idx, sub_item in enumerate(item):
+                if isinstance(sub_item, _CapturedShape):
+                    sub_lbl = sub_item.label or getattr(sub_item.shape, "label", "") or f"{name}_{sub_idx + 1}"
+                    if explicit_color is not None and sub_item.color is None:
+                        sub_item = _CapturedShape(sub_item.shape, label=sub_lbl, color=explicit_color)
+                else:
+                    sub_lbl = getattr(sub_item, "label", "") or f"{name}_{sub_idx + 1}"
+                    if explicit_color is not None:
+                        sub_item = _CapturedShape(sub_item, label=sub_lbl, color=explicit_color)
+                add_item(sub_lbl, sub_item, idx + sub_idx)
+            return
         item = _unwrap_shape(item)
         if item is None:
             return
-        fallback_color = DEFAULT_COLORS[idx % len(DEFAULT_COLORS)]
+        if isinstance(item, (list, tuple)):
+            add_item(name, item, idx)
+            return
+        fallback_color = DEFAULT_COLORS[len(parts) % len(DEFAULT_COLORS)]
         # Compound with labeled children
         children = getattr(item, "children", None)
         if children and len(children) > 0:
@@ -918,7 +1289,7 @@ def _collect_named_parts(result: Any, root_name: str) -> list[tuple[str, Any, st
                 child_label = getattr(child, "label", "") or f"{name}_{c_idx + 1}"
                 add_item(child_label, child, idx + c_idx)
             return
-        color_attr = getattr(item, "color", None)
+        color_attr = explicit_color if explicit_color is not None else getattr(item, "color", None)
         hex_col, alpha = _color_to_hex(color_attr, fallback_color)
         parts.append((name, item, hex_col, alpha))
 
@@ -927,10 +1298,16 @@ def _collect_named_parts(result: Any, root_name: str) -> list[tuple[str, Any, st
             add_item(str(k), v, i)
     elif isinstance(result, (list, tuple)):
         for i, v in enumerate(result):
-            lbl = getattr(v, "label", "") or f"Part_{i + 1}"
+            if isinstance(v, _CapturedShape):
+                lbl = v.label or getattr(v.shape, "label", "") or f"Part_{i + 1}"
+            else:
+                lbl = getattr(v, "label", "") or f"Part_{i + 1}"
             add_item(lbl, v, i)
     else:
-        lbl = getattr(result, "label", "") or root_name
+        if isinstance(result, _CapturedShape):
+            lbl = result.label or getattr(result.shape, "label", "") or root_name
+        else:
+            lbl = getattr(result, "label", "") or root_name
         add_item(lbl, result, 0)
 
     return parts
@@ -947,7 +1324,14 @@ def _compute_bbox_bounds(wrapped: Any) -> tuple[float, float, float, float, floa
         return 0.0, 0.0, 0.0, 0.0, 0.0, 0.0
     pmin = bnd.CornerMin()
     pmax = bnd.CornerMax()
-    return pmin.X(), pmin.Y(), pmin.Z(), pmax.X(), pmax.Y(), pmax.Z()
+    return (
+        _finite_float(pmin.X()),
+        _finite_float(pmin.Y()),
+        _finite_float(pmin.Z()),
+        _finite_float(pmax.X()),
+        _finite_float(pmax.Y()),
+        _finite_float(pmax.Z()),
+    )
 
 
 def _tessellate_shape_ocp(shape: Any, linear_deflection: float = 0.1, angular_deflection: float = 0.2) -> tuple[dict[str, Any], dict[str, float]]:
@@ -959,9 +1343,10 @@ def _tessellate_shape_ocp(shape: Any, linear_deflection: float = 0.1, angular_de
     from OCP.GCPnts import GCPnts_QuasiUniformDeflection
     from OCP.gp import gp_Pnt, gp_Vec
     from OCP.TopAbs import TopAbs_EDGE, TopAbs_FACE, TopAbs_REVERSED
-    from OCP.TopExp import TopExp_Explorer
+    from OCP.TopExp import TopExp, TopExp_Explorer
     from OCP.TopLoc import TopLoc_Location
     from OCP.TopoDS import TopoDS
+    from OCP.TopTools import TopTools_IndexedMapOfShape
 
     wrapped = getattr(shape, "wrapped", shape)
 
@@ -1078,14 +1463,16 @@ def _tessellate_shape_ocp(shape: Any, linear_deflection: float = 0.1, angular_de
 
         face_exp.Next()
 
-    # Discretize edges for crisp CAD wireframe
+    # Discretize unique edges via TopExp.MapShapes_s to avoid duplicate shared edges
     edges: list[float] = []
     segments_per_edge: list[int] = []
     edge_types: list[int] = []
 
-    edge_exp = TopExp_Explorer(wrapped, TopAbs_EDGE)
-    while edge_exp.More():
-        edge = to_edge(edge_exp.Current())
+    edge_map = TopTools_IndexedMapOfShape()
+    map_shapes = getattr(TopExp, "MapShapes_s", None) or TopExp.MapShapes
+    map_shapes(wrapped, TopAbs_EDGE, edge_map)
+    for idx in range(1, edge_map.Extent() + 1):
+        edge = to_edge(edge_map.FindKey(idx))
         if not BRep_Tool.Degenerated_s(edge):
             try:
                 adaptor = BRepAdaptor_Curve(edge)
@@ -1104,7 +1491,6 @@ def _tessellate_shape_ocp(shape: Any, linear_deflection: float = 0.1, angular_de
                         edge_types.append(0)
             except Exception:
                 pass
-        edge_exp.Next()
 
     shape_payload = {
         "vertices": vertices,
@@ -1203,7 +1589,11 @@ def _tessellate_shape_fast(
     return _encode_shape_buffers(shape_data), bbox
 
 
-def tessellate_result(result: Any, model_name: str) -> tuple[dict[str, Any], dict[str, float]]:
+def tessellate_result(
+    result: Any,
+    model_name: str,
+    cache_prefix: str = "",
+) -> tuple[dict[str, Any], dict[str, float]]:
     """Tessellate a model's returned shape(s) into three-cad-viewer v5 Shapes JSON."""
     named_parts = _collect_named_parts(result, model_name)
     if not named_parts:
@@ -1215,7 +1605,6 @@ def tessellate_result(result: Any, model_name: str) -> tuple[dict[str, Any], dic
     g_xmax = g_ymax = g_zmax = float("-inf")
 
     seen_names: dict[str, int] = {}
-    ts_ns = time.monotonic_ns()
     for name, shp, hex_color, alpha in named_parts:
         clean_name = re.sub(r"[^A-Za-z0-9_\- ]+", "_", name).strip() or "Part"
         count = seen_names.get(clean_name, 0)
@@ -1223,7 +1612,8 @@ def tessellate_result(result: Any, model_name: str) -> tuple[dict[str, Any], dic
         if count > 0:
             clean_name = f"{clean_name}_{count + 1}"
 
-        shape_data, bb = _tessellate_shape_fast(shp, f"{clean_name}_{id(shp)}_{ts_ns}")
+        cache_tag = f"{cache_prefix}:{clean_name}" if cache_prefix else clean_name
+        shape_data, bb = _tessellate_shape_fast(shp, cache_tag)
         g_xmin = min(g_xmin, bb["xmin"])
         g_xmax = max(g_xmax, bb["xmax"])
         g_ymin = min(g_ymin, bb["ymin"])
@@ -1247,12 +1637,12 @@ def tessellate_result(result: Any, model_name: str) -> tuple[dict[str, Any], dic
         )
 
     overall_bb = {
-        "xmin": g_xmin,
-        "xmax": g_xmax,
-        "ymin": g_ymin,
-        "ymax": g_ymax,
-        "zmin": g_zmin,
-        "zmax": g_zmax,
+        "xmin": _finite_float(g_xmin),
+        "xmax": _finite_float(g_xmax),
+        "ymin": _finite_float(g_ymin),
+        "ymax": _finite_float(g_ymax),
+        "zmin": _finite_float(g_zmin),
+        "zmax": _finite_float(g_zmax),
     }
     shapes_root = {
         "version": 3,
@@ -1264,16 +1654,51 @@ def tessellate_result(result: Any, model_name: str) -> tuple[dict[str, Any], dic
     }
     bbox_summary = {
         **overall_bb,
-        "dx": round(g_xmax - g_xmin, 3),
-        "dy": round(g_ymax - g_ymin, 3),
-        "dz": round(g_zmax - g_zmin, 3),
+        "dx": round(overall_bb["xmax"] - overall_bb["xmin"], 3),
+        "dy": round(overall_bb["ymax"] - overall_bb["ymin"], 3),
+        "dz": round(overall_bb["zmax"] - overall_bb["zmin"], 3),
     }
     return shapes_root, bbox_summary
 
 
-def export_shape_to_file(result: Any, fmt: str, out_path: Path) -> None:
+def _resolve_export_deflection(
+    quality: str = "standard",
+    linear_deflection: Any = None,
+    angular_deflection: Any = None,
+) -> tuple[float, float]:
+    """Validate and resolve export tessellation deflections from preset or custom values."""
+    q = str(quality or "standard").strip().lower()
+    if q in EXPORT_QUALITY_PRESETS:
+        return EXPORT_QUALITY_PRESETS[q]
+    if q == "custom":
+        if isinstance(linear_deflection, bool) or isinstance(angular_deflection, bool):
+            raise _HttpError(400, "custom export deflection values must be numeric")
+        try:
+            lin = float(linear_deflection)
+            ang = float(angular_deflection)
+        except (TypeError, ValueError):
+            raise _HttpError(400, "custom export quality requires numeric linear_deflection and angular_deflection")
+        if not (math.isfinite(lin) and math.isfinite(ang)):
+            raise _HttpError(400, "custom export deflection values must be finite")
+        if not (1e-5 <= lin <= 10.0) or not (1e-3 <= ang <= 3.15):
+            raise _HttpError(400, "custom export deflection values out of allowed range")
+        return lin, ang
+    raise _HttpError(400, f"Unsupported export quality: {quality}")
+
+
+def export_shape_to_file(
+    result: Any,
+    fmt: str,
+    out_path: Path,
+    linear_deflection: float = 0.001,
+    angular_deflection: float = 0.1,
+) -> None:
     """Export build123d shape or dict/list of shapes to .step, .stl, or .3mf."""
     import build123d as b3d
+
+    fmt_lower = str(fmt or "").strip().lower().lstrip(".")
+    if fmt_lower not in ALLOWED_EXPORT_FORMATS:
+        raise _HttpError(400, f"Unsupported export format: {fmt}")
 
     named_parts = _collect_named_parts(result, "model")
     if not named_parts:
@@ -1291,20 +1716,23 @@ def export_shape_to_file(result: Any, fmt: str, out_path: Path) -> None:
             children.append(shp)
         export_obj = b3d.Compound(children=children)
 
-    fmt_lower = fmt.lower().lstrip(".")
     if fmt_lower in ("step", "stp"):
         b3d.export_step(export_obj, str(out_path))
     elif fmt_lower == "stl":
-        b3d.export_stl(export_obj, str(out_path))
+        b3d.export_stl(
+            export_obj,
+            str(out_path),
+            tolerance=linear_deflection,
+            angular_tolerance=angular_deflection,
+        )
     elif fmt_lower == "3mf":
         mesher = b3d.Mesher()
-        mesher.add_shape(export_obj)
+        mesher.add_shape(
+            export_obj,
+            linear_deflection=linear_deflection,
+            angular_deflection=angular_deflection,
+        )
         mesher.write(str(out_path))
-    else:
-        raise ValueError(f"Unsupported export format: {fmt}")
-
-
-MAX_RENDER_CACHE = 24
 
 
 def _library_import_roots(root: Path) -> list[Path]:
@@ -1362,6 +1790,78 @@ def _module_belongs_to_roots(mod: Any, roots: list[Path]) -> bool:
     return False
 
 
+def _estimate_render_payload_bytes(payload: dict[str, Any]) -> int:
+    """Estimate serialized payload size in O(#parts) without full JSON traversal."""
+    total = 4096
+    shapes = payload.get("shapes")
+    if not isinstance(shapes, dict):
+        return total
+    parts = shapes.get("parts")
+    if not isinstance(parts, list):
+        return total
+    for part in parts:
+        total += 256
+        shape = part.get("shape") if isinstance(part, dict) else None
+        if isinstance(shape, dict):
+            for buf in shape.values():
+                if isinstance(buf, dict):
+                    raw_buf = buf.get("buffer")
+                    if isinstance(raw_buf, str):
+                        total += len(raw_buf)
+    return total
+
+
+def _is_script_shape(val: Any) -> bool:
+    """Return True if val looks like a build123d Shape or builder instance."""
+    if val is None or isinstance(val, type) or inspect.ismodule(val) or callable(val):
+        return False
+    if HAS_BUILD123D:
+        try:
+            import build123d as b3d
+
+            b3d_types = tuple(
+                t for t in (
+                    getattr(b3d, "Shape", None),
+                    getattr(b3d, "BuildPart", None),
+                    getattr(b3d, "BuildSketch", None),
+                    getattr(b3d, "BuildLine", None),
+                )
+                if isinstance(t, type)
+            )
+            if b3d_types:
+                return isinstance(val, b3d_types)
+        except Exception:
+            pass
+    if hasattr(val, "wrapped"):
+        return True
+    for attr in ("part", "sketch", "line"):
+        if hasattr(val, attr) and getattr(val, attr) is not None:
+            return True
+    return False
+
+
+def _extract_script_geometry(module: Any, captured: list[Any]) -> Any:
+    """Extract geometry from captured show()/show_object() calls or top-level module bindings."""
+    if captured:
+        return captured[0] if len(captured) == 1 else list(captured)
+
+    priority_names = ("result", "part", "model", "compound", "assembly", "solid", "sketch", "shape", "obj")
+    mod_dict = getattr(module, "__dict__", {})
+    for name in priority_names:
+        if name in mod_dict and _is_script_shape(mod_dict[name]):
+            return mod_dict[name]
+
+    for name, val in reversed(list(mod_dict.items())):
+        if name.startswith("_"):
+            continue
+        if _is_script_shape(val):
+            return val
+
+    raise ValueError(
+        "Script produced no build123d geometry (call show() or assign a Part/Compound/BuildPart to a top-level variable)."
+    )
+
+
 class WorkerState:
     def __init__(self, libraries: list[dict[str, Any]] | None = None) -> None:
         self.lock = threading.RLock()
@@ -1373,7 +1873,10 @@ class WorkerState:
         self.models: dict[str, dict[str, Any]] = {}
         self.loaded_modules: dict[str, Any] = {}
         self.last_build: dict[str, Any] = {}
-        self._render_cache: OrderedDict[tuple[str, str], dict[str, Any]] = OrderedDict()
+        self._render_cache: OrderedDict[tuple[str, str], tuple[int, dict[str, Any]]] = OrderedDict()
+        self._render_cache_bytes: int = 0
+        self._ast_cache: dict[str, tuple[int, int, dict[str, Any] | None]] = {}
+        self._script_captures: dict[str, list[Any]] = {}
         self._active_library_id: str | None = None
         self._library_local_modules: dict[str, dict[str, Any]] = {}
         if libraries:
@@ -1478,8 +1981,18 @@ class WorkerState:
         self._library_local_modules.clear()
         self._active_library_id = None
         self.loaded_modules.clear()
+        self._script_captures.clear()
         self.last_build.clear()
         self._render_cache.clear()
+        self._render_cache_bytes = 0
+        ocp_tess_mod = sys.modules.get("ocp_tessellate.tessellator")
+        if ocp_tess_mod is not None:
+            ocp_cache = getattr(ocp_tess_mod, "cache", None)
+            if ocp_cache is not None and hasattr(ocp_cache, "clear"):
+                try:
+                    ocp_cache.clear()
+                except Exception:
+                    pass
         importlib.invalidate_caches()
 
     def reload_project(self) -> tuple[list[dict[str, Any]], dict[str, str]]:
@@ -1501,7 +2014,13 @@ class WorkerState:
                 if not raw_path:
                     continue
                 root = Path(raw_path).expanduser().resolve()
-                lib_id = str(raw.get("id") or "").strip() or re.sub(r"[^a-z0-9]+", "-", root.name.lower()).strip("-") or "library"
+                explicit_id = str(raw.get("id") or "").strip()
+                if explicit_id:
+                    if not re.fullmatch(r"[A-Za-z0-9._-]+", explicit_id) or explicit_id in (".", ".."):
+                        raise _HttpError(400, f"Invalid library id: {explicit_id}")
+                    lib_id = explicit_id
+                else:
+                    lib_id = re.sub(r"[^a-z0-9]+", "-", root.name.lower()).strip("-") or "library"
                 lib_name = str(raw.get("name") or "").strip() or root.name or lib_id
                 if lib_id in next_by_id:
                     continue
@@ -1524,9 +2043,11 @@ class WorkerState:
             self.models.clear()
             self.library_errors.clear()
             if not self.libraries:
+                self._ast_cache.clear()
                 return [], {}
 
             found: list[dict[str, Any]] = []
+            seen_files: set[str] = set()
             for lib in self.libraries:
                 lib_id: str = lib["id"]
                 lib_name: str = lib["name"]
@@ -1551,10 +2072,25 @@ class WorkerState:
                         if fname.startswith("_") or fname.startswith("test_") or fname == "setup.py":
                             continue
                         py_file = Path(dirpath) / fname
-                        meta = _discover_script_metadata(py_file, lib_id, lib_name, root)
-                        if meta is None:
+                        cache_key = str(py_file)
+                        seen_files.add(cache_key)
+                        try:
+                            st = py_file.stat()
+                        except OSError:
                             continue
-                        # Guard against rare intra-library ID collision (e.g. a__b vs a/b)
+
+                        cached = self._ast_cache.get(cache_key)
+                        if cached is not None and cached[0] == st.st_mtime_ns and cached[1] == st.st_size:
+                            ast_info = cached[2]
+                        else:
+                            ast_info = _inspect_script_ast(py_file)
+                            self._ast_cache[cache_key] = (st.st_mtime_ns, st.st_size, ast_info)
+
+                        if ast_info is None:
+                            continue
+                        meta = _build_model_info(py_file, lib_id, lib_name, root, ast_info)
+
+                        # Guard against rare intra-library ID collision (e.g. foo/foo.py vs foo.py)
                         base_id = meta["id"]
                         unique_id = base_id
                         suffix = 2
@@ -1568,15 +2104,101 @@ class WorkerState:
                 lib_models.sort(key=lambda m: ([f.lower() for f in m["folders"]], m["name"].lower()))
                 found.extend(lib_models)
 
+            for stale_key in [k for k in self._ast_cache if k not in seen_files]:
+                del self._ast_cache[stale_key]
+
             return found, dict(self.library_errors)
 
-    def _load_model_module(self, model_id: str) -> tuple[dict[str, Any], Any]:
+    def _get_model_meta(self, model_id: str) -> dict[str, Any]:
+        _validate_model_id(model_id)
         if model_id not in self.models:
             self.discover_models()
         if model_id not in self.models:
-            raise KeyError(f"Unknown model: {model_id}")
+            raise _HttpError(404, f"Unknown model: {model_id}")
+        return self.models[model_id]
 
-        meta = self.models[model_id]
+    def _exec_script_with_capture(
+        self,
+        spec: Any,
+        module: Any,
+        mod_name: str,
+    ) -> list[Any]:
+        """Execute a Tier 1 arbitrary script while capturing show()/show_object() calls."""
+        captured: list[Any] = []
+
+        def _capture_show(*objs: Any, names: Any = None, colors: Any = None, **kwargs: Any) -> None:
+            name_list = list(names) if isinstance(names, (list, tuple)) else None
+            color_list = list(colors) if isinstance(colors, (list, tuple)) else None
+            items: list[Any] = []
+
+            def _flatten_into(val: Any) -> None:
+                if val is None:
+                    return
+                if isinstance(val, (list, tuple)):
+                    for sub in val:
+                        _flatten_into(sub)
+                else:
+                    items.append(val)
+
+            for obj in objs:
+                _flatten_into(obj)
+            for idx, obj in enumerate(items):
+                if obj is None:
+                    continue
+                lbl = str(name_list[idx]) if name_list is not None and idx < len(name_list) and name_list[idx] is not None else ""
+                col = color_list[idx] if color_list is not None and idx < len(color_list) else None
+                if lbl or col is not None:
+                    captured.append(_CapturedShape(obj, label=lbl, color=col))
+                else:
+                    captured.append(obj)
+
+        def _capture_show_object(obj: Any, name: str | None = None, options: Any = None, **kwargs: Any) -> None:
+            if obj is None:
+                return
+            col = options.get("color") if isinstance(options, dict) else kwargs.get("color")
+            lbl = str(name) if name else ""
+            if lbl or col is not None:
+                captured.append(_CapturedShape(obj, label=lbl, color=col))
+            else:
+                captured.append(obj)
+
+        def _noop(*args: Any, **kwargs: Any) -> None:
+            return None
+
+        mock_viewer = types.ModuleType("ocp_vscode")
+        mock_viewer.show = _capture_show  # type: ignore[attr-defined]
+        mock_viewer.show_object = _capture_show_object  # type: ignore[attr-defined]
+        mock_viewer.set_defaults = _noop  # type: ignore[attr-defined]
+        mock_viewer.set_colormap = _noop  # type: ignore[attr-defined]
+        mock_viewer.reset_show = _noop  # type: ignore[attr-defined]
+        mock_viewer.show_all = _noop  # type: ignore[attr-defined]
+        mock_viewer.show_clear = _noop  # type: ignore[attr-defined]
+
+        orig_vscode = sys.modules.get("ocp_vscode")
+        orig_viewer = sys.modules.get("ocp_viewer")
+        sys.modules["ocp_vscode"] = mock_viewer
+        sys.modules["ocp_viewer"] = mock_viewer
+        try:
+            spec.loader.exec_module(module)
+        except Exception:
+            sys.modules.pop(mod_name, None)
+            raise
+        finally:
+            if orig_vscode is None:
+                sys.modules.pop("ocp_vscode", None)
+            else:
+                sys.modules["ocp_vscode"] = orig_vscode
+            if orig_viewer is None:
+                sys.modules.pop("ocp_viewer", None)
+            else:
+                sys.modules["ocp_viewer"] = orig_viewer
+        return captured
+
+    def _load_model_module(self, model_id: str) -> tuple[dict[str, Any], Any]:
+        meta = self._get_model_meta(model_id)
+        if meta.get("kind") == "error":
+            raise _HttpError(422, meta.get("parse_error") or "Model script has syntax error")
+
         self._activate_library(meta["library_id"])
         if model_id in self.loaded_modules:
             return meta, self.loaded_modules[model_id]
@@ -1591,7 +2213,15 @@ class WorkerState:
 
         module = importlib.util.module_from_spec(spec)
         sys.modules[mod_name] = module
-        spec.loader.exec_module(module)
+        if meta.get("kind") == "script":
+            captured = self._exec_script_with_capture(spec, module, mod_name)
+            self._script_captures[model_id] = captured
+        else:
+            try:
+                spec.loader.exec_module(module)
+            except Exception:
+                sys.modules.pop(mod_name, None)
+                raise
         self.loaded_modules[model_id] = module
         return meta, module
 
@@ -1604,7 +2234,7 @@ class WorkerState:
         # 1. Explicit type annotation on the first parameter of create_<model>(params: <Model>Params)
         try:
             sig = inspect.signature(func)
-            hints = get_type_hints(func)
+            hints = _safe_get_type_hints(func)
             first_param = next(iter(sig.parameters.values()), None)
             if first_param is not None:
                 ann = hints.get(first_param.name, first_param.annotation)
@@ -1632,6 +2262,18 @@ class WorkerState:
 
     def get_schema(self, model_id: str) -> dict[str, Any]:
         with self.lock:
+            meta = self._get_model_meta(model_id)
+            if meta.get("kind") == "error":
+                raise _HttpError(422, meta.get("parse_error") or "Model script has syntax error")
+            if meta.get("kind") == "script":
+                return {
+                    "ok": True,
+                    "model": meta,
+                    "description": meta.get("description", ""),
+                    "fields": [],
+                    "defaults": {},
+                }
+
             meta, module = self._load_model_module(model_id)
             params_cls, func = self._resolve_entrypoints(meta, module)
 
@@ -1673,6 +2315,15 @@ class WorkerState:
         expected_sha256: str = "",
     ) -> dict[str, Any]:
         with self.lock:
+            meta = self._get_model_meta(model_id)
+            if meta.get("kind") == "error":
+                raise _HttpError(422, meta.get("parse_error") or "Model script has syntax error")
+            if meta.get("kind") == "script":
+                return {
+                    "ok": False,
+                    "error": "Model does not define a Params @dataclass; defaults cannot be updated automatically.",
+                }
+
             meta, module = self._load_model_module(model_id)
             params_cls, _func = self._resolve_entrypoints(meta, module)
             if params_cls is None:
@@ -1697,17 +2348,25 @@ class WorkerState:
             if dry_run:
                 return base_resp
 
-            if expected_sha256 and expected_sha256 != file_sha256:
-                return {
-                    **base_resp,
-                    "ok": False,
-                    "error": "File changed on disk since preview; please preview again before applying.",
-                }
             if unsupported:
                 return {
                     **base_resp,
                     "ok": False,
                     "error": "One or more changed fields cannot be updated safely; no changes were written.",
+                }
+
+            expected_clean = expected_sha256.strip()
+            if not expected_clean:
+                raise _HttpError(
+                    400,
+                    "expected_sha256 is required when dry_run=false",
+                    extra={k: v for k, v in base_resp.items() if k != "ok"},
+                )
+            if expected_clean != file_sha256:
+                return {
+                    **base_resp,
+                    "ok": False,
+                    "error": "File changed on disk since preview; please preview again before applying.",
                 }
             if not spans:
                 return {**base_resp, "updated": 0}
@@ -1729,7 +2388,7 @@ class WorkerState:
 
             # Fail-closed syntax validation in memory before touching disk
             try:
-                new_source = new_bytes.decode("utf-8")
+                new_source = new_bytes.decode("utf-8-sig")
                 ast.parse(new_source, filename=str(py_path))
             except Exception as exc:
                 return {
@@ -1749,7 +2408,7 @@ class WorkerState:
                 finally:
                     os.close(fd)
                 os.chmod(tmp_path, st_mode)
-                os.replace(tmp_path, py_path)
+                _replace_with_retry(tmp_path, py_path)
             except Exception as exc:
                 if tmp_path is not None:
                     try:
@@ -1768,7 +2427,8 @@ class WorkerState:
             except Exception:
                 pass
 
-            # Clear module/render caches so subsequent schema/renders immediately reflect new defaults
+            # Clear module/render/AST caches so subsequent schema/renders immediately reflect new defaults
+            self._ast_cache.pop(str(py_path), None)
             self._evict_project_modules()
             self.discover_models()
             new_sha256 = hashlib.sha256(new_bytes).hexdigest()
@@ -1805,6 +2465,17 @@ class WorkerState:
 
     def get_export_filename(self, model_id: str, params_dict: dict[str, Any]) -> dict[str, Any]:
         with self.lock:
+            meta = self._get_model_meta(model_id)
+            if meta.get("kind") == "error":
+                raise _HttpError(422, meta.get("parse_error") or "Model script has syntax error")
+            if meta.get("kind") == "script":
+                fallback = _sanitize_filename_stem(Path(meta["path"]).stem, "model")
+                return {
+                    "ok": True,
+                    "export_filename": fallback,
+                    "library_id": meta["library_id"],
+                }
+
             meta, module = self._load_model_module(model_id)
             params_cls, _ = self._resolve_entrypoints(meta, module)
             stem = self._resolve_export_filename(meta, module, params_cls, params_dict)
@@ -1815,11 +2486,30 @@ class WorkerState:
             }
 
     def _build_shape(self, model_id: str, params_dict: dict[str, Any]) -> tuple[dict[str, Any], Any, float, str]:
+        meta = self._get_model_meta(model_id)
+        if meta.get("kind") == "error":
+            raise _HttpError(422, meta.get("parse_error") or "Model script has syntax error")
+
         _wait_for_cad_warmup()
         if not HAS_BUILD123D:
             raise RuntimeError(f"build123d is not available in {sys.executable}: {BUILD123D_ERROR}")
 
         meta, module = self._load_model_module(model_id)
+
+        if meta.get("kind") == "script":
+            t0 = time.perf_counter()
+            result = _extract_script_geometry(module, self._script_captures.get(model_id, []))
+            build_ms = (time.perf_counter() - t0) * 1000.0
+            export_stem = self._resolve_export_filename(meta, module, None, params_dict)
+            self.last_build = {
+                "model_id": model_id,
+                "params_json": json.dumps(params_dict, sort_keys=True),
+                "result": result,
+                "meta": meta,
+                "export_filename": export_stem,
+            }
+            return meta, result, build_ms, export_stem
+
         params_cls, func = self._resolve_entrypoints(meta, module)
 
         t0 = time.perf_counter()
@@ -1829,10 +2519,7 @@ class WorkerState:
             result = func(params_obj)
         else:
             sig = inspect.signature(func)
-            try:
-                hints = get_type_hints(func)
-            except Exception:
-                hints = {}
+            hints = _safe_get_type_hints(func)
             kwargs = {}
             for name, p in sig.parameters.items():
                 if name in params_dict:
@@ -1852,6 +2539,7 @@ class WorkerState:
         return meta, result, build_ms, export_stem
 
     def render(self, model_id: str, params_dict: dict[str, Any]) -> dict[str, Any]:
+        _validate_model_id(model_id)
         my_seq = self._next_render_seq()
         params_key = json.dumps(params_dict, sort_keys=True)
         cache_key = (model_id, params_key)
@@ -1860,8 +2548,13 @@ class WorkerState:
             if my_seq != self._latest_render_seq():
                 return {"ok": False, "superseded": True, "model_id": model_id}
 
-            cached = self._render_cache.get(cache_key)
-            if cached is not None:
+            meta = self._get_model_meta(model_id)
+            if meta.get("kind") == "error":
+                raise _HttpError(422, meta.get("parse_error") or "Model script has syntax error")
+
+            cached_entry = self._render_cache.get(cache_key)
+            if cached_entry is not None:
+                _, cached = cached_entry
                 self._render_cache.move_to_end(cache_key)
                 return {**cached, "cached": True, "build_time_ms": 0.0, "tessellate_time_ms": 0.0}
 
@@ -1874,26 +2567,62 @@ class WorkerState:
             if my_seq != self._latest_render_seq():
                 return {"ok": False, "superseded": True, "model_id": model_id}
 
+            try:
+                file_mtime_ns = Path(meta["path"]).stat().st_mtime_ns
+            except OSError:
+                file_mtime_ns = 0
+            params_hash = hashlib.sha1(params_key.encode("utf-8")).hexdigest()[:12]
+            cache_prefix = f"{model_id}:{file_mtime_ns}:{params_hash}"
+
             t1 = time.perf_counter()
-            shapes, bbox = tessellate_result(result, meta["name"])
+            shapes, bbox = tessellate_result(result, meta["name"], cache_prefix=cache_prefix)
             tess_ms = (time.perf_counter() - t1) * 1000.0
             payload = {
                 "ok": True,
+                "cached": False,
                 "model_id": model_id,
                 "build_time_ms": round(build_ms, 1),
                 "tessellate_time_ms": round(tess_ms, 1),
                 "bbox": bbox,
-                "shapes": _to_json_safe(shapes),
+                "shapes": shapes,
                 "export_filename": export_stem,
             }
-            self._render_cache[cache_key] = payload
-            self._render_cache.move_to_end(cache_key)
-            while len(self._render_cache) > MAX_RENDER_CACHE:
-                self._render_cache.popitem(last=False)
+            entry_bytes = _estimate_render_payload_bytes(payload)
+            if entry_bytes <= MAX_RENDER_CACHE_BYTES:
+                if cache_key in self._render_cache:
+                    old_bytes, _ = self._render_cache.pop(cache_key)
+                    self._render_cache_bytes = max(0, self._render_cache_bytes - old_bytes)
+                self._render_cache[cache_key] = (entry_bytes, payload)
+                self._render_cache_bytes += entry_bytes
+                self._render_cache.move_to_end(cache_key)
+                while (
+                    len(self._render_cache) > MAX_RENDER_CACHE
+                    or self._render_cache_bytes > MAX_RENDER_CACHE_BYTES
+                ):
+                    _, (evicted_bytes, _) = self._render_cache.popitem(last=False)
+                    self._render_cache_bytes = max(0, self._render_cache_bytes - evicted_bytes)
             return payload
 
-    def export(self, model_id: str, params_dict: dict[str, Any], fmt: str, output_path: str = "") -> tuple[dict[str, Any] | None, bytes | None]:
+    def export(
+        self,
+        model_id: str,
+        params_dict: dict[str, Any],
+        fmt: str,
+        output_path: str = "",
+        quality: str = "standard",
+        linear_deflection: Any = None,
+        angular_deflection: Any = None,
+    ) -> tuple[dict[str, Any] | None, bytes | None]:
+        fmt_lower = str(fmt or "").strip().lower().lstrip(".")
+        if fmt_lower not in ALLOWED_EXPORT_FORMATS:
+            raise _HttpError(400, f"Unsupported export format: {fmt}")
+        lin_defl, ang_defl = _resolve_export_deflection(quality, linear_deflection, angular_deflection)
+
         with self.lock:
+            meta = self._get_model_meta(model_id)
+            if meta.get("kind") == "error":
+                raise _HttpError(422, meta.get("parse_error") or "Model script has syntax error")
+
             params_key = json.dumps(params_dict, sort_keys=True)
             if (
                 self.last_build.get("model_id") == model_id
@@ -1908,43 +2637,147 @@ class WorkerState:
             if output_path:
                 out = Path(output_path).expanduser().resolve()
                 out.parent.mkdir(parents=True, exist_ok=True)
-                export_shape_to_file(result, fmt, out)
+                export_shape_to_file(
+                    result,
+                    fmt_lower,
+                    out,
+                    linear_deflection=lin_defl,
+                    angular_deflection=ang_defl,
+                )
                 return {"ok": True, "path": str(out), "size": out.stat().st_size}, None
 
             safe_stem = _sanitize_filename_stem(export_stem, "model")
             with tempfile.TemporaryDirectory() as tmpdir:
-                out = Path(tmpdir) / f"{safe_stem}.{fmt.lower().lstrip('.')}"
-                export_shape_to_file(result, fmt, out)
+                out = Path(tmpdir) / f"{safe_stem}.{fmt_lower}"
+                export_shape_to_file(
+                    result,
+                    fmt_lower,
+                    out,
+                    linear_deflection=lin_defl,
+                    angular_deflection=ang_defl,
+                )
                 return None, out.read_bytes()
 
 
-def make_handler(state: WorkerState) -> type[BaseHTTPRequestHandler]:
+def _extract_host_name(host_header: str) -> str:
+    raw = (host_header or "").strip().lower()
+    if not raw:
+        return ""
+    if raw.startswith("["):
+        end_idx = raw.find("]")
+        if end_idx <= 1:
+            return ""
+        rest = raw[end_idx + 1 :]
+        if rest and not (rest.startswith(":") and rest[1:].isdigit()):
+            return ""
+        return raw[: end_idx + 1]
+    if ":" in raw:
+        host_part, port_part = raw.rsplit(":", 1)
+        if not port_part.isdigit():
+            return ""
+        return host_part
+    return raw
+
+
+def make_handler(state: WorkerState, auth_token: str | None = None) -> type[BaseHTTPRequestHandler]:
+    expected_token = (
+        auth_token.strip()
+        if isinstance(auth_token, str) and auth_token.strip()
+        else os.environ.get("CODE_CAD_WORKER_TOKEN", "").strip() or secrets.token_hex(32)
+    )
+
     class Handler(BaseHTTPRequestHandler):
         def log_message(self, format: str, *args: Any) -> None:
             # Keep stdout clean; send logs to stderr.
             sys.stderr.write("[worker] " + (format % args) + "\n")
             sys.stderr.flush()
 
-        def _send_json(self, payload: dict[str, Any], status: int = 200) -> None:
+        def _send_json(
+            self,
+            payload: dict[str, Any],
+            status: int = 200,
+            headers: dict[str, str] | None = None,
+        ) -> None:
             body = json.dumps(payload, separators=(",", ":")).encode("utf-8")
             try:
                 self.send_response(status)
                 self.send_header("Content-Type", "application/json")
                 self.send_header("Content-Length", str(len(body)))
+                if headers:
+                    for hk, hv in headers.items():
+                        self.send_header(hk, hv)
                 self.end_headers()
                 self.wfile.write(body)
             except (BrokenPipeError, ConnectionResetError):
                 # Client aborted an in-flight superseded request; ignore silently.
                 pass
 
+        def _authorize_and_check_host(self) -> bool:
+            hostname = _extract_host_name(self.headers.get("Host", ""))
+            if hostname not in ALLOWED_LOOPBACK_HOSTS:
+                self._send_json({"ok": False, "error": "forbidden host"}, status=403)
+                return False
+
+            auth_hdr = (self.headers.get("Authorization") or "").strip()
+            parts = auth_hdr.split(None, 1)
+            if len(parts) != 2 or parts[0].lower() != "bearer":
+                self._send_json(
+                    {"ok": False, "error": "unauthorized"},
+                    status=401,
+                    headers={"WWW-Authenticate": "Bearer"},
+                )
+                return False
+
+            supplied = parts[1].strip()
+            if not supplied or not hmac.compare_digest(
+                supplied.encode("utf-8"),
+                expected_token.encode("utf-8"),
+            ):
+                self._send_json(
+                    {"ok": False, "error": "unauthorized"},
+                    status=401,
+                    headers={"WWW-Authenticate": "Bearer"},
+                )
+                return False
+            return True
+
         def _read_json(self) -> dict[str, Any]:
-            length = int(self.headers.get("Content-Length", "0"))
-            if length <= 0:
+            transfer_encodings = self.headers.get_all("Transfer-Encoding") or []
+            if any(te.strip() for te in transfer_encodings):
+                raise _HttpError(411, "transfer encoding not supported")
+            content_lengths = self.headers.get_all("Content-Length") or []
+            if len(content_lengths) > 1:
+                raise _HttpError(400, "duplicate Content-Length header")
+            raw_len = content_lengths[0] if content_lengths else None
+            if raw_len is None or raw_len.strip() == "":
+                return {}
+            try:
+                length = int(raw_len.strip())
+            except ValueError:
+                raise _HttpError(400, "invalid Content-Length")
+            if length < 0:
+                raise _HttpError(400, "invalid Content-Length")
+            if length > MAX_REQUEST_BYTES:
+                raise _HttpError(413, "request body exceeds 2 MiB limit")
+            if length == 0:
                 return {}
             raw = self.rfile.read(length)
-            return json.loads(raw.decode("utf-8"))
+            if len(raw) != length:
+                raise _HttpError(400, "incomplete request body")
+            try:
+                text = raw.decode("utf-8")
+                parsed = json.loads(text)
+            except UnicodeDecodeError:
+                raise _HttpError(400, "invalid UTF-8 request body")
+            except json.JSONDecodeError:
+                raise _HttpError(400, "invalid JSON request body")
+            if not isinstance(parsed, dict):
+                raise _HttpError(400, "JSON object expected")
+            return parsed
 
         def do_GET(self) -> None:
+            if not self._authorize_and_check_host():
+                return
             parsed = urlparse(self.path)
             path = parsed.path
             try:
@@ -1959,9 +2792,12 @@ def make_handler(state: WorkerState) -> type[BaseHTTPRequestHandler]:
                         {
                             "ok": True,
                             "python": sys.executable,
+                            "python_version": sys.version.split()[0],
                             "build123d": HAS_BUILD123D,
+                            "build123d_version": _package_version("build123d") if HAS_BUILD123D else "",
                             "build123d_error": BUILD123D_ERROR,
                             "ocp_tessellate": HAS_OCP_TESSELLATE,
+                            "ocp_tessellate_version": _package_version("ocp_tessellate") if HAS_OCP_TESSELLATE else "",
                             "libraries": libs,
                         }
                     )
@@ -1972,13 +2808,15 @@ def make_handler(state: WorkerState) -> type[BaseHTTPRequestHandler]:
                     self._send_json({"ok": True, "models": models, "library_errors": lib_errors})
                     return
 
-                m = re.match(r"^/models/([^/]+)/schema$", path)
+                m = re.match(r"^/models/(.+)/schema$", path)
                 if m:
                     model_id = unquote(m.group(1))
                     self._send_json(state.get_schema(model_id))
                     return
 
                 self._send_json({"ok": False, "error": f"Not found: {path}"}, status=404)
+            except _HttpError as exc:
+                self._send_json({"ok": False, "error": exc.message, **exc.extra}, status=exc.status)
             except Exception as exc:
                 self._send_json(
                     {
@@ -1990,6 +2828,8 @@ def make_handler(state: WorkerState) -> type[BaseHTTPRequestHandler]:
                 )
 
         def do_POST(self) -> None:
+            if not self._authorize_and_check_host():
+                return
             parsed = urlparse(self.path)
             path = parsed.path
             try:
@@ -2006,24 +2846,30 @@ def make_handler(state: WorkerState) -> type[BaseHTTPRequestHandler]:
                     self._send_json({"ok": True, "models": models, "library_errors": lib_errors})
                     return
 
-                m_render = re.match(r"^/models/([^/]+)/render$", path)
+                m_render = re.match(r"^/models/(.+)/render$", path)
                 if m_render:
                     model_id = unquote(m_render.group(1))
                     params = body.get("params", {})
+                    if not isinstance(params, dict):
+                        raise _HttpError(400, "params must be a JSON object")
                     self._send_json(state.render(model_id, params))
                     return
 
-                m_export_name = re.match(r"^/models/([^/]+)/export-name$", path)
+                m_export_name = re.match(r"^/models/(.+)/export-name$", path)
                 if m_export_name:
                     model_id = unquote(m_export_name.group(1))
                     params = body.get("params", {})
+                    if not isinstance(params, dict):
+                        raise _HttpError(400, "params must be a JSON object")
                     self._send_json(state.get_export_filename(model_id, params))
                     return
 
-                m_update_defaults = re.match(r"^/models/([^/]+)/update-defaults$", path)
+                m_update_defaults = re.match(r"^/models/(.+)/update-defaults$", path)
                 if m_update_defaults:
                     model_id = unquote(m_update_defaults.group(1))
                     params = body.get("params", {})
+                    if not isinstance(params, dict):
+                        raise _HttpError(400, "params must be a JSON object")
                     dry_run = bool(body.get("dry_run", True))
                     expected_sha256 = str(body.get("expected_sha256", "") or "")
                     self._send_json(
@@ -2036,13 +2882,26 @@ def make_handler(state: WorkerState) -> type[BaseHTTPRequestHandler]:
                     )
                     return
 
-                m_export = re.match(r"^/models/([^/]+)/export$", path)
+                m_export = re.match(r"^/models/(.+)/export$", path)
                 if m_export:
                     model_id = unquote(m_export.group(1))
                     params = body.get("params", {})
+                    if not isinstance(params, dict):
+                        raise _HttpError(400, "params must be a JSON object")
                     fmt = body.get("format", "step")
                     output_path = body.get("output_path", "")
-                    meta_resp, raw_bytes = state.export(model_id, params, fmt, output_path)
+                    quality = body.get("quality", "standard")
+                    linear_deflection = body.get("linear_deflection")
+                    angular_deflection = body.get("angular_deflection")
+                    meta_resp, raw_bytes = state.export(
+                        model_id,
+                        params,
+                        fmt,
+                        output_path,
+                        quality=quality,
+                        linear_deflection=linear_deflection,
+                        angular_deflection=angular_deflection,
+                    )
                     if meta_resp is not None:
                         self._send_json(meta_resp)
                     else:
@@ -2055,6 +2914,8 @@ def make_handler(state: WorkerState) -> type[BaseHTTPRequestHandler]:
                     return
 
                 self._send_json({"ok": False, "error": f"Not found: {path}"}, status=404)
+            except _HttpError as exc:
+                self._send_json({"ok": False, "error": exc.message, **exc.extra}, status=exc.status)
             except Exception as exc:
                 self._send_json(
                     {
@@ -2084,8 +2945,9 @@ def main() -> None:
         except Exception:
             libraries = []
 
+    auth_token = os.environ.get("CODE_CAD_WORKER_TOKEN", "").strip() or secrets.token_hex(32)
     state = WorkerState(libraries)
-    server = ThreadingHTTPServer(("127.0.0.1", args.port), make_handler(state))
+    server = ThreadingHTTPServer(("127.0.0.1", args.port), make_handler(state, auth_token=auth_token))
     actual_port = server.server_address[1]
 
     # Signal readiness to the Go supervisor immediately, then warm up CAD imports

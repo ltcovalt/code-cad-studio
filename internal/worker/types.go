@@ -10,12 +10,15 @@ type LibrarySpec struct {
 }
 
 type HealthResponse struct {
-	OK             bool          `json:"ok"`
-	Python         string        `json:"python"`
-	Build123d      bool          `json:"build123d"`
-	Build123dError string        `json:"build123d_error"`
-	OCPTessellate  bool          `json:"ocp_tessellate"`
-	Libraries      []LibrarySpec `json:"libraries"`
+	OK                   bool          `json:"ok"`
+	Python               string        `json:"python"`
+	PythonVersion        string        `json:"python_version,omitempty"`
+	Build123d            bool          `json:"build123d"`
+	Build123dVersion     string        `json:"build123d_version,omitempty"`
+	Build123dError       string        `json:"build123d_error"`
+	OCPTessellate        bool          `json:"ocp_tessellate"`
+	OCPTessellateVersion string        `json:"ocp_tessellate_version,omitempty"`
+	Libraries            []LibrarySpec `json:"libraries"`
 }
 
 type ModelInfo struct {
@@ -28,9 +31,12 @@ type ModelInfo struct {
 	Name         string   `json:"name"`
 	Path         string   `json:"path"`
 	RelPath      string   `json:"rel_path"`
+	PresetsPath  string   `json:"presets_path,omitempty"`
 	Description  string   `json:"description"`
 	ParamsClass  string   `json:"params_class"`
 	Entrypoint   string   `json:"entrypoint"`
+	Kind         string   `json:"kind,omitempty"`
+	ParseError   string   `json:"parse_error,omitempty"`
 	Dir          string   `json:"dir"`
 }
 
@@ -114,6 +120,15 @@ type ExportResponse struct {
 	Size      int64  `json:"size,omitempty"`
 	Error     string `json:"error,omitempty"`
 	Traceback string `json:"traceback,omitempty"`
+}
+
+// ExportOptions configures CAD export format, destination, and tessellation quality.
+type ExportOptions struct {
+	Format            string   `json:"format"`
+	OutputPath        string   `json:"output_path,omitempty"`
+	Quality           string   `json:"quality,omitempty"`
+	LinearDeflection  *float64 `json:"linear_deflection,omitempty"`
+	AngularDeflection *float64 `json:"angular_deflection,omitempty"`
 }
 
 type DefaultChange struct {
