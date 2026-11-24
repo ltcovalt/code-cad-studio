@@ -63,6 +63,7 @@
     defaultsSuccess = '';
   }
 
+  let dialogBodyEl: HTMLDivElement | undefined = $state();
   let wasOpen = false;
   $effect(() => {
     const el = dialogEl;
@@ -74,6 +75,7 @@
       if (!el.open) {
         el.showModal();
       }
+      dialogBodyEl?.focus({ preventScroll: true });
     } else if (!isOpen && wasOpen) {
       wasOpen = false;
       if (el.open) {
@@ -323,7 +325,9 @@
 >
   {#if studio.activeModel}
     <div
-      class="bg-base-100 border border-base-300 rounded-box shadow-md w-[32rem] max-w-[calc(100vw-2rem)] max-h-[calc(100vh-2rem)] overflow-y-auto p-6 space-y-4"
+      bind:this={dialogBodyEl}
+      tabindex="-1"
+      class="bg-base-100 border border-base-300 rounded-box shadow-md w-[32rem] max-w-[calc(100vw-2rem)] max-h-[calc(100vh-2rem)] overflow-y-auto p-6 space-y-4 outline-none"
     >
       <div class="flex items-center justify-between">
         <div>
