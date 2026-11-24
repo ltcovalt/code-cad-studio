@@ -20,4 +20,41 @@ if (!target) {
   throw new Error('Root #app element not found');
 }
 
+// Native <dialog>.close() restores focus to the trigger button; WebKitGTK marks that
+// restored focus as :focus-visible even after mouse clicks, leaving a stuck focus ring.
+// Preserve restored focus for keyboard (Tab) navigation, but blur it for pointer clicks.
+let keyboardNavOutsideModal = false;
+window.addEventListener(
+  'pointerdown',
+  () => {
+    keyboardNavOutsideModal = false;
+  },
+  true
+);
+window.addEventListener(
+  'keydown',
+  (evt) => {
+    if (evt.key === 'Tab' && !document.querySelector('dialog[open]')) {
+      keyboardNavOutsideModal = true;
+    }
+  },
+  true
+);
+document.addEventListener(
+  'close',
+  (evt) => {
+    if (!(evt.target instanceof HTMLDialogElement) || keyboardNavOutsideModal) return;
+    const blurIfRestored = () => {
+      if (document.querySelector('dialog[open]')) return;
+      const active = document.activeElement;
+      if (active instanceof HTMLElement && active !== document.body) {
+        active.blur();
+      }
+    };
+    blurIfRestored();
+    queueMicrotask(blurIfRestored);
+  },
+  true
+);
+
 mount(App, { target });

@@ -142,81 +142,138 @@
         </svg>
       </div>
       <ul
-        class="dropdown-content bg-base-300 rounded-box z-50 w-44 p-1.5 shadow-2xl border border-base-content/10 space-y-0.5"
+        class="dropdown-content bg-base-100 rounded-box z-50 w-48 p-1.5 shadow-xl border border-base-300 space-y-0.5"
       >
         <li>
           <button
             type="button"
-            class="btn btn-xs btn-block btn-ghost justify-start gap-2 font-normal"
-            class:btn-active={layoutMode === 'stacked'}
+            class="w-full flex items-center justify-between gap-2 px-2.5 py-1.5 rounded-field text-xs transition-colors cursor-pointer text-left {layoutMode === 'stacked'
+              ? 'bg-primary/15 text-primary font-semibold'
+              : 'text-base-content hover:bg-base-content/10 font-normal'}"
+            aria-current={layoutMode === 'stacked' ? 'true' : undefined}
             onclick={() => selectLayout('stacked')}
           >
-            <svg
-              xmlns="http://www.w3.org/2000/svg"
-              class="h-3.5 w-3.5 shrink-0"
-              fill="none"
-              viewBox="0 0 24 24"
-              stroke="currentColor"
-              stroke-width="2"
-              stroke-linecap="round"
-              stroke-linejoin="round"
-              aria-hidden="true"
-            >
-              <rect x="3" y="4" width="18" height="16" rx="2" />
-              <line x1="10" y1="4" x2="10" y2="20" />
-              <line x1="3" y1="12" x2="10" y2="12" />
-            </svg>
-            <span>Single Column</span>
+            <span class="flex items-center gap-2 min-w-0">
+              <svg
+                xmlns="http://www.w3.org/2000/svg"
+                class="h-3.5 w-3.5 shrink-0"
+                fill="none"
+                viewBox="0 0 24 24"
+                stroke="currentColor"
+                stroke-width="2"
+                stroke-linecap="round"
+                stroke-linejoin="round"
+                aria-hidden="true"
+              >
+                <rect x="3" y="4" width="18" height="16" rx="2" />
+                <line x1="10" y1="4" x2="10" y2="20" />
+                <line x1="3" y1="12" x2="10" y2="12" />
+              </svg>
+              <span>Single Column</span>
+            </span>
+            {#if layoutMode === 'stacked'}
+              <svg
+                xmlns="http://www.w3.org/2000/svg"
+                class="h-3.5 w-3.5 shrink-0 text-primary"
+                fill="none"
+                viewBox="0 0 24 24"
+                stroke="currentColor"
+                stroke-width="2.5"
+                stroke-linecap="round"
+                stroke-linejoin="round"
+                aria-hidden="true"
+              >
+                <path d="M20 6 9 17l-5-5" />
+              </svg>
+            {/if}
           </button>
         </li>
         <li>
           <button
             type="button"
-            class="btn btn-xs btn-block btn-ghost justify-start gap-2 font-normal"
-            class:btn-active={layoutMode === 'side-by-side'}
+            class="w-full flex items-center justify-between gap-2 px-2.5 py-1.5 rounded-field text-xs transition-colors cursor-pointer text-left {layoutMode === 'side-by-side'
+              ? 'bg-primary/15 text-primary font-semibold'
+              : 'text-base-content hover:bg-base-content/10 font-normal'}"
+            aria-current={layoutMode === 'side-by-side' ? 'true' : undefined}
             onclick={() => selectLayout('side-by-side')}
           >
-            <svg
-              xmlns="http://www.w3.org/2000/svg"
-              class="h-3.5 w-3.5 shrink-0"
-              fill="none"
-              viewBox="0 0 24 24"
-              stroke="currentColor"
-              stroke-width="2"
-              stroke-linecap="round"
-              stroke-linejoin="round"
-              aria-hidden="true"
-            >
-              <rect x="3" y="4" width="18" height="16" rx="2" />
-              <line x1="8" y1="4" x2="8" y2="20" />
-              <line x1="13" y1="4" x2="13" y2="20" />
-            </svg>
-            <span>Side by Side</span>
+            <span class="flex items-center gap-2 min-w-0">
+              <svg
+                xmlns="http://www.w3.org/2000/svg"
+                class="h-3.5 w-3.5 shrink-0"
+                fill="none"
+                viewBox="0 0 24 24"
+                stroke="currentColor"
+                stroke-width="2"
+                stroke-linecap="round"
+                stroke-linejoin="round"
+                aria-hidden="true"
+              >
+                <rect x="3" y="4" width="18" height="16" rx="2" />
+                <line x1="8" y1="4" x2="8" y2="20" />
+                <line x1="13" y1="4" x2="13" y2="20" />
+              </svg>
+              <span>Side by Side</span>
+            </span>
+            {#if layoutMode === 'side-by-side'}
+              <svg
+                xmlns="http://www.w3.org/2000/svg"
+                class="h-3.5 w-3.5 shrink-0 text-primary"
+                fill="none"
+                viewBox="0 0 24 24"
+                stroke="currentColor"
+                stroke-width="2.5"
+                stroke-linecap="round"
+                stroke-linejoin="round"
+                aria-hidden="true"
+              >
+                <path d="M20 6 9 17l-5-5" />
+              </svg>
+            {/if}
           </button>
         </li>
         <li>
           <button
             type="button"
-            class="btn btn-xs btn-block btn-ghost justify-start gap-2 font-normal"
-            class:btn-active={layoutMode === 'right'}
+            class="w-full flex items-center justify-between gap-2 px-2.5 py-1.5 rounded-field text-xs transition-colors cursor-pointer text-left {layoutMode === 'right'
+              ? 'bg-primary/15 text-primary font-semibold'
+              : 'text-base-content hover:bg-base-content/10 font-normal'}"
+            aria-current={layoutMode === 'right' ? 'true' : undefined}
             onclick={() => selectLayout('right')}
           >
-            <svg
-              xmlns="http://www.w3.org/2000/svg"
-              class="h-3.5 w-3.5 shrink-0"
-              fill="none"
-              viewBox="0 0 24 24"
-              stroke="currentColor"
-              stroke-width="2"
-              stroke-linecap="round"
-              stroke-linejoin="round"
-              aria-hidden="true"
-            >
-              <rect x="3" y="4" width="18" height="16" rx="2" />
-              <line x1="8" y1="4" x2="8" y2="20" />
-              <line x1="16" y1="4" x2="16" y2="20" />
-            </svg>
-            <span>Right Parameters</span>
+            <span class="flex items-center gap-2 min-w-0">
+              <svg
+                xmlns="http://www.w3.org/2000/svg"
+                class="h-3.5 w-3.5 shrink-0"
+                fill="none"
+                viewBox="0 0 24 24"
+                stroke="currentColor"
+                stroke-width="2"
+                stroke-linecap="round"
+                stroke-linejoin="round"
+                aria-hidden="true"
+              >
+                <rect x="3" y="4" width="18" height="16" rx="2" />
+                <line x1="8" y1="4" x2="8" y2="20" />
+                <line x1="16" y1="4" x2="16" y2="20" />
+              </svg>
+              <span>Right Parameters</span>
+            </span>
+            {#if layoutMode === 'right'}
+              <svg
+                xmlns="http://www.w3.org/2000/svg"
+                class="h-3.5 w-3.5 shrink-0 text-primary"
+                fill="none"
+                viewBox="0 0 24 24"
+                stroke="currentColor"
+                stroke-width="2.5"
+                stroke-linecap="round"
+                stroke-linejoin="round"
+                aria-hidden="true"
+              >
+                <path d="M20 6 9 17l-5-5" />
+              </svg>
+            {/if}
           </button>
         </li>
       </ul>
@@ -252,17 +309,35 @@
         </svg>
       </div>
       <ul
-        class="dropdown-content bg-base-300 rounded-box z-50 w-36 p-1.5 shadow-2xl border border-base-content/10 space-y-0.5"
+        class="dropdown-content bg-base-100 rounded-box z-50 w-40 p-1.5 shadow-xl border border-base-300 space-y-0.5"
       >
         {#each DAISY_THEMES as themeOption (themeOption.id)}
+          {@const isSelected = studio.theme === themeOption.id}
           <li>
             <button
               type="button"
-              class="btn btn-xs btn-block btn-ghost justify-start font-normal"
-              class:btn-active={studio.theme === themeOption.id}
+              class="w-full flex items-center justify-between gap-2 px-2.5 py-1.5 rounded-field text-xs transition-colors cursor-pointer text-left {isSelected
+                ? 'bg-primary/15 text-primary font-semibold'
+                : 'text-base-content hover:bg-base-content/10 font-normal'}"
+              aria-current={isSelected ? 'true' : undefined}
               onclick={() => selectTheme(themeOption.id)}
             >
-              {themeOption.label}
+              <span>{themeOption.label}</span>
+              {#if isSelected}
+                <svg
+                  xmlns="http://www.w3.org/2000/svg"
+                  class="h-3.5 w-3.5 shrink-0 text-primary"
+                  fill="none"
+                  viewBox="0 0 24 24"
+                  stroke="currentColor"
+                  stroke-width="2.5"
+                  stroke-linecap="round"
+                  stroke-linejoin="round"
+                  aria-hidden="true"
+                >
+                  <path d="M20 6 9 17l-5-5" />
+                </svg>
+              {/if}
             </button>
           </li>
         {/each}
