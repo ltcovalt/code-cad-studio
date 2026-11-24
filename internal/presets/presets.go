@@ -1,17 +1,30 @@
 package presets
 
 import (
+	"bytes"
+	"crypto/sha256"
+	"encoding/hex"
 	"encoding/json"
 	"errors"
+	"fmt"
+	"log"
 	"os"
 	"path/filepath"
 	"reflect"
 	"regexp"
+	"runtime"
 	"sort"
 	"strings"
+	"sync"
+	"time"
 
 	"github.com/ltcovalt/code-cad-studio/internal/config"
 )
+
+// SchemaVersion is the current persisted presets.json envelope schema version.
+const SchemaVersion = 1
+
+var storeMu sync.Mutex
 
 // VerificationStatus describes the print-testing state of a preset.
 type VerificationStatus string
@@ -65,13 +78,24 @@ func NormalizeVerification(v *Verification) *Verification {
 	}
 }
 
-// PresetEntry is the JSON schema stored inside presets.json.
-// For the special "default" key, only Verification is used (Label/Description/Params are omitted).
+// DefaultSection holds metadata-only overrides for the canonical default preset.
+type DefaultSection struct {
+	Verification *Verification `json:"verification,omitempty"`
+}
+
+// PresetEntry is the JSON schema stored for each named preset inside presets.json.
 type PresetEntry struct {
 	Label        string         `json:"label,omitempty"`
 	Description  string         `json:"description,omitempty"`
 	Verification *Verification  `json:"verification,omitempty"`
 	Params       map[string]any `json:"params,omitempty"`
+}
+
+// PresetFile is the v1 envelope stored on disk in presets.json / <stem>.presets.json / user preset files.
+type PresetFile struct {
+	SchemaVersion int                    `json:"schema_version"`
+	Default       *DefaultSection        `json:"default,omitempty"`
+	Presets       map[string]PresetEntry `json:"presets,omitempty"`
 }
 
 // DefaultMeta carries optional display metadata for the synthesized canonical default preset.
@@ -90,7 +114,10 @@ type Preset struct {
 	Params       map[string]any `json:"params"`
 }
 
-var nonSlug = regexp.MustCompile(`[^a-z0-9]+`)
+var (
+	nonSlug             = regexp.MustCompile(`[^a-z0-9]+`)
+	nonSafeFilenameChar = regexp.MustCompile(`[^a-z0-9_-]+`)
+)
 
 // Slugify converts a human label into a clean preset key.
 func Slugify(label string) string {
@@ -103,13 +130,71 @@ func Slugify(label string) string {
 	return s
 }
 
-func sanitizePresetFilenameSegment(s string) string {
-	r := strings.NewReplacer("/", "__", `\`, "__", ":", "__")
-	cleaned := strings.TrimSpace(r.Replace(s))
-	if cleaned == "" || cleaned == "." || cleaned == ".." {
-		return "model"
+func sanitizeSlugForFilename(raw, fallback string) string {
+	s := strings.ToLower(strings.TrimSpace(raw))
+	s = nonSafeFilenameChar.ReplaceAllString(s, "_")
+	s = strings.Trim(s, "_-")
+	if s == "" || s == "." || s == ".." {
+		return fallback
 	}
-	return cleaned
+	if len(s) > 64 {
+		s = strings.Trim(s[:64], "_-")
+		if s == "" {
+			return fallback
+		}
+	}
+	return s
+}
+
+func extractModelStem(modelID string) string {
+	s := strings.TrimSpace(modelID)
+	if s == "" {
+		return ""
+	}
+	if idx := strings.LastIndex(s, "/"); idx >= 0 {
+		s = s[idx+1:]
+	} else if _, local, ok := strings.Cut(s, "::"); ok {
+		if idx := strings.LastIndex(local, "__"); idx >= 0 {
+			s = local[idx+2:]
+		} else {
+			s = local
+		}
+	}
+	if s == "" || s == "." || s == ".." || strings.ContainsAny(s, `/\:`) {
+		return ""
+	}
+	return s
+}
+
+// ProjectPresetPath resolves the project-scope preset file path for a model:
+// - Canonical directory (<parent>/<stem>.py where dir base == stem): <modelDir>/presets.json
+// - Shared-directory standalone script (dir base != stem): <modelDir>/<stem>.presets.json
+func ProjectPresetPath(modelID, modelDir string) string {
+	if strings.TrimSpace(modelDir) == "" {
+		return ""
+	}
+	cleanDir := filepath.Clean(modelDir)
+	stem := extractModelStem(modelID)
+	if stem != "" && filepath.Base(cleanDir) != stem {
+		return filepath.Join(cleanDir, stem+".presets.json")
+	}
+	return filepath.Join(cleanDir, "presets.json")
+}
+
+// ProjectPresetPathForScript resolves the project-scope preset file path directly from a .py file path.
+func ProjectPresetPathForScript(pyPath string) string {
+	trimmed := strings.TrimSpace(pyPath)
+	if trimmed == "" {
+		return ""
+	}
+	clean := filepath.Clean(trimmed)
+	dir := filepath.Dir(clean)
+	base := filepath.Base(clean)
+	stem := strings.TrimSuffix(base, filepath.Ext(base))
+	if stem != "" && filepath.Base(dir) != stem {
+		return filepath.Join(dir, stem+".presets.json")
+	}
+	return filepath.Join(dir, "presets.json")
 }
 
 func userPresetPath(modelID string) (string, error) {
@@ -119,28 +204,143 @@ func userPresetPath(modelID string) (string, error) {
 	}
 	baseDir := filepath.Join(cfgDir, "presets")
 
-	if libID, localKey, ok := strings.Cut(modelID, "::"); ok {
-		libDir := filepath.Join(baseDir, sanitizePresetFilenameSegment(libID))
-		if err := os.MkdirAll(libDir, 0o755); err != nil {
-			return "", err
-		}
-		return filepath.Join(libDir, sanitizePresetFilenameSegment(localKey)+".json"), nil
+	var libID, relLocal string
+	if l, r, ok := strings.Cut(modelID, "/"); ok {
+		libID = l
+		relLocal = r
+	} else if l, r, ok := strings.Cut(modelID, "::"); ok {
+		libID = l
+		relLocal = r
+	} else {
+		libID = ""
+		relLocal = modelID
 	}
 
-	if err := os.MkdirAll(baseDir, 0o755); err != nil {
+	safeLib := "_default"
+	if strings.TrimSpace(libID) != "" {
+		safeLib = sanitizeSlugForFilename(libID, "_default")
+	}
+	safeSlug := sanitizeSlugForFilename(relLocal, "model")
+	sum := sha256.Sum256([]byte(modelID))
+	hex8 := hex.EncodeToString(sum[:4])
+
+	libDir := filepath.Join(baseDir, safeLib)
+	if err := os.MkdirAll(libDir, 0o755); err != nil {
 		return "", err
 	}
-	return filepath.Join(baseDir, sanitizePresetFilenameSegment(modelID)+".json"), nil
+	return filepath.Join(libDir, fmt.Sprintf("%s--%s.json", safeSlug, hex8)), nil
 }
 
-func readPresetFile(path string) map[string]PresetEntry {
-	out := map[string]PresetEntry{}
+func readPresetFile(path string) (PresetFile, error) {
+	empty := PresetFile{
+		SchemaVersion: SchemaVersion,
+		Presets:       map[string]PresetEntry{},
+	}
 	raw, err := os.ReadFile(path)
 	if err != nil {
-		return out
+		if os.IsNotExist(err) {
+			return empty, nil
+		}
+		return PresetFile{}, err
 	}
-	_ = json.Unmarshal(raw, &out)
-	return out
+	if len(bytes.TrimSpace(raw)) == 0 {
+		return PresetFile{}, fmt.Errorf("preset file %s is empty", path)
+	}
+	var rawObj map[string]json.RawMessage
+	if err := json.Unmarshal(raw, &rawObj); err != nil {
+		return PresetFile{}, fmt.Errorf("invalid presets JSON in %s: %w", path, err)
+	}
+	if rawObj == nil {
+		return PresetFile{}, fmt.Errorf("presets file %s must contain a JSON object", path)
+	}
+
+	var file PresetFile
+	if err := json.Unmarshal(raw, &file); err != nil {
+		return PresetFile{}, fmt.Errorf("invalid presets JSON in %s: %w", path, err)
+	}
+	if file.SchemaVersion != SchemaVersion {
+		return PresetFile{}, fmt.Errorf("unsupported presets schema_version %d in %s (expected %d)", file.SchemaVersion, path, SchemaVersion)
+	}
+	if file.Presets == nil {
+		file.Presets = map[string]PresetEntry{}
+	}
+	return file, nil
+}
+
+func writeFileAtomic(path string, data []byte, perm os.FileMode) error {
+	dir := filepath.Dir(path)
+	if err := os.MkdirAll(dir, 0o755); err != nil {
+		return err
+	}
+	tmp, err := os.CreateTemp(dir, "."+filepath.Base(path)+".*.tmp")
+	if err != nil {
+		return err
+	}
+	tmpName := tmp.Name()
+	cleanup := true
+	defer func() {
+		if cleanup {
+			_ = os.Remove(tmpName)
+		}
+	}()
+
+	if _, err := tmp.Write(data); err != nil {
+		_ = tmp.Close()
+		return err
+	}
+	if err := tmp.Sync(); err != nil {
+		_ = tmp.Close()
+		return err
+	}
+	if err := tmp.Close(); err != nil {
+		return err
+	}
+	if err := os.Chmod(tmpName, perm); err != nil {
+		return err
+	}
+	if err := renameWithRetry(tmpName, path); err != nil {
+		return err
+	}
+	cleanup = false
+	return nil
+}
+
+func renameWithRetry(src, dst string) error {
+	var err error
+	for attempt := 0; attempt < 5; attempt++ {
+		err = os.Rename(src, dst)
+		if err == nil {
+			return nil
+		}
+		if runtime.GOOS != "windows" && !os.IsPermission(err) {
+			return err
+		}
+		time.Sleep(time.Duration(attempt+1) * 15 * time.Millisecond)
+	}
+	return err
+}
+
+func writePresetFile(path string, file PresetFile) error {
+	if file.Default != nil {
+		file.Default.Verification = NormalizeVerification(file.Default.Verification)
+		if file.Default.Verification == nil {
+			file.Default = nil
+		}
+	}
+	delete(file.Presets, "default")
+
+	if file.Default == nil && len(file.Presets) == 0 {
+		if err := os.Remove(path); err != nil && !os.IsNotExist(err) {
+			return err
+		}
+		return nil
+	}
+	file.SchemaVersion = SchemaVersion
+	data, err := json.MarshalIndent(file, "", "  ")
+	if err != nil {
+		return err
+	}
+	return writeFileAtomic(path, append(data, '\n'), 0o644)
 }
 
 // FilterParams removes keys not present in canonical defaults (recursively for nested maps).
@@ -283,51 +483,47 @@ func deepCopyMap(src map[string]any) map[string]any {
 	return dst
 }
 
-// List returns the synthesized default preset followed by project and user presets.
-func List(modelID, modelDir string, defaults map[string]any, defaultMeta *DefaultMeta) []Preset {
+func buildPresetList(projFile, userFile PresetFile, defaults map[string]any, defaultMeta *DefaultMeta) []Preset {
 	byKey := make(map[string]Preset)
 	var defaultVerification *Verification
 
-	if modelDir != "" {
-		projEntries := readPresetFile(filepath.Join(modelDir, "presets.json"))
-		for key, entry := range projEntries {
-			if key == "default" {
-				defaultVerification = NormalizeVerification(entry.Verification)
-				continue
-			}
-			label := entry.Label
-			if label == "" {
-				label = key
-			}
-			byKey[key] = Preset{
-				Key:          key,
-				Label:        label,
-				Description:  entry.Description,
-				Source:       "project",
-				Verification: NormalizeVerification(entry.Verification),
-				Params:       FilterParams(entry.Params, defaults),
-			}
+	if projFile.Default != nil {
+		defaultVerification = NormalizeVerification(projFile.Default.Verification)
+	}
+
+	for key, entry := range projFile.Presets {
+		if key == "default" {
+			continue
+		}
+		label := entry.Label
+		if label == "" {
+			label = key
+		}
+		byKey[key] = Preset{
+			Key:          key,
+			Label:        label,
+			Description:  entry.Description,
+			Source:       "project",
+			Verification: NormalizeVerification(entry.Verification),
+			Params:       FilterParams(entry.Params, defaults),
 		}
 	}
 
-	if upath, err := userPresetPath(modelID); err == nil {
-		userEntries := readPresetFile(upath)
-		for key, entry := range userEntries {
-			if key == "default" {
-				continue
-			}
-			label := entry.Label
-			if label == "" {
-				label = key
-			}
-			byKey[key] = Preset{
-				Key:          key,
-				Label:        label,
-				Description:  entry.Description,
-				Source:       "user",
-				Verification: NormalizeVerification(entry.Verification),
-				Params:       FilterParams(entry.Params, defaults),
-			}
+	for key, entry := range userFile.Presets {
+		if key == "default" {
+			continue
+		}
+		label := entry.Label
+		if label == "" {
+			label = key
+		}
+		byKey[key] = Preset{
+			Key:          key,
+			Label:        label,
+			Description:  entry.Description,
+			Source:       "user",
+			Verification: NormalizeVerification(entry.Verification),
+			Params:       FilterParams(entry.Params, defaults),
 		}
 	}
 
@@ -370,18 +566,61 @@ func List(modelID, modelDir string, defaults map[string]any, defaultMeta *Defaul
 	return result
 }
 
-func writePresetFile(path string, entries map[string]PresetEntry) error {
-	if len(entries) == 0 {
-		if err := os.Remove(path); err != nil && !os.IsNotExist(err) {
-			return err
+// ListStrict returns the synthesized default preset followed by project and user presets,
+// returning an explicit error if either preset file is malformed or has an unsupported schema version.
+func ListStrict(modelID, modelDir string, defaults map[string]any, defaultMeta *DefaultMeta) ([]Preset, error) {
+	storeMu.Lock()
+	defer storeMu.Unlock()
+
+	var projFile PresetFile
+	if projPath := ProjectPresetPath(modelID, modelDir); projPath != "" {
+		f, err := readPresetFile(projPath)
+		if err != nil {
+			return nil, err
 		}
-		return nil
+		projFile = f
 	}
-	data, err := json.MarshalIndent(entries, "", "  ")
-	if err != nil {
-		return err
+
+	var userFile PresetFile
+	if upath, err := userPresetPath(modelID); err == nil {
+		f, rerr := readPresetFile(upath)
+		if rerr != nil {
+			return nil, rerr
+		}
+		userFile = f
 	}
-	return os.WriteFile(path, append(data, '\n'), 0o644)
+
+	return buildPresetList(projFile, userFile, defaults, defaultMeta), nil
+}
+
+// List returns the synthesized default preset followed by project and user presets.
+// If a preset file is malformed, List logs the error and falls back to any valid scope
+// without touching files on disk.
+func List(modelID, modelDir string, defaults map[string]any, defaultMeta *DefaultMeta) []Preset {
+	storeMu.Lock()
+	defer storeMu.Unlock()
+
+	var projFile PresetFile
+	if projPath := ProjectPresetPath(modelID, modelDir); projPath != "" {
+		f, err := readPresetFile(projPath)
+		if err != nil {
+			log.Printf("presets.List(%q): %v", modelID, err)
+		} else {
+			projFile = f
+		}
+	}
+
+	var userFile PresetFile
+	if upath, err := userPresetPath(modelID); err == nil {
+		f, rerr := readPresetFile(upath)
+		if rerr != nil {
+			log.Printf("presets.List(%q): %v", modelID, rerr)
+		} else {
+			userFile = f
+		}
+	}
+
+	return buildPresetList(projFile, userFile, defaults, defaultMeta)
 }
 
 // findMatchingKey locates an existing non-default preset key matching the given label
@@ -416,45 +655,63 @@ func findMatchingKey(entries map[string]PresetEntry, label string) (string, bool
 	return "", false
 }
 
-// Save writes a preset (sparse diff or full snapshot) to either "project" (<modelDir>/presets.json)
-// or "user" (~/.config/...). If a preset with the same name (or slugified key) already exists, its
+// Save writes a preset (sparse diff or full snapshot) to either "project" (presets.json / <stem>.presets.json)
+// or "user" (<ConfigDir>/presets/...). If a preset with the same name (or slugified key) already exists, its
 // existing key is preserved and updated in-place rather than creating a duplicate entry. Saving to
 // "project" also removes any identically keyed or identically named user preset so a stale local
 // copy cannot silently shadow or duplicate the shared project preset.
 func Save(modelID, modelDir, label, description, scope string, fullSnapshot bool, currentParams, defaults map[string]any, verification *Verification) (string, error) {
+	storeMu.Lock()
+	defer storeMu.Unlock()
+
 	trimmedLabel := strings.TrimSpace(label)
-	isProject := scope == "project" && modelDir != ""
+	projPath := ProjectPresetPath(modelID, modelDir)
+	isProject := scope == "project" && projPath != ""
 
-	var projPath string
-	var projEntries map[string]PresetEntry
-	if modelDir != "" {
-		projPath = filepath.Join(modelDir, "presets.json")
-		projEntries = readPresetFile(projPath)
+	var projFile PresetFile
+	var projErr error
+	if projPath != "" {
+		projFile, projErr = readPresetFile(projPath)
+		if isProject && projErr != nil {
+			return "", projErr
+		}
 	}
 
-	userPath, userErr := userPresetPath(modelID)
-	if !isProject && userErr != nil {
-		return "", userErr
+	userPath, userPathErr := userPresetPath(modelID)
+	if !isProject && userPathErr != nil {
+		return "", userPathErr
 	}
-	var userEntries map[string]PresetEntry
-	if userErr == nil {
-		userEntries = readPresetFile(userPath)
+	var userFile PresetFile
+	var userReadErr error
+	if userPathErr == nil {
+		userFile, userReadErr = readPresetFile(userPath)
+		if !isProject && userReadErr != nil {
+			return "", userReadErr
+		}
 	}
 
 	var key string
 	if isProject {
-		if k, ok := findMatchingKey(projEntries, trimmedLabel); ok {
+		if k, ok := findMatchingKey(projFile.Presets, trimmedLabel); ok {
 			key = k
-		} else if k, ok := findMatchingKey(userEntries, trimmedLabel); ok {
-			key = k
+		} else if userReadErr == nil {
+			if k, ok := findMatchingKey(userFile.Presets, trimmedLabel); ok {
+				key = k
+			} else {
+				key = Slugify(trimmedLabel)
+			}
 		} else {
 			key = Slugify(trimmedLabel)
 		}
 	} else {
-		if k, ok := findMatchingKey(userEntries, trimmedLabel); ok {
+		if k, ok := findMatchingKey(userFile.Presets, trimmedLabel); ok {
 			key = k
-		} else if k, ok := findMatchingKey(projEntries, trimmedLabel); ok {
-			key = k
+		} else if projErr == nil {
+			if k, ok := findMatchingKey(projFile.Presets, trimmedLabel); ok {
+				key = k
+			} else {
+				key = Slugify(trimmedLabel)
+			}
 		} else {
 			key = Slugify(trimmedLabel)
 		}
@@ -475,35 +732,35 @@ func Save(modelID, modelDir, label, description, scope string, fullSnapshot bool
 	}
 
 	if isProject {
-		if projEntries == nil {
-			projEntries = map[string]PresetEntry{}
+		if projFile.Presets == nil {
+			projFile.Presets = map[string]PresetEntry{}
 		}
-		projEntries[key] = entry
-		if err := writePresetFile(projPath, projEntries); err != nil {
+		projFile.Presets[key] = entry
+		if err := writePresetFile(projPath, projFile); err != nil {
 			return "", err
 		}
 
-		if userErr == nil && len(userEntries) > 0 {
+		if userPathErr == nil && userReadErr == nil && len(userFile.Presets) > 0 {
 			changed := false
-			for uk, ue := range userEntries {
+			for uk, ue := range userFile.Presets {
 				if uk == "default" {
 					continue
 				}
 				if uk == key || strings.EqualFold(strings.TrimSpace(ue.Label), trimmedLabel) {
-					delete(userEntries, uk)
+					delete(userFile.Presets, uk)
 					changed = true
 				}
 			}
 			if changed {
-				_ = writePresetFile(userPath, userEntries)
+				_ = writePresetFile(userPath, userFile)
 			}
 		}
 	} else {
-		if userEntries == nil {
-			userEntries = map[string]PresetEntry{}
+		if userFile.Presets == nil {
+			userFile.Presets = map[string]PresetEntry{}
 		}
-		userEntries[key] = entry
-		if err := writePresetFile(userPath, userEntries); err != nil {
+		userFile.Presets[key] = entry
+		if err := writePresetFile(userPath, userFile); err != nil {
 			return "", err
 		}
 	}
@@ -512,9 +769,12 @@ func Save(modelID, modelDir, label, description, scope string, fullSnapshot bool
 }
 
 // SetVerification updates verification metadata for a preset in its owning scope.
-// For the canonical "default" preset, verification is stored as a metadata-only entry
-// under key "default" in <modelDir>/presets.json and removed when cleared.
+// For the canonical "default" preset, verification is stored in the top-level "default"
+// section of the project preset file and removed when cleared.
 func SetVerification(modelID, modelDir, key, scope string, v *Verification) error {
+	storeMu.Lock()
+	defer storeMu.Unlock()
+
 	key = strings.TrimSpace(key)
 	if key == "" {
 		return errors.New("preset key is required")
@@ -523,15 +783,18 @@ func SetVerification(modelID, modelDir, key, scope string, v *Verification) erro
 	norm := NormalizeVerification(v)
 
 	if key == "default" {
-		if modelDir == "" {
+		targetPath := ProjectPresetPath(modelID, modelDir)
+		if targetPath == "" {
 			return errors.New("project model directory is unavailable")
 		}
-		targetPath := filepath.Join(modelDir, "presets.json")
-		existing := readPresetFile(targetPath)
+		existing, err := readPresetFile(targetPath)
+		if err != nil {
+			return err
+		}
 		if norm == nil {
-			delete(existing, "default")
+			existing.Default = nil
 		} else {
-			existing["default"] = PresetEntry{
+			existing.Default = &DefaultSection{
 				Verification: norm,
 			}
 		}
@@ -540,10 +803,10 @@ func SetVerification(modelID, modelDir, key, scope string, v *Verification) erro
 
 	var targetPath string
 	if scope == "project" {
-		if modelDir == "" {
+		targetPath = ProjectPresetPath(modelID, modelDir)
+		if targetPath == "" {
 			return errors.New("project model directory is unavailable")
 		}
-		targetPath = filepath.Join(modelDir, "presets.json")
 	} else {
 		p, err := userPresetPath(modelID)
 		if err != nil {
@@ -552,37 +815,38 @@ func SetVerification(modelID, modelDir, key, scope string, v *Verification) erro
 		targetPath = p
 	}
 
-	existing := readPresetFile(targetPath)
-	entry, ok := existing[key]
+	existing, err := readPresetFile(targetPath)
+	if err != nil {
+		return err
+	}
+	entry, ok := existing.Presets[key]
 	if !ok {
 		return errors.New("preset not found in target scope")
 	}
 	entry.Verification = norm
-	existing[key] = entry
+	existing.Presets[key] = entry
 	return writePresetFile(targetPath, existing)
 }
 
-// DowngradeDefaultVerification resets the canonical "default" preset's verification status
-// to "unverified" while preserving any print note (or pruning the entry if no note exists).
-// Called after modifying model default parameters in the Python source file.
-func DowngradeDefaultVerification(modelDir string) error {
-	if modelDir == "" {
+func downgradeDefaultVerificationAtPathLocked(targetPath string) error {
+	if targetPath == "" {
 		return nil
 	}
-	targetPath := filepath.Join(modelDir, "presets.json")
-	existing := readPresetFile(targetPath)
-	entry, ok := existing["default"]
-	if !ok {
+	existing, err := readPresetFile(targetPath)
+	if err != nil {
+		return err
+	}
+	if existing.Default == nil {
 		return nil
 	}
-	norm := NormalizeVerification(entry.Verification)
+	norm := NormalizeVerification(existing.Default.Verification)
 	if norm == nil || norm.Status == StatusUnverified {
 		return nil
 	}
 	if norm.Note == "" {
-		delete(existing, "default")
+		existing.Default = nil
 	} else {
-		existing["default"] = PresetEntry{
+		existing.Default = &DefaultSection{
 			Verification: &Verification{
 				Status: StatusUnverified,
 				Note:   norm.Note,
@@ -592,8 +856,30 @@ func DowngradeDefaultVerification(modelDir string) error {
 	return writePresetFile(targetPath, existing)
 }
 
+// DowngradeDefaultVerification resets the canonical "default" preset's verification status
+// in <modelDir>/presets.json to "unverified" while preserving any print note.
+func DowngradeDefaultVerification(modelDir string) error {
+	storeMu.Lock()
+	defer storeMu.Unlock()
+	if strings.TrimSpace(modelDir) == "" {
+		return nil
+	}
+	return downgradeDefaultVerificationAtPathLocked(filepath.Join(filepath.Clean(modelDir), "presets.json"))
+}
+
+// DowngradeDefaultVerificationForFile resets the canonical "default" preset's verification status
+// in the project preset file corresponding to pyPath (presets.json or <stem>.presets.json).
+func DowngradeDefaultVerificationForFile(pyPath string) error {
+	storeMu.Lock()
+	defer storeMu.Unlock()
+	return downgradeDefaultVerificationAtPathLocked(ProjectPresetPathForScript(pyPath))
+}
+
 // Delete removes a preset key from either "project" or "user" storage.
 func Delete(modelID, modelDir, key, scope string) error {
+	storeMu.Lock()
+	defer storeMu.Unlock()
+
 	key = strings.TrimSpace(key)
 	if key == "" || key == "default" {
 		return errors.New("cannot delete canonical default preset")
@@ -601,10 +887,10 @@ func Delete(modelID, modelDir, key, scope string) error {
 
 	var targetPath string
 	if scope == "project" {
-		if modelDir == "" {
+		targetPath = ProjectPresetPath(modelID, modelDir)
+		if targetPath == "" {
 			return errors.New("project model directory is unavailable")
 		}
-		targetPath = filepath.Join(modelDir, "presets.json")
 	} else {
 		p, err := userPresetPath(modelID)
 		if err != nil {
@@ -613,17 +899,23 @@ func Delete(modelID, modelDir, key, scope string) error {
 		targetPath = p
 	}
 
-	existing := readPresetFile(targetPath)
-	if _, ok := existing[key]; !ok {
+	existing, err := readPresetFile(targetPath)
+	if err != nil {
+		return err
+	}
+	if _, ok := existing.Presets[key]; !ok {
 		return errors.New("preset not found in target scope")
 	}
-	delete(existing, key)
+	delete(existing.Presets, key)
 	return writePresetFile(targetPath, existing)
 }
 
 // Rename updates a preset's label (and optional description) within its scope,
 // migrating its JSON key to the slugified new label while preserving its params.
 func Rename(modelID, modelDir, oldKey, scope, newLabel, newDescription string) (string, error) {
+	storeMu.Lock()
+	defer storeMu.Unlock()
+
 	oldKey = strings.TrimSpace(oldKey)
 	if oldKey == "" || oldKey == "default" {
 		return "", errors.New("cannot rename canonical default preset")
@@ -635,10 +927,10 @@ func Rename(modelID, modelDir, oldKey, scope, newLabel, newDescription string) (
 
 	var targetPath string
 	if scope == "project" {
-		if modelDir == "" {
+		targetPath = ProjectPresetPath(modelID, modelDir)
+		if targetPath == "" {
 			return "", errors.New("project model directory is unavailable")
 		}
-		targetPath = filepath.Join(modelDir, "presets.json")
 	} else {
 		p, err := userPresetPath(modelID)
 		if err != nil {
@@ -647,8 +939,11 @@ func Rename(modelID, modelDir, oldKey, scope, newLabel, newDescription string) (
 		targetPath = p
 	}
 
-	existing := readPresetFile(targetPath)
-	entry, ok := existing[oldKey]
+	existing, err := readPresetFile(targetPath)
+	if err != nil {
+		return "", err
+	}
+	entry, ok := existing.Presets[oldKey]
 	if !ok {
 		return "", errors.New("preset not found in target scope")
 	}
@@ -657,7 +952,7 @@ func Rename(modelID, modelDir, oldKey, scope, newLabel, newDescription string) (
 	if !strings.EqualFold(strings.TrimSpace(entry.Label), trimmedLabel) {
 		newKey = Slugify(trimmedLabel)
 	}
-	for k, e := range existing {
+	for k, e := range existing.Presets {
 		if k == oldKey || k == "default" {
 			continue
 		}
@@ -666,12 +961,12 @@ func Rename(modelID, modelDir, oldKey, scope, newLabel, newDescription string) (
 		}
 	}
 	if newKey != oldKey {
-		delete(existing, oldKey)
+		delete(existing.Presets, oldKey)
 	}
 
 	entry.Label = trimmedLabel
 	entry.Description = strings.TrimSpace(newDescription)
-	existing[newKey] = entry
+	existing.Presets[newKey] = entry
 
 	if err := writePresetFile(targetPath, existing); err != nil {
 		return "", err

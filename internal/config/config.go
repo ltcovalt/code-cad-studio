@@ -1,7 +1,9 @@
 package config
 
 import (
+	"bytes"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"os"
 	"os/exec"
@@ -10,9 +12,13 @@ import (
 	"runtime"
 	"strings"
 	"sync"
+	"time"
 )
 
-const AppDirName = "code-cad-studio"
+const (
+	AppDirName    = "code-cad-studio"
+	SchemaVersion = 1
+)
 
 // Library represents a configured build123d project / model library folder.
 type Library struct {
@@ -23,6 +29,7 @@ type Library struct {
 
 // Config holds persisted user settings for Code CAD Studio.
 type Config struct {
+	SchemaVersion       int               `json:"schema_version"`
 	Libraries           []Library         `json:"libraries"`
 	PythonPath          string            `json:"python_path"`
 	ExportDir           string            `json:"export_dir,omitempty"`
@@ -30,16 +37,56 @@ type Config struct {
 	PresetSaveScope     string            `json:"preset_save_scope,omitempty"` // "user" or "project"
 	DefaultPresets      map[string]string `json:"default_presets,omitempty"`   // modelID -> presetKey
 	OnboardingCompleted bool              `json:"onboarding_completed,omitempty"`
+	OnboardingSkipped   bool              `json:"onboarding_skipped,omitempty"`
+	EditorCommand       string            `json:"editor_command,omitempty"`
+	SlicerCommand       string            `json:"slicer_command,omitempty"`
+	ExportQuality       string            `json:"export_quality,omitempty"`
 }
 
 // Store manages thread-safe loading and saving of Config.
 type Store struct {
-	mu   sync.RWMutex
-	path string
-	cfg  Config
+	mu                sync.RWMutex
+	path              string
+	cfg               Config
+	loadErr           error
+	corruptBackupPath string
 }
 
 var nonLibrarySlug = regexp.MustCompile(`[^a-z0-9]+`)
+
+func defaultConfig() Config {
+	return Config{
+		SchemaVersion: SchemaVersion,
+		Libraries:     []Library{},
+		Theme:         "dark",
+		ExportQuality: "standard",
+	}
+}
+
+func normalizeConfig(c *Config) {
+	c.SchemaVersion = SchemaVersion
+	c.Libraries = NormalizeLibraries(c.Libraries)
+	if strings.TrimSpace(c.Theme) == "" {
+		c.Theme = "dark"
+	}
+	if strings.TrimSpace(c.ExportQuality) == "" {
+		c.ExportQuality = "standard"
+	}
+}
+
+func cloneConfig(src Config) Config {
+	out := src
+	out.Libraries = make([]Library, len(src.Libraries))
+	copy(out.Libraries, src.Libraries)
+	if src.DefaultPresets != nil {
+		cp := make(map[string]string, len(src.DefaultPresets))
+		for k, v := range src.DefaultPresets {
+			cp[k] = v
+		}
+		out.DefaultPresets = cp
+	}
+	return out
+}
 
 // ExpandPath expands a leading "~" to the user's home directory and cleans the path.
 func ExpandPath(p string) string {
@@ -82,10 +129,10 @@ func pathDedupeKey(p string) string {
 // unique IDs for every library.
 func NormalizeLibraries(libs []Library) []Library {
 	type pending struct {
-		id         string
-		name       string
-		path       string
-		autoNamed  bool
+		id        string
+		name      string
+		path      string
+		autoNamed bool
 	}
 
 	seenPaths := make(map[string]struct{}, len(libs))
@@ -193,13 +240,41 @@ func ConfigDir() (string, error) {
 	return dir, nil
 }
 
-// StudioVenvDir returns the path to Studio's shared managed virtual environment (<ConfigDir>/venv).
+// StudioVenvDir returns the space-free OS-native path to Studio's shared managed virtual environment:
+// - darwin: ~/Library/Caches/code-cad-studio/venv
+// - windows: %LOCALAPPDATA%\code-cad-studio\venv
+// - linux/other: $XDG_DATA_HOME/code-cad-studio/venv or ~/.local/share/code-cad-studio/venv
 func StudioVenvDir() (string, error) {
-	dir, err := ConfigDir()
-	if err != nil {
-		return "", err
+	return studioVenvDirForOS(runtime.GOOS, os.Getenv, os.UserHomeDir)
+}
+
+func studioVenvDirForOS(goos string, getenv func(string) string, userHome func() (string, error)) (string, error) {
+	switch goos {
+	case "darwin":
+		home, err := userHome()
+		if err != nil {
+			return "", err
+		}
+		return filepath.Join(home, "Library", "Caches", AppDirName, "venv"), nil
+	case "windows":
+		if local := strings.TrimSpace(getenv("LOCALAPPDATA")); local != "" {
+			return filepath.Join(local, AppDirName, "venv"), nil
+		}
+		home, err := userHome()
+		if err != nil {
+			return "", err
+		}
+		return filepath.Join(home, "AppData", "Local", AppDirName, "venv"), nil
+	default:
+		if xdg := strings.TrimSpace(getenv("XDG_DATA_HOME")); xdg != "" {
+			return filepath.Join(xdg, AppDirName, "venv"), nil
+		}
+		home, err := userHome()
+		if err != nil {
+			return "", err
+		}
+		return filepath.Join(home, ".local", "share", AppDirName, "venv"), nil
 	}
-	return filepath.Join(dir, "venv"), nil
 }
 
 // VenvPythonExecutable returns the expected Python executable inside a venv directory.
@@ -259,7 +334,101 @@ func FindDirVenvPython(dir string) string {
 	return ""
 }
 
+func parseConfigBytes(data []byte) (Config, error) {
+	if len(bytes.TrimSpace(data)) == 0 {
+		return Config{}, errors.New("config.json is empty")
+	}
+	var rawObj map[string]json.RawMessage
+	if err := json.Unmarshal(data, &rawObj); err != nil {
+		return Config{}, err
+	}
+	if rawObj == nil {
+		return Config{}, errors.New("config.json must contain a JSON object")
+	}
+	loaded := defaultConfig()
+	if err := json.Unmarshal(data, &loaded); err != nil {
+		return Config{}, err
+	}
+	if loaded.SchemaVersion != 0 && loaded.SchemaVersion != SchemaVersion {
+		return Config{}, fmt.Errorf("unsupported config schema_version %d", loaded.SchemaVersion)
+	}
+	normalizeConfig(&loaded)
+	return loaded, nil
+}
+
+func backupCorruptConfig(origPath string, data []byte) string {
+	ts := time.Now().UTC().Format("20060102T150405Z")
+	base := fmt.Sprintf("%s.corrupt.%s", origPath, ts)
+	candidate := base
+	for i := 1; ; i++ {
+		if _, err := os.Stat(candidate); os.IsNotExist(err) {
+			break
+		}
+		candidate = fmt.Sprintf("%s.%d", base, i)
+	}
+	if err := writeFileAtomic(candidate, data, 0o600); err != nil {
+		return ""
+	}
+	return candidate
+}
+
+func writeFileAtomic(path string, data []byte, perm os.FileMode) error {
+	dir := filepath.Dir(path)
+	if err := os.MkdirAll(dir, 0o755); err != nil {
+		return err
+	}
+	tmp, err := os.CreateTemp(dir, "."+filepath.Base(path)+".*.tmp")
+	if err != nil {
+		return err
+	}
+	tmpName := tmp.Name()
+	cleanup := true
+	defer func() {
+		if cleanup {
+			_ = os.Remove(tmpName)
+		}
+	}()
+
+	if _, err := tmp.Write(data); err != nil {
+		_ = tmp.Close()
+		return err
+	}
+	if err := tmp.Sync(); err != nil {
+		_ = tmp.Close()
+		return err
+	}
+	if err := tmp.Close(); err != nil {
+		return err
+	}
+	if err := os.Chmod(tmpName, perm); err != nil {
+		return err
+	}
+	if err := renameWithRetry(tmpName, path); err != nil {
+		return err
+	}
+	cleanup = false
+	return nil
+}
+
+func renameWithRetry(src, dst string) error {
+	var err error
+	for attempt := 0; attempt < 5; attempt++ {
+		err = os.Rename(src, dst)
+		if err == nil {
+			return nil
+		}
+		if runtime.GOOS != "windows" && !os.IsPermission(err) {
+			return err
+		}
+		time.Sleep(time.Duration(attempt+1) * 15 * time.Millisecond)
+	}
+	return err
+}
+
 // NewStore loads existing config from disk or initializes defaults.
+// If an existing config.json is corrupt or has an unsupported schema version,
+// NewStore backs it up to config.json.corrupt.<timestamp>, preserves the original
+// file on disk, records LoadError(), and initializes clean v1 defaults in memory.
 func NewStore() (*Store, error) {
 	dir, err := ConfigDir()
 	if err != nil {
@@ -268,53 +437,66 @@ func NewStore() (*Store, error) {
 	p := filepath.Join(dir, "config.json")
 	s := &Store{
 		path: p,
-		cfg: Config{
-			Libraries: []Library{},
-			Theme:     "dark",
-		},
+		cfg:  defaultConfig(),
 	}
 
-	if data, err := os.ReadFile(p); err == nil {
-		_ = json.Unmarshal(data, &s.cfg)
+	data, err := os.ReadFile(p)
+	if err != nil {
+		if os.IsNotExist(err) {
+			return s, nil
+		}
+		return nil, err
 	}
-	s.cfg.Libraries = NormalizeLibraries(s.cfg.Libraries)
+
+	loaded, parseErr := parseConfigBytes(data)
+	if parseErr != nil {
+		s.loadErr = parseErr
+		s.corruptBackupPath = backupCorruptConfig(p, data)
+		return s, nil
+	}
+	s.cfg = loaded
 	return s, nil
 }
 
-// Get returns a copy of the current configuration.
+// LoadError returns any parse/schema error encountered when loading config.json at startup.
+func (s *Store) LoadError() error {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	return s.loadErr
+}
+
+// CorruptBackupPath returns the backup file path created when a corrupt config.json was detected.
+func (s *Store) CorruptBackupPath() string {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	return s.corruptBackupPath
+}
+
+// Get returns a deep copy of the current configuration.
 func (s *Store) Get() Config {
 	s.mu.RLock()
 	defer s.mu.RUnlock()
-	cfg := s.cfg
-	cfg.Libraries = make([]Library, len(s.cfg.Libraries))
-	copy(cfg.Libraries, s.cfg.Libraries)
-	if s.cfg.DefaultPresets != nil {
-		cp := make(map[string]string, len(s.cfg.DefaultPresets))
-		for k, v := range s.cfg.DefaultPresets {
-			cp[k] = v
-		}
-		cfg.DefaultPresets = cp
-	}
-	return cfg
+	return cloneConfig(s.cfg)
 }
 
 // Update atomically updates and persists configuration.
 func (s *Store) Update(fn func(*Config)) (Config, error) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	fn(&s.cfg)
-	s.cfg.Libraries = NormalizeLibraries(s.cfg.Libraries)
-	data, err := json.MarshalIndent(s.cfg, "", "  ")
+	next := cloneConfig(s.cfg)
+	fn(&next)
+	normalizeConfig(&next)
+
+	data, err := json.MarshalIndent(next, "", "  ")
 	if err != nil {
-		return s.cfg, err
+		return cloneConfig(s.cfg), err
 	}
-	if err := os.WriteFile(s.path, data, 0o644); err != nil {
-		return s.cfg, err
+	if err := writeFileAtomic(s.path, append(data, '\n'), 0o644); err != nil {
+		return cloneConfig(s.cfg), err
 	}
-	out := s.cfg
-	out.Libraries = make([]Library, len(s.cfg.Libraries))
-	copy(out.Libraries, s.cfg.Libraries)
-	return out, nil
+	s.cfg = next
+	s.loadErr = nil
+	return cloneConfig(s.cfg), nil
 }
 
 // FindLibrary returns the configured library with the given ID, if present.
@@ -340,7 +522,7 @@ func (c Config) LibraryRoots() []string {
 
 // ResolvePython determines the shared Python executable to use:
 // 1. Explicit PythonPath if set
-// 2. Shared Studio-managed venv (<ConfigDir>/venv) if present
+// 2. Shared Studio-managed venv (StudioVenvDir()) if present
 // 3. First configured library containing a .venv or venv Python executable
 // 4. Fallback to "python3" (or "python" on Windows)
 func (c Config) ResolvePython() string {
@@ -367,10 +549,10 @@ func (c Config) ResolvePython() string {
 	return "python3"
 }
 
-// NeedsOnboarding returns true when the user has neither completed onboarding
-// nor configured any model libraries yet.
+// NeedsOnboarding returns true when the user has neither completed nor skipped onboarding
+// and has not configured any model libraries yet.
 func (c Config) NeedsOnboarding() bool {
-	return !c.OnboardingCompleted && len(c.Libraries) == 0
+	return !c.OnboardingCompleted && !c.OnboardingSkipped && len(c.Libraries) == 0
 }
 
 // ResolveExportDir determines the default directory for model exports:

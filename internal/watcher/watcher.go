@@ -26,11 +26,18 @@ var skipDirs = map[string]bool{
 	"exports":       true,
 }
 
-// Watcher monitors one or more library roots recursively for .py and presets.json changes.
+type watchSession struct {
+	fsw      *fsnotify.Watcher
+	stopCh   chan struct{}
+	stopped  bool
+	loopWG   sync.WaitGroup
+	inFlight sync.WaitGroup
+}
+
+// Watcher monitors one or more library roots recursively for .py, presets.json, and *.presets.json changes.
 type Watcher struct {
 	mu             sync.Mutex
-	fsw            *fsnotify.Watcher
-	stopCh         chan struct{}
+	session        *watchSession
 	onPyChange     func(path string)
 	onPresetChange func(path string)
 }
@@ -44,6 +51,13 @@ func New(onPyChange, onPresetChange func(path string)) *Watcher {
 
 func isSkippedDir(name string) bool {
 	return skipDirs[name] || strings.HasPrefix(name, ".")
+}
+
+func isPresetFilename(name string) bool {
+	if name == "presets.json" {
+		return true
+	}
+	return strings.HasSuffix(name, ".presets.json") && len(name) > len(".presets.json") && !strings.HasPrefix(name, ".")
 }
 
 func addDirRecursive(fsw *fsnotify.Watcher, rootDir, targetDir string, watchedDirs map[string]bool) (hasPy bool, hasPreset bool) {
@@ -67,7 +81,7 @@ func addDirRecursive(fsw *fsnotify.Watcher, rootDir, targetDir string, watchedDi
 		name := d.Name()
 		if strings.HasSuffix(name, ".py") {
 			hasPy = true
-		} else if name == "presets.json" {
+		} else if isPresetFilename(name) {
 			hasPreset = true
 		}
 		return nil
@@ -114,70 +128,107 @@ func (w *Watcher) Watch(roots []string) error {
 	}
 
 	stopCh := make(chan struct{})
+	sess := &watchSession{
+		fsw:    fsw,
+		stopCh: stopCh,
+	}
+
 	w.mu.Lock()
-	w.fsw = fsw
-	w.stopCh = stopCh
+	prev := w.session
+	if prev != nil {
+		w.stopSessionLocked(prev)
+	}
+	w.session = sess
+	sess.loopWG.Add(1)
 	w.mu.Unlock()
 
-	go w.loop(fsw, stopCh, watchedDirs)
+	if prev != nil {
+		prev.loopWG.Wait()
+		prev.inFlight.Wait()
+	}
+
+	go w.loop(sess, fsw, stopCh, watchedDirs)
 	log.Printf("Watching %d library root(s) for changes: %s", len(cleanRoots), strings.Join(cleanRoots, ", "))
 	return nil
 }
 
-// Stop tears down the active watcher.
-func (w *Watcher) Stop() {
-	w.mu.Lock()
-	defer w.mu.Unlock()
-	if w.stopCh != nil {
-		close(w.stopCh)
-		w.stopCh = nil
+func (w *Watcher) stopSessionLocked(sess *watchSession) {
+	if sess == nil || sess.stopped {
+		return
 	}
-	if w.fsw != nil {
-		_ = w.fsw.Close()
-		w.fsw = nil
+	sess.stopped = true
+	if sess.stopCh != nil {
+		close(sess.stopCh)
+	}
+	if sess.fsw != nil {
+		_ = sess.fsw.Close()
 	}
 }
 
-func (w *Watcher) loop(fsw *fsnotify.Watcher, stopCh chan struct{}, watchedDirs map[string]bool) {
+// Stop tears down the active watcher and waits until its event loop and any in-flight callbacks finish.
+func (w *Watcher) Stop() {
+	w.mu.Lock()
+	sess := w.session
+	w.session = nil
+	w.stopSessionLocked(sess)
+	w.mu.Unlock()
+
+	if sess != nil {
+		sess.loopWG.Wait()
+		sess.inFlight.Wait()
+	}
+}
+
+func (w *Watcher) loop(sess *watchSession, fsw *fsnotify.Watcher, stopCh chan struct{}, watchedDirs map[string]bool) {
 	var pyTimer *time.Timer
 	var presetTimer *time.Timer
-	var lastPyPath, lastPresetPath string
-
-	triggerPy := func() {
-		if w.onPyChange != nil {
-			w.onPyChange(lastPyPath)
-		}
-	}
-	triggerPreset := func() {
-		if w.onPresetChange != nil {
-			w.onPresetChange(lastPresetPath)
-		}
-	}
-
-	schedulePy := func(p string) {
-		lastPyPath = p
+	defer func() {
 		if pyTimer != nil {
 			pyTimer.Stop()
 		}
-		pyTimer = time.AfterFunc(250*time.Millisecond, triggerPy)
-	}
-	schedulePreset := func(p string) {
-		lastPresetPath = p
 		if presetTimer != nil {
 			presetTimer.Stop()
 		}
-		presetTimer = time.AfterFunc(250*time.Millisecond, triggerPreset)
+		sess.loopWG.Done()
+	}()
+
+	runCallback := func(fn func(string), p string) {
+		if fn == nil {
+			return
+		}
+		w.mu.Lock()
+		if w.session != sess || sess.stopped {
+			w.mu.Unlock()
+			return
+		}
+		sess.inFlight.Add(1)
+		w.mu.Unlock()
+		defer sess.inFlight.Done()
+		fn(p)
+	}
+
+	schedulePy := func(p string) {
+		pathCopy := p
+		if pyTimer != nil {
+			pyTimer.Stop()
+		}
+		pyTimer = time.AfterFunc(250*time.Millisecond, func() {
+			runCallback(w.onPyChange, pathCopy)
+		})
+	}
+	schedulePreset := func(p string) {
+		pathCopy := p
+		if presetTimer != nil {
+			presetTimer.Stop()
+		}
+		presetTimer = time.AfterFunc(250*time.Millisecond, func() {
+			runCallback(w.onPresetChange, pathCopy)
+		})
 	}
 
 	for {
 		select {
 		case <-stopCh:
-			if pyTimer != nil {
-				pyTimer.Stop()
-			}
-			if presetTimer != nil {
-				presetTimer.Stop()
-			}
 			return
 
 		case event, ok := <-fsw.Events:
@@ -224,7 +275,7 @@ func (w *Watcher) loop(fsw *fsnotify.Watcher, stopCh chan struct{}, watchedDirs 
 			name := filepath.Base(cleanName)
 			if strings.HasSuffix(name, ".py") {
 				schedulePy(cleanName)
-			} else if name == "presets.json" {
+			} else if isPresetFilename(name) {
 				schedulePreset(cleanName)
 			}
 
