@@ -1,5 +1,11 @@
 <script lang="ts">
   import * as api from '../lib/api';
+  import {
+    normalizePathKey,
+    pathBasename,
+    pathsEqual,
+    suggestLibraryName,
+  } from '../lib/paths';
   import { studio } from '../lib/studioState.svelte';
   import type {
     DetectedProject,
@@ -27,27 +33,6 @@
     return `onb-lib-${uidCounter}`;
   }
 
-  function basenameOf(p: string): string {
-    const clean = p.trim().replace(/[\\/]+$/, '');
-    const parts = clean.split(/[\\/]/).filter(Boolean);
-    return parts[parts.length - 1] ?? '';
-  }
-
-  function parentOf(p: string): string {
-    const clean = p.trim().replace(/[\\/]+$/, '');
-    const parts = clean.split(/[\\/]/).filter(Boolean);
-    return parts.length >= 2 ? parts[parts.length - 2] : '';
-  }
-
-  function suggestName(path: string, existing: LibraryItem[]): string {
-    const base = basenameOf(path) || 'Library';
-    if (existing.some((l) => l.name.trim().toLowerCase() === base.toLowerCase())) {
-      const parent = parentOf(path);
-      if (parent) return `${base} (${parent})`;
-    }
-    return base;
-  }
-
   let dialogEl: HTMLDialogElement | undefined = $state();
   let dialogBodyEl: HTMLDivElement | undefined = $state();
 
@@ -65,6 +50,7 @@
   let starterDownloadedPath = $state('');
   let allowOverwriteStarter = $state(false);
   let downloading = $state(false);
+  let demoTargetDir = $state('');
   let step1Error = $state('');
 
   let exportDir = $state('');
@@ -88,17 +74,37 @@
   let logContainerEl: HTMLPreElement | undefined = $state();
   let pressedOutside = false;
 
+  let currentOs = $derived(studio.os || defaults?.os || '');
   let busy = $derived(downloading || installing || completing || scaffoldingDemo);
   let showSkipButton = $derived(studio.onboardingInitialStep !== 2 && studio.needsOnboarding);
   let detectedProjects = $derived<DetectedProject[]>(defaults?.detected_projects ?? []);
   let unaddedDetectedProjects = $derived(
-    detectedProjects.filter((proj) => !libraries.some((l) => l.path.trim() === proj.path))
+    detectedProjects.filter(
+      (proj) => !libraries.some((l) => pathsEqual(l.path, proj.path, currentOs))
+    )
+  );
+
+  let defaultDemoDir = $derived.by(() => {
+    const dl = defaults?.default_download_dir?.trim() ?? '';
+    if (!dl) return '';
+    const sep = dl.includes('\\') ? '\\' : '/';
+    const clean = dl.replace(/[\\/]+$/, '');
+    const idx = Math.max(clean.lastIndexOf('/'), clean.lastIndexOf('\\'));
+    if (idx <= 0) return '';
+    return `${clean.slice(0, idx)}${sep}demo`;
+  });
+
+  let demoAdded = $derived(
+    (Boolean(demoTargetDir) &&
+      libraries.some((l) => pathsEqual(l.path, demoTargetDir, currentOs))) ||
+      (Boolean(defaultDemoDir) &&
+        libraries.some((l) => pathsEqual(l.path, defaultDemoDir, currentOs)))
   );
 
   let selectedCandidate = $derived.by<PythonCandidate | null>(() => {
     if (!probe || probe.candidates.length === 0) return null;
     if (selectedPythonPath) {
-      const exact = probe.candidates.find((c) => c.path === selectedPythonPath);
+      const exact = probe.candidates.find((c) => pathsEqual(c.path, selectedPythonPath, currentOs));
       if (exact) return exact;
     }
     return probe.recommended ?? probe.candidates[0] ?? null;
@@ -149,7 +155,7 @@
   let needsStarterDownload = $derived(
     includeStarter &&
       starterDir.trim() !== '' &&
-      starterDownloadedPath !== starterDir.trim()
+      !pathsEqual(starterDownloadedPath, starterDir, currentOs)
   );
 
   let step1Blocked = $derived.by(() => {
@@ -198,15 +204,17 @@
     const seen = new Set<string>();
     for (const lib of libraries) {
       const p = lib.path.trim();
-      if (p && !seen.has(p)) {
-        seen.add(p);
+      const key = normalizePathKey(p, currentOs);
+      if (key && !seen.has(key)) {
+        seen.add(key);
         out.push(p);
       }
     }
     if (includeStarter) {
       const sp = (starterDownloadedPath || starterDir).trim();
-      if (sp && !seen.has(sp)) {
-        seen.add(sp);
+      const key = normalizePathKey(sp, currentOs);
+      if (key && !seen.has(key)) {
+        seen.add(key);
         out.push(sp);
       }
     }
@@ -218,14 +226,16 @@
     const seen = new Set<string>();
     for (const lib of libraries) {
       const p = lib.path.trim();
-      if (!p || seen.has(p)) continue;
-      seen.add(p);
+      const key = normalizePathKey(p, currentOs);
+      if (!key || seen.has(key)) continue;
+      seen.add(key);
       out.push({ id: lib.id, name: lib.name.trim(), path: p });
     }
     if (includeStarter) {
       const sp = (starterDownloadedPath || starterDir).trim();
-      if (sp && !seen.has(sp)) {
-        seen.add(sp);
+      const key = normalizePathKey(sp, currentOs);
+      if (key && !seen.has(key)) {
+        seen.add(key);
         const hasCodeCadName = out.some((l) => l.name.trim().toLowerCase() === 'code-cad');
         out.push({
           id: '',
@@ -271,6 +281,7 @@
     step1Error = '';
     starterDownloadedPath = '';
     allowOverwriteStarter = false;
+    demoTargetDir = '';
     probeError = '';
     installError = '';
     completeError = '';
@@ -289,11 +300,16 @@
       selectedPythonPath = studio.config.python_path || '';
 
       if ((studio.config.libraries?.length ?? 0) > 0) {
-        libraries = studio.config.libraries.map((lib) => ({
+        const persisted = studio.config.libraries;
+        const inspected = await Promise.all(
+          persisted.map((lib) => api.inspectSetupDir(lib.path).catch(() => null))
+        );
+        libraries = persisted.map((lib, idx) => ({
           uid: nextUid(),
           id: lib.id,
           name: lib.name,
           path: lib.path,
+          modelCount: inspected[idx]?.ok ? inspected[idx].info.model_count : undefined,
         }));
         includeStarter = false;
       } else if (def.detected_projects.length > 0) {
@@ -357,7 +373,7 @@
     starterDir = val;
     step1Error = '';
     allowOverwriteStarter = false;
-    if (starterDownloadedPath !== val.trim()) {
+    if (!pathsEqual(starterDownloadedPath, val, currentOs)) {
       starterDownloadedPath = '';
     }
     scheduleInspectStarter(val);
@@ -374,13 +390,16 @@
 
   function addDetectedProject(proj: DetectedProject) {
     step1Error = '';
-    if (libraries.some((l) => l.path.trim() === proj.path)) return;
+    if (libraries.some((l) => pathsEqual(l.path, proj.path, currentOs))) return;
     libraries = [
       ...libraries,
       {
         uid: nextUid(),
         id: '',
-        name: suggestName(proj.path, libraries),
+        name: suggestLibraryName(
+          proj.path,
+          libraries.map((l) => l.name)
+        ),
         path: proj.path,
         modelCount: proj.model_count,
       },
@@ -394,18 +413,28 @@
       const resp = await api.browseProject(start);
       if (!resp.cancelled && resp.path) {
         const clean = resp.path.trim();
-        if (libraries.some((l) => l.path.trim() === clean)) {
-          step1Error = 'That folder is already selected.';
+        const inspect = await api.inspectSetupDir(clean).catch(() => null);
+        const resolvedPath = inspect?.ok && inspect.info.path ? inspect.info.path : clean;
+        if (
+          libraries.some(
+            (l) =>
+              pathsEqual(l.path, clean, currentOs) ||
+              pathsEqual(l.path, resolvedPath, currentOs)
+          )
+        ) {
+          step1Error = 'That library is already added.';
           return;
         }
-        const inspect = await api.inspectSetupDir(clean).catch(() => null);
         libraries = [
           ...libraries,
           {
             uid: nextUid(),
             id: '',
-            name: suggestName(clean, libraries),
-            path: clean,
+            name: suggestLibraryName(
+              resolvedPath,
+              libraries.map((l) => l.name)
+            ),
+            path: resolvedPath,
             modelCount: inspect?.ok ? inspect.info.model_count : undefined,
           },
         ];
@@ -419,18 +448,28 @@
     const clean = manualPathInput.trim();
     if (!clean) return;
     step1Error = '';
-    if (libraries.some((l) => l.path.trim() === clean)) {
-      step1Error = 'That folder is already selected.';
+    const inspect = await api.inspectSetupDir(clean).catch(() => null);
+    const resolvedPath = inspect?.ok && inspect.info.path ? inspect.info.path : clean;
+    if (
+      libraries.some(
+        (l) =>
+          pathsEqual(l.path, clean, currentOs) ||
+          pathsEqual(l.path, resolvedPath, currentOs)
+      )
+    ) {
+      step1Error = 'That library is already added.';
       return;
     }
-    const inspect = await api.inspectSetupDir(clean).catch(() => null);
     libraries = [
       ...libraries,
       {
         uid: nextUid(),
         id: '',
-        name: suggestName(clean, libraries),
-        path: inspect?.ok && inspect.info.path ? inspect.info.path : clean,
+        name: suggestLibraryName(
+          resolvedPath,
+          libraries.map((l) => l.name)
+        ),
+        path: resolvedPath,
         modelCount: inspect?.ok ? inspect.info.model_count : undefined,
       },
     ];
@@ -592,20 +631,27 @@
   }
 
   async function handleTryOfflineDemo() {
-    if (busy) return;
+    if (busy || demoAdded) return;
     step1Error = '';
     scaffoldingDemo = true;
     try {
-      await studio.scaffoldDemo();
-      libraries = (studio.config.libraries ?? []).map((lib) => ({
-        uid: nextUid(),
-        id: lib.id,
-        name: lib.name,
-        path: lib.path,
-      }));
-      includeStarter = false;
-      step = 2;
-      await runProbe(selectedPythonPath);
+      const resp = await studio.scaffoldDemo(undefined, { selectModel: false });
+      const targetDir = resp.target_dir?.trim() ?? '';
+      if (targetDir) {
+        demoTargetDir = targetDir;
+        if (!libraries.some((l) => pathsEqual(l.path, targetDir, currentOs))) {
+          libraries = [
+            ...libraries,
+            {
+              uid: nextUid(),
+              id: resp.library_id || '',
+              name: pathBasename(targetDir) || 'demo',
+              path: targetDir,
+              modelCount: 1,
+            },
+          ];
+        }
+      }
     } catch (err) {
       step1Error = err instanceof Error ? err.message : String(err);
     } finally {
@@ -790,14 +836,14 @@
         {#if loadingDefaults}
           <div class="flex items-center gap-2 text-xs opacity-70 py-4">
             <span class="loading loading-spinner loading-xs"></span>
-            <span>Detecting local model repositories…</span>
+            <span>Detecting local libraries…</span>
           </div>
         {:else}
-          <!-- Unadded detected local projects -->
+          <!-- Unadded detected local libraries -->
           {#if unaddedDetectedProjects.length > 0}
             <div class="space-y-1.5">
               <div class="text-[11px] font-semibold opacity-75">
-                Detected local model folder{unaddedDetectedProjects.length > 1 ? 's' : ''}
+                Detected local {unaddedDetectedProjects.length === 1 ? 'library' : 'libraries'}
               </div>
               <div class="space-y-1.5">
                 {#each unaddedDetectedProjects as proj (proj.path)}
@@ -829,25 +875,36 @@
             <div class="space-y-0.5 min-w-0">
               <div class="font-semibold text-xs">Try Offline Demo</div>
               <p class="text-[11px] opacity-70 leading-snug">
-                Create the built-in parametric demo project locally (zero internet required).
+                Create the built-in parametric demo library locally (no internet required).
               </p>
             </div>
-            <button
-              type="button"
-              class="btn btn-xs btn-secondary shrink-0"
-              disabled={busy}
-              onclick={handleTryOfflineDemo}
-            >
-              {#if scaffoldingDemo}
-                <span class="loading loading-spinner loading-xs"></span>
-                Creating…
-              {:else}
-                Try Offline Demo
-              {/if}
-            </button>
+            {#if demoAdded}
+              <span
+                class="inline-flex items-center gap-1 rounded-field border border-success/30 bg-success/10 px-2.5 py-1 text-xs font-medium text-success shrink-0"
+              >
+                <svg xmlns="http://www.w3.org/2000/svg" class="h-3.5 w-3.5" fill="none" viewBox="0 0 24 24" stroke="currentColor" stroke-width="2.5" aria-hidden="true">
+                  <path stroke-linecap="round" stroke-linejoin="round" d="M5 13l4 4L19 7" />
+                </svg>
+                Demo Added
+              </span>
+            {:else}
+              <button
+                type="button"
+                class="btn btn-xs btn-secondary shrink-0"
+                disabled={busy}
+                onclick={handleTryOfflineDemo}
+              >
+                {#if scaffoldingDemo}
+                  <span class="loading loading-spinner loading-xs"></span>
+                  Creating…
+                {:else}
+                  Try Offline Demo
+                {/if}
+              </button>
+            {/if}
           </div>
 
-          <!-- Starter Library Option (can be added alongside existing folders!) -->
+          <!-- Starter Library Option (can be added alongside existing libraries!) -->
           <div
             class="rounded-box border p-3 space-y-2.5 transition-colors {includeStarter
               ? 'border-primary bg-base-200/50'
@@ -866,7 +923,7 @@
                   Download <code>code-cad</code> starter library
                 </div>
                 <p class="text-[11px] opacity-70 leading-snug">
-                  Download the official starter models from GitHub into their own dedicated library folder (no git required, never modifies your own repos).
+                  Download the official starter models from GitHub into a new library folder.
                 </p>
               </div>
             </label>
@@ -898,7 +955,7 @@
                 <div class="min-h-[1rem] text-[11px]">
                   {#if inspectingStarter}
                     <span class="opacity-60">Checking destination folder…</span>
-                  {:else if starterDownloadedPath && starterDownloadedPath === starterDir.trim()}
+                  {:else if starterDownloadedPath && pathsEqual(starterDownloadedPath, starterDir, currentOs)}
                     <span class="text-success font-medium">
                       ✓ Starter library downloaded ({starterDirInfo?.model_count ?? 0} models found).
                     </span>
@@ -947,7 +1004,7 @@
                   disabled={busy}
                   onclick={handleAddFolder}
                 >
-                  + Add Folder…
+                  + Add Library…
                 </button>
               {/if}
             </div>
@@ -967,7 +1024,10 @@
                       {lib.path}
                     </span>
                     {#if lib.modelCount !== undefined}
-                      <span class="badge badge-xs badge-ghost shrink-0">
+                      <span
+                        class="rounded-full bg-base-content/10 text-base-content/70 px-1.5 py-0.5 text-[10px] font-medium tabular-nums shrink-0"
+                        title="{lib.modelCount} model{lib.modelCount === 1 ? '' : 's'}"
+                      >
                         {lib.modelCount}
                       </span>
                     {/if}
@@ -1002,7 +1062,7 @@
                       void handleAddManualPath();
                     }
                   }}
-                  placeholder="Enter folder location (e.g. ~/repos/my-cad-models)..."
+                  placeholder="Enter library folder path (e.g. ~/Documents/my-cad-models)..."
                   class="input input-bordered input-xs join-item w-full font-mono text-[11px]"
                 />
                 <button

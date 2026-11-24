@@ -1,6 +1,7 @@
 <script lang="ts">
   import { untrack } from 'svelte';
   import * as api from '../lib/api';
+  import { pathBasename, pathsEqual, suggestLibraryName } from '../lib/paths';
   import { studio } from '../lib/studioState.svelte';
   import type {
     ExportQuality,
@@ -22,30 +23,6 @@
   function nextUid(): string {
     uidCounter += 1;
     return `lib-draft-${uidCounter}`;
-  }
-
-  function basenameOf(p: string): string {
-    const clean = p.trim().replace(/[\\/]+$/, '');
-    const parts = clean.split(/[\\/]/).filter(Boolean);
-    return parts[parts.length - 1] ?? '';
-  }
-
-  function parentOf(p: string): string {
-    const clean = p.trim().replace(/[\\/]+$/, '');
-    const parts = clean.split(/[\\/]/).filter(Boolean);
-    return parts.length >= 2 ? parts[parts.length - 2] : '';
-  }
-
-  function suggestLibraryName(path: string, existing: LibraryDraft[]): string {
-    const base = basenameOf(path) || 'Library';
-    const clash = existing.some((l) => l.name.trim().toLowerCase() === base.toLowerCase());
-    if (clash) {
-      const parent = parentOf(path);
-      if (parent) {
-        return `${base} (${parent})`;
-      }
-    }
-    return base;
   }
 
   function formatBytes(bytes: number): string {
@@ -72,7 +49,9 @@
   let healthError = $state('');
   let healthLoading = $state(false);
   let saving = $state(false);
+  let scaffoldingDemo = $state(false);
   let savedBanner = $state(false);
+  let savedMessage = $state('');
   let formError = $state('');
 
   // Inline starter library downloader state
@@ -86,6 +65,8 @@
 
   let pollTimer: ReturnType<typeof setTimeout> | null = null;
   let starterInspectTimer: ReturnType<typeof setTimeout> | null = null;
+
+  let busy = $derived(downloadingStarter || saving || scaffoldingDemo);
 
   let downloadProgressPct = $derived.by<number | null>(() => {
     const p = studio.setupProgress;
@@ -137,6 +118,7 @@
     workerRunning = studio.workerRunning;
     workerError = studio.workerError;
     savedBanner = false;
+    savedMessage = '';
     formError = '';
     starterOpen = false;
     starterError = '';
@@ -204,8 +186,8 @@
       const resp = await api.browseProject(lastPath);
       if (!resp.cancelled && resp.path) {
         const clean = resp.path.trim();
-        if (libraries.some((l) => l.path.trim() === clean)) {
-          formError = 'That folder is already in your libraries list.';
+        if (libraries.some((l) => pathsEqual(l.path, clean, studio.os))) {
+          formError = 'That library is already in your libraries list.';
           return;
         }
         libraries = [
@@ -213,7 +195,10 @@
           {
             uid: nextUid(),
             id: '',
-            name: suggestLibraryName(clean, libraries),
+            name: suggestLibraryName(
+              clean,
+              libraries.map((l) => l.name)
+            ),
             path: clean,
           },
         ];
@@ -225,19 +210,28 @@
   }
 
   async function handleBrowseLibraryRow(index: number) {
+    formError = '';
     try {
       const current = libraries[index]?.path ?? '';
       const resp = await api.browseProject(current);
       if (!resp.cancelled && resp.path) {
+        const clean = resp.path.trim();
+        if (libraries.some((l, idx) => idx !== index && pathsEqual(l.path, clean, studio.os))) {
+          formError = 'That library is already in your libraries list.';
+          return;
+        }
         const next = [...libraries];
         const prev = next[index];
-        const prevBase = basenameOf(prev.path);
+        const prevBase = pathBasename(prev.path);
         const shouldAutoName = !prev.name.trim() || prev.name.trim() === prevBase;
         next[index] = {
           ...prev,
-          path: resp.path,
+          path: clean,
           name: shouldAutoName
-            ? suggestLibraryName(resp.path, next.filter((_, idx) => idx !== index))
+            ? suggestLibraryName(
+                clean,
+                next.filter((_, idx) => idx !== index).map((l) => l.name)
+              )
             : prev.name,
         };
         libraries = next;
@@ -401,7 +395,7 @@
         return;
       }
       const resolvedPath = resp.project_info?.path || target;
-      if (!libraries.some((l) => l.path.trim() === resolvedPath)) {
+      if (!libraries.some((l) => pathsEqual(l.path, resolvedPath, studio.os))) {
         const defaultName = libraries.some((l) => l.name.trim().toLowerCase() === 'code-cad')
           ? 'Starter Library'
           : 'code-cad';
@@ -418,11 +412,46 @@
       starterOpen = false;
       starterDirInfo = resp.project_info ?? null;
       await persistCurrentConfig();
+      savedMessage = 'Starter library downloaded and settings saved.';
       savedBanner = true;
     } catch (err) {
       starterError = err instanceof Error ? err.message : String(err);
     } finally {
       downloadingStarter = false;
+    }
+  }
+
+  async function handleAddOfflineDemo() {
+    if (busy) return;
+    formError = '';
+    savedBanner = false;
+    const hadUnsavedDrafts = hasUnsavedDraftChanges();
+    scaffoldingDemo = true;
+    try {
+      const resp = await studio.scaffoldDemo(undefined, { selectModel: false });
+      const targetDir = resp.target_dir?.trim() ?? '';
+      if (targetDir && !libraries.some((l) => pathsEqual(l.path, targetDir, studio.os))) {
+        const addedLib = resp.config?.config.libraries?.find((l) =>
+          pathsEqual(l.path, targetDir, studio.os)
+        );
+        libraries = [
+          ...libraries,
+          {
+            uid: nextUid(),
+            id: addedLib?.id || resp.library_id || '',
+            name: addedLib?.name || pathBasename(targetDir) || 'demo',
+            path: addedLib?.path || targetDir,
+          },
+        ];
+      }
+      savedMessage = hadUnsavedDrafts
+        ? 'Offline demo library added. Click Save & Reload to apply your other changes.'
+        : 'Offline demo library added.';
+      savedBanner = true;
+    } catch (err) {
+      formError = err instanceof Error ? err.message : String(err);
+    } finally {
+      scaffoldingDemo = false;
     }
   }
 
@@ -465,6 +494,7 @@
     formError = '';
     try {
       await persistCurrentConfig();
+      savedMessage = 'Settings saved and worker reloaded.';
       savedBanner = true;
     } catch (err) {
       formError = err instanceof Error ? err.message : String(err);
@@ -474,7 +504,7 @@
   }
 
   async function openOnboardingPreservingDrafts(step: 1 | 2) {
-    if (downloadingStarter || saving) return;
+    if (busy) return;
     formError = '';
     if (hasUnsavedDraftChanges()) {
       saving = true;
@@ -491,13 +521,13 @@
   }
 
   function closeModal() {
-    if (downloadingStarter || saving) return;
+    if (busy) return;
     clearPoll();
     studio.settingsOpen = false;
   }
 
   function handleDialogCancel(e: Event) {
-    if (downloadingStarter || saving) {
+    if (busy) {
       e.preventDefault();
     }
   }
@@ -544,7 +574,7 @@
   bind:this={dialogEl}
   class="studio-dialog"
   aria-labelledby="settings-modal-title"
-  {...({ closedby: downloadingStarter || saving ? 'none' : 'any' } as Record<string, unknown>)}
+  {...({ closedby: busy ? 'none' : 'any' } as Record<string, unknown>)}
   oncancel={handleDialogCancel}
   onclose={handleDialogClose}
   onpointerdown={handleDialogPointerDown}
@@ -562,7 +592,7 @@
         class="btn btn-ghost btn-square h-[26px] w-[26px] min-h-0 p-0 hover:bg-error/85 hover:text-error-content shrink-0"
         title="Close"
         aria-label="Close settings"
-        disabled={downloadingStarter || saving}
+        disabled={busy}
         onclick={closeModal}
       >
         <svg
@@ -589,14 +619,14 @@
             <div>
               <span class="label-text text-xs font-semibold">Model Libraries</span>
               <p class="text-[11px] opacity-60">
-                Add one or more project folders containing <code>models/</code>, nested category folders, or standalone <code>.py</code> scripts.
+                Add one or more library folders containing <code>models/</code>, nested category folders, or standalone <code>.py</code> scripts.
               </p>
             </div>
           </div>
 
           {#if libraries.length === 0}
             <div class="rounded-box border border-dashed border-base-300 p-3 text-xs opacity-70 text-center">
-              No libraries configured yet. Add a local folder or download the starter library below.
+              No libraries configured yet. Add a local library, try the offline demo, or download the starter library below.
             </div>
           {:else}
             <div class="space-y-2">
@@ -607,7 +637,7 @@
                     <input
                       type="text"
                       bind:value={lib.name}
-                      placeholder={basenameOf(lib.path) || 'Library name'}
+                      placeholder={pathBasename(lib.path) || 'Library name'}
                       aria-label="Library display name"
                       class="input input-bordered input-xs flex-1 font-medium text-xs"
                     />
@@ -680,19 +710,34 @@
             <button
               type="button"
               class="btn btn-xs btn-neutral"
-              disabled={downloadingStarter}
+              disabled={busy}
               onclick={handleAddFolder}
             >
-              + Add Folder
+              + Add Library
             </button>
-            <button
-              type="button"
-              class="btn btn-xs btn-ghost ml-auto"
-              disabled={downloadingStarter}
-              onclick={toggleStarterPanel}
-            >
-              {starterOpen ? 'Cancel Download' : 'Download Starter Library…'}
-            </button>
+            <div class="flex flex-wrap items-center gap-1.5 ml-auto">
+              <button
+                type="button"
+                class="btn btn-xs btn-ghost"
+                disabled={busy}
+                onclick={handleAddOfflineDemo}
+              >
+                {#if scaffoldingDemo}
+                  <span class="loading loading-spinner loading-xs"></span>
+                  Adding Demo…
+                {:else}
+                  Add Offline Demo
+                {/if}
+              </button>
+              <button
+                type="button"
+                class="btn btn-xs btn-ghost"
+                disabled={busy}
+                onclick={toggleStarterPanel}
+              >
+                {starterOpen ? 'Cancel Download' : 'Download Starter Library…'}
+              </button>
+            </div>
           </div>
 
           <!-- Inline Starter Library Download Panel -->
@@ -700,7 +745,7 @@
             <div class="rounded-box border border-primary/40 bg-base-200/60 p-3 space-y-2 text-xs">
               <div class="font-semibold">Download <code>code-cad</code> Starter Library</div>
               <p class="text-[11px] opacity-75">
-                Downloads the starter models into a dedicated folder and adds it as its own library alongside your existing folders.
+                Download the official starter models from GitHub into a new library folder alongside your existing libraries.
               </p>
               <div class="join w-full">
                 <input
@@ -907,7 +952,7 @@
             <button
               type="button"
               class="btn btn-xs btn-ghost"
-              disabled={downloadingStarter || saving}
+              disabled={busy}
               onclick={() => void openOnboardingPreservingDrafts(2)}
             >
               Configure Python…
@@ -952,14 +997,14 @@
         {/if}
 
         {#if savedBanner}
-          <Alert variant="success">Settings saved and worker reloaded.</Alert>
+          <Alert variant="success">{savedMessage || 'Settings saved and worker reloaded.'}</Alert>
         {/if}
 
         <div class="flex items-center justify-between gap-2 pt-2">
           <button
             type="button"
             class="btn btn-sm btn-ghost"
-            disabled={downloadingStarter || saving}
+            disabled={busy}
             onclick={() => void openOnboardingPreservingDrafts(1)}
           >
             Run Setup Wizard…
@@ -968,12 +1013,12 @@
             <button
               type="button"
               class="btn btn-sm btn-ghost"
-              disabled={downloadingStarter || saving}
+              disabled={busy}
               onclick={closeModal}
             >
               Close
             </button>
-            <button type="submit" class="btn btn-sm btn-primary" disabled={saving || downloadingStarter}>
+            <button type="submit" class="btn btn-sm btn-primary" disabled={busy}>
               {saving ? 'Saving...' : 'Save & Reload'}
             </button>
           </div>
