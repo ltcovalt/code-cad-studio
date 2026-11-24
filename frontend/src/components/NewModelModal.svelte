@@ -20,6 +20,12 @@
   let formError = $state('');
   let pressedOutside = false;
 
+  let previewName = $derived.by(() => {
+    const trimmed = modelName.trim();
+    if (!trimmed) return '<name>';
+    return trimmed.toLowerCase().endsWith('.py') ? trimmed.slice(0, -3).trim() || '<name>' : trimmed;
+  });
+
   function initializeForm() {
     modelName = '';
     template = 'parametric';
@@ -180,12 +186,12 @@
           }}
           aria-invalid={formError ? 'true' : undefined}
           aria-describedby={formError ? 'new-model-form-error' : 'new-model-name-hint'}
-          placeholder="e.g. cable_clip"
+          placeholder="e.g. cable_clip or CableClip"
           class="input input-bordered input-sm w-full font-mono text-xs"
           class:input-error={Boolean(formError)}
         />
-        <span id="new-model-name-hint" class="text-[11px] opacity-60 mt-1">
-          Creates <code>models/&lt;name&gt;/&lt;name&gt;.py</code> (and <code>utils/params.py</code> if needed).
+        <span id="new-model-name-hint" class="text-[11px] opacity-60 mt-1 break-all">
+          Creates <code>models/{previewName}/{previewName}.py</code> (and <code>utils/params.py</code> if needed).
         </span>
       </div>
 

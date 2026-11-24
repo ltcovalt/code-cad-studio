@@ -197,7 +197,8 @@ DEFAULT_COLORS = [
 
 
 def humanize_name(name: str) -> str:
-    return re.sub(r"[_-]+", " ", name).strip().title()
+    spaced = re.sub(r"(?<=[a-z0-9])(?=[A-Z])|(?<=[A-Z])(?=[A-Z][a-z])", " ", name)
+    return re.sub(r"[_-]+", " ", spaced).strip().title()
 
 
 def humanize_class_name(name: str) -> str:

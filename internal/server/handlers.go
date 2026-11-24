@@ -22,7 +22,13 @@ import (
 
 var (
 	validLibraryIDPattern = regexp.MustCompile(`^[A-Za-z0-9._-]+$`)
-	validModelNamePattern = regexp.MustCompile(`^[a-z][a-z0-9_]*$`)
+	windowsReservedNames  = map[string]bool{
+		"CON": true, "PRN": true, "AUX": true, "NUL": true,
+		"COM1": true, "COM2": true, "COM3": true, "COM4": true, "COM5": true,
+		"COM6": true, "COM7": true, "COM8": true, "COM9": true,
+		"LPT1": true, "LPT2": true, "LPT3": true, "LPT4": true, "LPT5": true,
+		"LPT6": true, "LPT7": true, "LPT8": true, "LPT9": true,
+	}
 )
 
 type configResponse struct {
@@ -650,22 +656,121 @@ func copyEmbeddedFS(src fs.FS, targetDir string) error {
 	})
 }
 
-func toPascalCase(snake string) string {
-	parts := strings.Split(snake, "_")
-	var b strings.Builder
-	for _, p := range parts {
-		if p == "" {
-			continue
+func validateScaffoldModelName(raw string) (string, error) {
+	name := strings.TrimSpace(raw)
+	if strings.HasSuffix(strings.ToLower(name), ".py") {
+		name = strings.TrimSpace(name[:len(name)-3])
+	}
+	if name == "" || len(name) > 64 {
+		return "", fmt.Errorf("Model name must be 1–64 characters.")
+	}
+	if name == "." || name == ".." || strings.HasPrefix(name, ".") || strings.HasSuffix(name, ".") {
+		return "", fmt.Errorf("Model name cannot start or end with a dot.")
+	}
+	if strings.Contains(name, "..") {
+		return "", fmt.Errorf("Model name cannot contain '..'.")
+	}
+	hasAlphaNum := false
+	for _, r := range name {
+		if r < 32 || r == 127 {
+			return "", fmt.Errorf("Model name contains control characters.")
 		}
-		b.WriteString(strings.ToUpper(p[:1]))
-		if len(p) > 1 {
-			b.WriteString(p[1:])
+		if strings.ContainsRune(`/\\:*?"<>|`, r) {
+			return "", fmt.Errorf("Model name cannot contain path separators or OS-reserved characters (/ \\ : * ? \" < > |).")
+		}
+		if (r >= 'a' && r <= 'z') || (r >= 'A' && r <= 'Z') || (r >= '0' && r <= '9') {
+			hasAlphaNum = true
 		}
 	}
-	return b.String()
+	if !hasAlphaNum {
+		return "", fmt.Errorf("Model name must include at least one letter or number.")
+	}
+	if strings.HasPrefix(name, "_") {
+		return "", fmt.Errorf("Model name cannot start with '_' (ignored by model discovery).")
+	}
+	if strings.HasPrefix(name, "test_") || name == "setup" {
+		return "", fmt.Errorf("Model name cannot start with 'test_' or be 'setup' (ignored by model discovery).")
+	}
+	baseUpper := strings.ToUpper(strings.SplitN(name, ".", 2)[0])
+	if windowsReservedNames[baseUpper] {
+		return "", fmt.Errorf("Model name %q is a reserved Windows filename.", name)
+	}
+	return name, nil
+}
+
+func splitIdentifierWords(name string) []string {
+	var words []string
+	var cur []rune
+	runes := []rune(name)
+	isLower := func(r rune) bool { return r >= 'a' && r <= 'z' }
+	isUpper := func(r rune) bool { return r >= 'A' && r <= 'Z' }
+	isDigit := func(r rune) bool { return r >= '0' && r <= '9' }
+	isAlphaNum := func(r rune) bool { return isLower(r) || isUpper(r) || isDigit(r) }
+
+	flush := func() {
+		if len(cur) > 0 {
+			words = append(words, string(cur))
+			cur = cur[:0]
+		}
+	}
+	for i, r := range runes {
+		if !isAlphaNum(r) {
+			flush()
+			continue
+		}
+		if len(cur) > 0 && isUpper(r) {
+			prev := cur[len(cur)-1]
+			nextIsLower := i+1 < len(runes) && isLower(runes[i+1])
+			if isLower(prev) || isDigit(prev) || (isUpper(prev) && nextIsLower) {
+				flush()
+			}
+		}
+		cur = append(cur, r)
+	}
+	flush()
+	return words
+}
+
+func toSnakeIdentifier(name string) string {
+	words := splitIdentifierWords(name)
+	if len(words) == 0 {
+		return "model"
+	}
+	parts := make([]string, 0, len(words))
+	for _, w := range words {
+		parts = append(parts, strings.ToLower(w))
+	}
+	return strings.Join(parts, "_")
+}
+
+func toPascalCase(name string) string {
+	words := splitIdentifierWords(name)
+	if len(words) == 0 {
+		return "Model"
+	}
+	var b strings.Builder
+	for _, w := range words {
+		if w == "" {
+			continue
+		}
+		b.WriteString(strings.ToUpper(w[:1]))
+		if len(w) > 1 {
+			b.WriteString(strings.ToLower(w[1:]))
+		}
+	}
+	out := b.String()
+	if out == "" {
+		return "Model"
+	}
+	if out[0] >= '0' && out[0] <= '9' {
+		return "Model" + out
+	}
+	return out
 }
 
 func buildStarterModelSource(name, template string) string {
+	pascal := toPascalCase(name)
+	snake := toSnakeIdentifier(name)
 	if template == "script" {
 		return fmt.Sprintf(`"""%s — standalone build123d script."""
 
@@ -676,10 +781,9 @@ with b3d.BuildPart() as bp:
 
 part = bp.part
 part.label = "%s"
-`, name, toPascalCase(name))
+`, name, pascal)
 	}
 
-	pascal := toPascalCase(name)
 	return fmt.Sprintf(`"""%s — parametric build123d model."""
 
 from dataclasses import dataclass
@@ -748,7 +852,7 @@ if __name__ == "__main__":
     params = %sParams()
     part = create_%s(params)
     show(part)
-`, name, pascal, pascal, name, name, pascal, pascal, pascal, name)
+`, name, pascal, pascal, snake, snake, pascal, pascal, pascal, snake)
 }
 
 func writeExclusiveFile(path string, data []byte) error {
@@ -884,9 +988,9 @@ func (s *Server) handleScaffoldModel(w http.ResponseWriter, r *http.Request) {
 		})
 
 	case "new":
-		name := strings.TrimSpace(req.Name)
-		if name == "" || len(name) > 64 || !validModelNamePattern.MatchString(name) {
-			writeError(w, http.StatusBadRequest, "invalid_model_name", "Model name must be lowercase snake_case starting with a letter (e.g. cable_clip)")
+		name, err := validateScaffoldModelName(req.Name)
+		if err != nil {
+			writeError(w, http.StatusBadRequest, "invalid_model_name", err.Error())
 			return
 		}
 		tmpl := strings.ToLower(strings.TrimSpace(req.Template))

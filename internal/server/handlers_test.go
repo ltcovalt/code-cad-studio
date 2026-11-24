@@ -2033,12 +2033,40 @@ func TestScaffoldDemoAndNewModel(t *testing.T) {
 	}
 
 	// 2. Scaffold new model validation + creation + conflict
-	for _, badName := range []string{"", "BadName", "1box", "../escape", "bad-name"} {
+	for _, badName := range []string{"", "../escape", "bad/name", `bad\name`, "bad:name", ".hidden", "_private", "test_foo", "CON"} {
 		body, _ := json.Marshal(map[string]any{"mode": "new", "name": badName, "library_id": demoResp.LibraryID})
 		rec = httptest.NewRecorder()
 		srv.Handler().ServeHTTP(rec, newAPIRequest(http.MethodPost, "/api/models/scaffold", bytes.NewReader(body)))
 		if rec.Code != http.StatusBadRequest {
 			t.Fatalf("expected 400 for invalid model name %q, got %d", badName, rec.Code)
+		}
+	}
+
+	// Non-snake_case names (CamelCase, kebab-case, leading digit) preserve filename while generating valid Python identifiers
+	for _, flexibleName := range []string{"TestParametricTemplate", "cable-clip", "1U Shelf"} {
+		body, _ := json.Marshal(map[string]any{
+			"mode":       "new",
+			"name":       flexibleName,
+			"library_id": demoResp.LibraryID,
+			"template":   "parametric",
+		})
+		rec = httptest.NewRecorder()
+		srv.Handler().ServeHTTP(rec, newAPIRequest(http.MethodPost, "/api/models/scaffold", bytes.NewReader(body)))
+		if rec.Code != http.StatusOK {
+			t.Fatalf("POST scaffold %q status = %d, body = %s", flexibleName, rec.Code, rec.Body.String())
+		}
+		var flexResp struct {
+			OK      bool   `json:"ok"`
+			ModelID string `json:"model_id"`
+			PyPath  string `json:"py_path"`
+		}
+		if err := json.Unmarshal(rec.Body.Bytes(), &flexResp); err != nil || !flexResp.OK || flexResp.ModelID != demoResp.LibraryID+"/"+flexibleName {
+			t.Fatalf("unexpected flexible scaffold resp for %q: %s", flexibleName, rec.Body.String())
+		}
+		rec = httptest.NewRecorder()
+		srv.Handler().ServeHTTP(rec, newAPIRequest(http.MethodGet, modelPath(flexResp.ModelID), nil))
+		if rec.Code != http.StatusOK {
+			t.Fatalf("GET newly scaffolded model %q status = %d, body = %s", flexibleName, rec.Code, rec.Body.String())
 		}
 	}
 
