@@ -153,12 +153,29 @@ func cleanPythonEnv(base []string, extraPythonPath string) []string {
 	return out
 }
 
+var (
+	realCADMu    sync.Mutex
+	realCADCache = map[string]bool{}
+)
+
 func hasRealCAD(pythonPath string) bool {
+	realCADMu.Lock()
+	if cached, ok := realCADCache[pythonPath]; ok {
+		realCADMu.Unlock()
+		return cached
+	}
+	realCADMu.Unlock()
+
 	ctx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
 	defer cancel()
 	cmd := exec.CommandContext(ctx, pythonPath, "-c", "import build123d, ocp_tessellate")
 	cmd.Env = cleanPythonEnv(os.Environ(), "")
-	return cmd.Run() == nil
+	ok := cmd.Run() == nil
+
+	realCADMu.Lock()
+	realCADCache[pythonPath] = ok
+	realCADMu.Unlock()
+	return ok
 }
 
 func requireRealCAD(t *testing.T) string {
@@ -326,7 +343,7 @@ func startWorker(t *testing.T, pythonPath string, opts workerOpts) *workerHandle
 	cmd := exec.Command(pythonPath, args...)
 	cmd.Dir = repoPath("worker")
 	extraPP := ""
-	if opts.useMockCAD && !hasRealCAD(pythonPath) {
+	if opts.useMockCAD {
 		extraPP = fixturePath("mock_cad")
 	}
 	env := cleanPythonEnv(os.Environ(), extraPP)
@@ -587,13 +604,7 @@ func startServerInRoot(t *testing.T, bin, root string, opts serverOpts) *serverH
 
 	extraPP := ""
 	if opts.useMockCAD {
-		py := opts.pythonPath
-		if py == "" {
-			py = resolvePython(t)
-		}
-		if !hasRealCAD(py) {
-			extraPP = fixturePath("mock_cad")
-		}
+		extraPP = fixturePath("mock_cad")
 	}
 
 	const maxBindRetries = 3
@@ -603,6 +614,11 @@ func startServerInRoot(t *testing.T, bin, root string, opts serverOpts) *serverH
 		cmd.Dir = suiteRepoRoot
 
 		env := cleanPythonEnv(os.Environ(), extraPP)
+		if os.Getenv("PYTHONUSERBASE") == "" {
+			if hostHome := strings.TrimSpace(os.Getenv("HOME")); hostHome != "" {
+				env = append(env, "PYTHONUSERBASE="+filepath.Join(hostHome, ".local"))
+			}
+		}
 		env = append(env,
 			"HOME="+homeDir,
 			"XDG_CONFIG_HOME="+xdgConfig,
