@@ -28,22 +28,20 @@ type PythonCandidate struct {
 	HasBuild123d     bool   `json:"has_build123d"`
 	Build123dVersion string `json:"build123d_version,omitempty"`
 	HasOCPTessellate bool   `json:"has_ocp_tessellate"`
-	HasPip           bool   `json:"has_pip"`
-	HasVenv          bool   `json:"has_venv"`
-	HasEnsurePip     bool   `json:"has_ensurepip"`
 	SysPrefix        string `json:"sys_prefix,omitempty"`
 	Error            string `json:"error,omitempty"`
 }
 
 // ProbeResult summarizes Python, uv, and shared Studio venv readiness across libraries.
 type ProbeResult struct {
-	Candidates        []PythonCandidate `json:"candidates"`
-	Recommended       *PythonCandidate  `json:"recommended,omitempty"`
-	HasUV             bool              `json:"has_uv"`
-	UVPath            string            `json:"uv_path,omitempty"`
-	OS                string            `json:"os"`
-	StudioVenvDir     string            `json:"studio_venv_dir"`
-	RequirementsFiles []string          `json:"requirements_files"`
+	Candidates           []PythonCandidate `json:"candidates"`
+	Recommended          *PythonCandidate  `json:"recommended,omitempty"`
+	HasUV                bool              `json:"has_uv"`
+	UVPath               string            `json:"uv_path,omitempty"`
+	ManagedPythonVersion string            `json:"managed_python_version"`
+	OS                   string            `json:"os"`
+	StudioVenvDir        string            `json:"studio_venv_dir"`
+	RequirementsFiles    []string          `json:"requirements_files"`
 }
 
 const probeSnippet = `import importlib.metadata, importlib.util, json, sys
@@ -60,9 +58,6 @@ print(json.dumps({
     "has_build123d": importlib.util.find_spec("build123d") is not None,
     "build123d_version": _ver("build123d"),
     "has_ocp_tessellate": importlib.util.find_spec("ocp_tessellate") is not None,
-    "has_pip": importlib.util.find_spec("pip") is not None,
-    "has_venv": importlib.util.find_spec("venv") is not None,
-    "has_ensurepip": importlib.util.find_spec("ensurepip") is not None,
 }))`
 
 type probeJSON struct {
@@ -73,9 +68,6 @@ type probeJSON struct {
 	HasBuild123d     bool   `json:"has_build123d"`
 	Build123dVersion string `json:"build123d_version"`
 	HasOCPTessellate bool   `json:"has_ocp_tessellate"`
-	HasPip           bool   `json:"has_pip"`
-	HasVenv          bool   `json:"has_venv"`
-	HasEnsurePip     bool   `json:"has_ensurepip"`
 }
 
 type rawCandidate struct {
@@ -84,17 +76,20 @@ type rawCandidate struct {
 	detail string
 }
 
-// FindUV locates the `uv` executable on PATH or in standard per-OS installation directories.
+// FindUV locates the `uv` executable on PATH, in Studio's managed tools directory,
+// or in standard per-OS installation directories.
 func FindUV() (string, bool) {
 	home, _ := os.UserHomeDir()
 	if home == "" && runtime.GOOS == "windows" {
 		home = strings.TrimSpace(os.Getenv("USERPROFILE"))
 	}
+	studioUV, _ := config.StudioUVPath()
 	return findUVForOS(
 		runtime.GOOS,
 		home,
 		strings.TrimSpace(os.Getenv("LOCALAPPDATA")),
 		strings.TrimSpace(os.Getenv("ProgramFiles")),
+		studioUV,
 		exec.LookPath,
 	)
 }
@@ -104,6 +99,7 @@ func findUVForOS(
 	home string,
 	localAppData string,
 	programFiles string,
+	studioUV string,
 	lookPath func(string) (string, error),
 ) (string, bool) {
 	if lookPath != nil {
@@ -113,6 +109,9 @@ func findUVForOS(
 	}
 
 	var candidates []string
+	if studioUV != "" {
+		candidates = append(candidates, studioUV)
+	}
 	if goos == "windows" {
 		if home != "" {
 			candidates = append(candidates,
@@ -200,10 +199,11 @@ func FindRequirementsFiles(libraryRoots []string) []string {
 func Probe(ctx context.Context, libraryRoots []string, explicitPython string) ProbeResult {
 	studioVenv, _ := config.StudioVenvDir()
 	res := ProbeResult{
-		Candidates:        []PythonCandidate{},
-		OS:                runtime.GOOS,
-		StudioVenvDir:     studioVenv,
-		RequirementsFiles: FindRequirementsFiles(libraryRoots),
+		Candidates:           []PythonCandidate{},
+		ManagedPythonVersion: ManagedPythonVersion,
+		OS:                   runtime.GOOS,
+		StudioVenvDir:        studioVenv,
+		RequirementsFiles:    FindRequirementsFiles(libraryRoots),
 	}
 
 	if uvPath, ok := FindUV(); ok {
@@ -245,9 +245,9 @@ func Probe(ctx context.Context, libraryRoots []string, explicitPython string) Pr
 		candidates = append(candidates, c)
 	}
 
-	rankCandidates(candidates, res.HasUV)
+	rankCandidates(candidates)
 	res.Candidates = candidates
-	res.Recommended = pickRecommended(candidates, res.HasUV)
+	res.Recommended = pickRecommended(candidates)
 	return res
 }
 
@@ -296,17 +296,14 @@ func ProbeExecutable(ctx context.Context, pythonPath, source, sourceDetail strin
 	cand.HasBuild123d = parsed.HasBuild123d
 	cand.Build123dVersion = parsed.Build123dVersion
 	cand.HasOCPTessellate = parsed.HasOCPTessellate
-	cand.HasPip = parsed.HasPip
-	cand.HasVenv = parsed.HasVenv
-	cand.HasEnsurePip = parsed.HasEnsurePip
 	cand.SysPrefix = parsed.SysPrefix
 	return cand
 }
 
 var versionedPythonRe = regexp.MustCompile(`^python3\.(\d+)$`)
 
-// pythonMinorPriority ranks Python versions by build123d/OCP wheel compatibility
-// (tested compatible minors 3.12/3.13 > 3.11/3.10 > bleeding-edge 3.14/3.15+).
+// pythonMinorPriority ranks Python versions by build123d/OCP compatibility
+// (managed target 3.14 > 3.13 > 3.12 > 3.11 > 3.10 > newer untargeted minors).
 func pythonMinorPriority(major, minor int) int {
 	if major < 3 {
 		return -200
@@ -315,18 +312,18 @@ func pythonMinorPriority(major, minor int) int {
 		return 10
 	}
 	switch {
-	case minor == 12:
+	case minor == 14:
 		return 100
 	case minor == 13:
 		return 95
+	case minor == 12:
+		return 90
 	case minor == 11:
 		return 85
 	case minor == 10:
 		return 80
-	case minor == 14:
-		return 40
 	case minor >= 15:
-		return 20
+		return 40
 	default:
 		return -100
 	}
@@ -621,7 +618,7 @@ func sourcePriority(source string) int {
 	}
 }
 
-func candidateScore(c PythonCandidate, hasUV bool) int {
+func candidateScore(c PythonCandidate) int {
 	if c.Error != "" {
 		return -1000
 	}
@@ -638,20 +635,14 @@ func candidateScore(c PythonCandidate, hasUV bool) int {
 			score += 20
 		}
 	}
-	if c.VersionOK && (hasUV || (c.HasVenv && c.HasEnsurePip)) {
-		score += 30
-	}
-	if c.HasPip {
-		score += 10
-	}
 	score -= sourcePriority(c.Source) * 5
 	return score
 }
 
-func rankCandidates(candidates []PythonCandidate, hasUV bool) {
+func rankCandidates(candidates []PythonCandidate) {
 	sort.SliceStable(candidates, func(i, j int) bool {
-		si := candidateScore(candidates[i], hasUV)
-		sj := candidateScore(candidates[j], hasUV)
+		si := candidateScore(candidates[i])
+		sj := candidateScore(candidates[j])
 		if si != sj {
 			return si > sj
 		}
@@ -659,24 +650,10 @@ func rankCandidates(candidates []PythonCandidate, hasUV bool) {
 	})
 }
 
-func pickRecommended(candidates []PythonCandidate, hasUV bool) *PythonCandidate {
+func pickRecommended(candidates []PythonCandidate) *PythonCandidate {
 	for i := range candidates {
 		c := candidates[i]
 		if c.Error == "" && c.VersionOK && c.HasBuild123d {
-			cp := c
-			return &cp
-		}
-	}
-	for i := range candidates {
-		c := candidates[i]
-		if c.Error == "" && c.VersionOK && (hasUV || (c.HasVenv && c.HasEnsurePip)) {
-			cp := c
-			return &cp
-		}
-	}
-	for i := range candidates {
-		c := candidates[i]
-		if c.Error == "" && c.VersionOK && c.HasVenv {
 			cp := c
 			return &cp
 		}

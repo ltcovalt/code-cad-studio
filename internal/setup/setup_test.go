@@ -543,30 +543,30 @@ func TestDownloadStarterProjectSecurityHardening(t *testing.T) {
 
 func TestCandidateRanking(t *testing.T) {
 	candidates := []PythonCandidate{
-		{Path: "/usr/bin/python3", Source: "path", Version: "3.12.0", VersionOK: true, HasBuild123d: false, HasVenv: true, HasEnsurePip: true},
-		{Path: "/global/python3", Source: "path", Version: "3.12.0", VersionOK: true, HasBuild123d: true, HasOCPTessellate: false},
-		{Path: "/proj/.venv/bin/python", Source: "library_venv", SourceDetail: "proj", Version: "3.12.0", VersionOK: true, HasBuild123d: true, HasOCPTessellate: true},
-		{Path: "/studio/venv/bin/python", Source: "studio_venv", Version: "3.12.0", VersionOK: true, HasBuild123d: true, HasOCPTessellate: true},
+		{Path: "/usr/bin/python3", Source: "path", Version: "3.14.0", VersionOK: true, HasBuild123d: false},
+		{Path: "/global/python3", Source: "path", Version: "3.14.0", VersionOK: true, HasBuild123d: true, HasOCPTessellate: false},
+		{Path: "/proj/.venv/bin/python", Source: "library_venv", SourceDetail: "proj", Version: "3.14.0", VersionOK: true, HasBuild123d: true, HasOCPTessellate: true},
+		{Path: "/studio/venv/bin/python", Source: "studio_venv", Version: "3.14.0", VersionOK: true, HasBuild123d: true, HasOCPTessellate: true},
 		{Path: "/old/python3.9", Source: "system", Version: "3.9.18", VersionOK: false, HasBuild123d: true},
 	}
 
-	rankCandidates(candidates, false)
-	rec := pickRecommended(candidates, false)
+	rankCandidates(candidates)
+	rec := pickRecommended(candidates)
 	if rec == nil || rec.Path != "/studio/venv/bin/python" {
 		t.Fatalf("expected studio_venv with build123d+ocp_tessellate first, got %+v", rec)
 	}
 
-	// Prefer tested minor 3.12 with ensurepip over 3.15 or missing-ensurepip candidate when uv is absent
+	// Prefer managed target minor 3.14 over older/untargeted minors
 	noB3D := []PythonCandidate{
-		{Path: "/old/python3.9", Source: "path", Version: "3.9.18", VersionOK: false, HasVenv: true, HasEnsurePip: true},
-		{Path: "/usr/bin/python3.15", Source: "path", Version: "3.15.2", VersionOK: true, HasVenv: true, HasEnsurePip: true},
-		{Path: "/usr/bin/python3.12-no-ensurepip", Source: "path", Version: "3.12.4", VersionOK: true, HasVenv: true, HasEnsurePip: false},
-		{Path: "/usr/bin/python3.12", Source: "path", Version: "3.12.4", VersionOK: true, HasVenv: true, HasEnsurePip: true},
+		{Path: "/old/python3.9", Source: "path", Version: "3.9.18", VersionOK: false},
+		{Path: "/usr/bin/python3.15", Source: "path", Version: "3.15.2", VersionOK: true},
+		{Path: "/usr/bin/python3.12", Source: "path", Version: "3.12.4", VersionOK: true},
+		{Path: "/usr/bin/python3.14", Source: "path", Version: "3.14.1", VersionOK: true},
 	}
-	rankCandidates(noB3D, false)
-	rec2 := pickRecommended(noB3D, false)
-	if rec2 == nil || rec2.Path != "/usr/bin/python3.12" {
-		t.Fatalf("expected python 3.12.4 with venv+ensurepip, got %+v", rec2)
+	rankCandidates(noB3D)
+	rec2 := pickRecommended(noB3D)
+	if rec2 == nil || rec2.Path != "/usr/bin/python3.14" {
+		t.Fatalf("expected python 3.14.1, got %+v", rec2)
 	}
 }
 
@@ -580,11 +580,11 @@ func TestFindVersionedPythons(t *testing.T) {
 
 	got := findVersionedPythons([]string{dir})
 	want := []string{
-		filepath.Join(dir, "python3.12"),
+		filepath.Join(dir, "python3.14"),
 		filepath.Join(dir, "python3.13"),
+		filepath.Join(dir, "python3.12"),
 		filepath.Join(dir, "python3.11"),
 		filepath.Join(dir, "python3.10"),
-		filepath.Join(dir, "python3.14"),
 		filepath.Join(dir, "python3.15"),
 	}
 	if len(got) != len(want) {
@@ -607,11 +607,26 @@ func TestFindUVStandardLocations(t *testing.T) {
 		t.Fatalf("write uv: %v", err)
 	}
 
-	got, ok := findUVForOS("linux", home, "", "", func(string) (string, error) {
+	got, ok := findUVForOS("linux", home, "", "", "", func(string) (string, error) {
 		return "", errors.New("not on PATH")
 	})
 	if !ok || got != localUV {
 		t.Fatalf("findUVForOS linux = (%q, %v), want (%q, true)", got, ok, localUV)
+	}
+
+	// Studio-managed uv is discovered when not on PATH
+	studioUV := filepath.Join(home, ".local", "share", "code-cad-studio", "tools", "uv")
+	if err := os.MkdirAll(filepath.Dir(studioUV), 0o755); err != nil {
+		t.Fatalf("mkdir studio uv: %v", err)
+	}
+	if err := os.WriteFile(studioUV, []byte("uv"), 0o755); err != nil {
+		t.Fatalf("write studio uv: %v", err)
+	}
+	gotStudio, okStudio := findUVForOS("linux", home, "", "", studioUV, func(string) (string, error) {
+		return "", errors.New("not on PATH")
+	})
+	if !okStudio || gotStudio != studioUV {
+		t.Fatalf("findUVForOS studio = (%q, %v), want (%q, true)", gotStudio, okStudio, studioUV)
 	}
 
 	winHome := t.TempDir()
@@ -623,7 +638,7 @@ func TestFindUVStandardLocations(t *testing.T) {
 	if err := os.WriteFile(winUV, []byte("uv"), 0o755); err != nil {
 		t.Fatalf("write uv.exe: %v", err)
 	}
-	gotWin, okWin := findUVForOS("windows", winHome, localAppData, "", func(string) (string, error) {
+	gotWin, okWin := findUVForOS("windows", winHome, localAppData, "", "", func(string) (string, error) {
 		return "", errors.New("not on PATH")
 	})
 	if !okWin || gotWin != winUV {
@@ -678,14 +693,13 @@ func TestProbeExecutablePopulatesEnsurePipAndBrokenVenvIsRecreated(t *testing.T)
 		t.Fatalf("write stale marker: %v", err)
 	}
 
-	// Running InstallEnvironment with a non-existent base python must still detect and remove the broken venv
+	// Running InstallEnvironment with a non-existent uv binary must still detect and remove the broken venv
 	_, err := InstallEnvironment(context.Background(), InstallOptions{
 		TargetVenvDir: venvDir,
-		BasePython:    filepath.Join(t.TempDir(), "missing-python"),
-		UseUV:         false,
+		UVPath:        filepath.Join(t.TempDir(), "missing-uv"),
 	}, nil)
 	if err == nil {
-		t.Fatalf("expected error with missing base python")
+		t.Fatalf("expected error with missing uv binary")
 	}
 	if _, statErr := os.Stat(staleMarker); !errors.Is(statErr, os.ErrNotExist) {
 		t.Fatalf("expected broken venv (and stale_marker.txt) to be removed before recreation, got statErr=%v", statErr)

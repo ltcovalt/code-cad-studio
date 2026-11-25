@@ -110,6 +110,8 @@
     return probe.recommended ?? probe.candidates[0] ?? null;
   });
 
+  let managedPythonVersion = $derived(probe?.managed_python_version || '3.14');
+
   let envReady = $derived(
     Boolean(
       selectedCandidate &&
@@ -119,16 +121,7 @@
     )
   );
 
-  let canInstallEnv = $derived(
-    Boolean(
-      !envReady &&
-        ((selectedCandidate &&
-          !selectedCandidate.error &&
-          selectedCandidate.version_ok &&
-          (selectedCandidate.has_venv || probe?.has_uv)) ||
-          probe?.has_uv)
-    )
-  );
+  let canInstallEnv = $derived(!envReady);
 
   let downloadProgressPct = $derived.by<number | null>(() => {
     const p = studio.setupProgress;
@@ -577,16 +570,9 @@
     showInstallLogs = true;
     studio.clearSetupStream();
 
-    const basePython =
-      selectedCandidate && !selectedCandidate.error && selectedCandidate.version_ok
-        ? selectedCandidate.path
-        : '';
-
     try {
       const resp = await api.installSetupEnv({
         library_roots: effectiveLibraryRoots(),
-        base_python: basePython,
-        use_uv: Boolean(probe?.has_uv),
       });
       if (!resp.ok) {
         if (!resp.cancelled) {
@@ -1250,19 +1236,23 @@
                 class="w-4 h-4 rounded-full flex items-center justify-center shrink-0 mt-0.5"
                 class:bg-success={pythonOk}
                 class:text-success-content={pythonOk}
-                class:bg-error={!pythonOk}
-                class:text-error-content={!pythonOk}
+                class:bg-base-300={!pythonOk && !selectedCandidate?.error}
+                class:text-base-content={!pythonOk && !selectedCandidate?.error}
+                class:bg-error={!pythonOk && Boolean(selectedCandidate?.error)}
+                class:text-error-content={!pythonOk && Boolean(selectedCandidate?.error)}
                 aria-hidden="true"
               >
                 {#if pythonOk}
                   <svg xmlns="http://www.w3.org/2000/svg" class="w-2.5 h-2.5" fill="none" viewBox="0 0 24 24" stroke="currentColor" stroke-width="3.2">
                     <path stroke-linecap="round" stroke-linejoin="round" d="M5 13l4 4L19 7" />
                   </svg>
-                {:else}
+                {:else if selectedCandidate?.error}
                   <svg xmlns="http://www.w3.org/2000/svg" class="w-2.5 h-2.5" fill="none" viewBox="0 0 24 24" stroke="currentColor" stroke-width="3.2">
                     <line x1="6" y1="6" x2="18" y2="18" />
                     <line x1="18" y1="6" x2="6" y2="18" />
                   </svg>
+                {:else}
+                  <span class="w-1.5 h-1.5 rounded-full bg-current opacity-50"></span>
                 {/if}
               </span>
               <div class="min-w-0 flex-1 space-y-0.5">
@@ -1272,9 +1262,12 @@
                     <span class="badge badge-xs badge-outline">
                       {sourceLabel(selectedCandidate)}
                     </span>
+                  {:else if selectedCandidate?.error}
+                    <span class="font-semibold">Python</span>
+                    <span class="text-error">Selected interpreter failed check</span>
                   {:else}
                     <span class="font-semibold">Python</span>
-                    <span class="text-error">Not found (3.10+ required)</span>
+                    <span class="opacity-70">Not detected — Studio will install Python {managedPythonVersion} automatically</span>
                   {/if}
                 </div>
                 {#if selectedCandidate && !selectedCandidate.error}
@@ -1328,16 +1321,16 @@
                   {:else if pythonOk}
                     <span class="text-warning">Not installed in this Python environment</span>
                   {:else}
-                    <span class="opacity-60">Waiting for Python 3.10+</span>
+                    <span class="opacity-60">Will be installed automatically</span>
                   {/if}
                 </div>
                 {#if envReady}
                   <div class="text-[11px] opacity-75">
                     Ready — this single Python environment will be shared across all of your libraries.
                   </div>
-                {:else if pythonOk}
+                {:else}
                   <div class="text-[11px] opacity-75">
-                    Studio can create a shared isolated virtual environment and install
+                    Studio can create a shared managed Python {managedPythonVersion} virtual environment and install
                     <code>build123d</code> + <code>ocp_tessellate</code> automatically.
                   </div>
                 {/if}
@@ -1429,15 +1422,9 @@
                 <div class="font-semibold">Automatic Shared Python Setup</div>
                 <p class="text-[11px] opacity-75">
                   Creates <code class="font-mono break-all">{probe?.studio_venv_dir || defaults?.studio_venv_dir || 'Studio venv'}</code>
-                  {#if selectedCandidate?.version}
-                    using <strong>Python {selectedCandidate.version}</strong>
-                  {/if}
-                  and installs <code>build123d</code> &amp; <code>ocp_tessellate</code>
-                  {#if probe?.has_uv}
-                    via <code>uv</code> (fast).
-                  {:else}
-                    via <code>venv</code> + <code>pip</code>.
-                  {/if}
+                  with managed <strong>Python {managedPythonVersion}</strong>
+                  and installs <code>build123d</code> &amp; <code>ocp_tessellate</code> via <code>uv</code>{#if !probe?.has_uv}
+                    (downloads <code>uv</code> automatically){/if}.
                   {#if (probe?.requirements_files?.length ?? 0) > 0}
                     Also installs dependencies from {probe?.requirements_files.length} <code>requirements.txt</code> file{(probe?.requirements_files.length ?? 0) === 1 ? '' : 's'}.
                   {/if}
@@ -1491,32 +1478,6 @@
                 {/if}
               </div>
             {/if}
-          </div>
-        {:else if !probing && !envReady && selectedCandidate?.version_ok && !selectedCandidate.has_venv && !probe?.has_uv}
-          <div class="rounded-box border border-warning/40 bg-base-200/50 p-3.5 space-y-2 text-xs">
-            <div class="font-semibold">Python <code>venv</code> module is missing</div>
-            <p class="text-[11px] opacity-80 leading-relaxed">
-              Python {selectedCandidate.version} was found, but its built-in <code>venv</code> module is not installed.
-              Install it (for example <code>sudo apt install python3-venv</code>) or install <code>uv</code>, then click
-              <strong>Re-check</strong> above.
-            </p>
-          </div>
-        {:else if !probing && !envReady && (!selectedCandidate || !selectedCandidate.version_ok)}
-          <div class="rounded-box border border-warning/40 bg-base-200/50 p-3.5 space-y-2 text-xs">
-            <div class="font-semibold">Python 3.10+ is required</div>
-            <p class="text-[11px] opacity-80 leading-relaxed">
-              {#if (probe?.os ?? defaults?.os) === 'windows'}
-                Download and install <strong>Python 3.12</strong> from <code>python.org/downloads</code>
-                (make sure to check <em>"Add python.exe to PATH"</em>), then click <strong>Re-check</strong> above.
-              {:else if (probe?.os ?? defaults?.os) === 'darwin'}
-                Install Python 3.12 via <code>brew install python@3.12</code> or from <code>python.org/downloads</code>,
-                then click <strong>Re-check</strong> above.
-              {:else}
-                Install Python 3.10+ and its <code>venv</code> module via your system package manager
-                (for example <code>sudo apt install python3 python3-venv</code> or <code>sudo dnf install python3</code>),
-                then click <strong>Re-check</strong> above.
-              {/if}
-            </p>
           </div>
         {/if}
 

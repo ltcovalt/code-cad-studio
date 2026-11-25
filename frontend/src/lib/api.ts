@@ -176,8 +176,6 @@ export function downloadStarterProject(
 
 export function installSetupEnv(payload: {
   library_roots: string[];
-  base_python: string;
-  use_uv?: boolean;
 }): Promise<SetupInstallEnvResponse> {
   return fetchJSON<SetupInstallEnvResponse>('/api/setup/install-env', {
     method: 'POST',

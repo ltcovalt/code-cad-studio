@@ -87,8 +87,6 @@ export interface PythonCandidate {
   has_build123d: boolean;
   build123d_version?: string;
   has_ocp_tessellate: boolean;
-  has_pip: boolean;
-  has_venv: boolean;
   sys_prefix?: string;
   error?: string;
 }
@@ -98,6 +96,7 @@ export interface SetupProbeResponse {
   recommended?: PythonCandidate | null;
   has_uv: boolean;
   uv_path?: string;
+  managed_python_version: string;
   os: string;
   studio_venv_dir: string;
   requirements_files: string[];
@@ -119,7 +118,7 @@ export interface SetupInstallEnvResponse {
   venv_dir?: string;
   python_path?: string;
   candidate?: PythonCandidate;
-  used_uv?: boolean;
+  uv_path?: string;
   error?: string;
 }
 

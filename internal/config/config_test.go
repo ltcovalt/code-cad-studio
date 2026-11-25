@@ -179,6 +179,35 @@ func TestStudioVenvDirOSPaths(t *testing.T) {
 		t.Fatalf("windows env path = %q", winEnv)
 	}
 
+	darwinUV, err := studioUVPathForOS("darwin", func(string) string { return "" }, homeFn)
+	if err != nil {
+		t.Fatalf("darwin uv path error: %v", err)
+	}
+	if darwinUV != filepath.Join(home, "Library", "Caches", AppDirName, "tools", "uv") {
+		t.Fatalf("darwin uv path = %q", darwinUV)
+	}
+
+	linuxUV, err := studioUVPathForOS("linux", func(string) string { return "" }, homeFn)
+	if err != nil {
+		t.Fatalf("linux uv path error: %v", err)
+	}
+	if linuxUV != filepath.Join(home, ".local", "share", AppDirName, "tools", "uv") {
+		t.Fatalf("linux uv path = %q", linuxUV)
+	}
+
+	winUV, err := studioUVPathForOS("windows", func(k string) string {
+		if k == "LOCALAPPDATA" {
+			return filepath.Join(home, "AppData", "Local")
+		}
+		return ""
+	}, homeFn)
+	if err != nil {
+		t.Fatalf("windows uv path error: %v", err)
+	}
+	if winUV != filepath.Join(home, "AppData", "Local", AppDirName, "tools", "uv.exe") {
+		t.Fatalf("windows uv path = %q", winUV)
+	}
+
 	winFallback, err := studioVenvDirForOS("windows", func(string) string { return "" }, homeFn)
 	if err != nil {
 		t.Fatalf("windows fallback error: %v", err)

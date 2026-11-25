@@ -8,6 +8,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ## [Unreleased]
 
 ### Added
+- **Auto-Bootstrapped `uv` & Managed Python 3.14 Setup:** First-run environment
+  setup now automatically downloads a SHA-256-verified `uv` release when `uv` is
+  not already installed and provisions a shared managed Python `3.14` virtual
+  environment (`uv venv --python 3.14 --python-preference only-managed`) with
+  `build123d` and `ocp_tessellate`—requiring no pre-installed system Python.
 - **Viewport Bottom Status & Action Bar:** Added a dedicated status bar beneath
   the 3D viewport showing the active filename, quick desktop actions (Edit,
   OS-aware Reveal, Rebuild), live build timer & Cancel button, bounding box &

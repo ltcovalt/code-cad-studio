@@ -125,16 +125,9 @@ func (s *Server) handleSetupDownloadProject(w http.ResponseWriter, r *http.Reque
 func (s *Server) handleSetupInstallEnv(w http.ResponseWriter, r *http.Request) {
 	var req struct {
 		LibraryRoots []string `json:"library_roots"`
-		BasePython   string   `json:"base_python"`
-		UseUV        *bool    `json:"use_uv"`
 	}
 	if !decodeJSON(w, r, &req, false) {
 		return
-	}
-
-	useUV := true
-	if req.UseUV != nil {
-		useUV = *req.UseUV
 	}
 
 	ctx, cleanup, err := s.beginSetupTask(r.Context())
@@ -146,8 +139,6 @@ func (s *Server) handleSetupInstallEnv(w http.ResponseWriter, r *http.Request) {
 
 	res, err := setup.InstallEnvironment(ctx, setup.InstallOptions{
 		LibraryRoots: req.LibraryRoots,
-		BasePython:   req.BasePython,
-		UseUV:        useUV,
 	}, func(ev setup.InstallEvent) {
 		if ev.Message != "" {
 			s.broadcastSSE("setup-progress", map[string]any{
@@ -178,7 +169,7 @@ func (s *Server) handleSetupInstallEnv(w http.ResponseWriter, r *http.Request) {
 		"venv_dir":    res.VenvDir,
 		"python_path": res.PythonPath,
 		"candidate":   res.Candidate,
-		"used_uv":     res.UsedUV,
+		"uv_path":     res.UVPath,
 	})
 }
 

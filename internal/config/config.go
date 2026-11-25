@@ -251,6 +251,35 @@ func ConfigDir() (string, error) {
 	return dir, nil
 }
 
+func studioDataDirForOS(goos string, getenv func(string) string, userHome func() (string, error)) (string, error) {
+	switch goos {
+	case "darwin":
+		home, err := userHome()
+		if err != nil {
+			return "", err
+		}
+		return filepath.Join(home, "Library", "Caches", AppDirName), nil
+	case "windows":
+		if local := strings.TrimSpace(getenv("LOCALAPPDATA")); local != "" {
+			return filepath.Join(local, AppDirName), nil
+		}
+		home, err := userHome()
+		if err != nil {
+			return "", err
+		}
+		return filepath.Join(home, "AppData", "Local", AppDirName), nil
+	default:
+		if xdg := strings.TrimSpace(getenv("XDG_DATA_HOME")); xdg != "" {
+			return filepath.Join(xdg, AppDirName), nil
+		}
+		home, err := userHome()
+		if err != nil {
+			return "", err
+		}
+		return filepath.Join(home, ".local", "share", AppDirName), nil
+	}
+}
+
 // StudioVenvDir returns the space-free OS-native path to Studio's shared managed virtual environment:
 // - darwin: ~/Library/Caches/code-cad-studio/venv
 // - windows: %LOCALAPPDATA%\code-cad-studio\venv
@@ -260,32 +289,41 @@ func StudioVenvDir() (string, error) {
 }
 
 func studioVenvDirForOS(goos string, getenv func(string) string, userHome func() (string, error)) (string, error) {
-	switch goos {
-	case "darwin":
-		home, err := userHome()
-		if err != nil {
-			return "", err
-		}
-		return filepath.Join(home, "Library", "Caches", AppDirName, "venv"), nil
-	case "windows":
-		if local := strings.TrimSpace(getenv("LOCALAPPDATA")); local != "" {
-			return filepath.Join(local, AppDirName, "venv"), nil
-		}
-		home, err := userHome()
-		if err != nil {
-			return "", err
-		}
-		return filepath.Join(home, "AppData", "Local", AppDirName, "venv"), nil
-	default:
-		if xdg := strings.TrimSpace(getenv("XDG_DATA_HOME")); xdg != "" {
-			return filepath.Join(xdg, AppDirName, "venv"), nil
-		}
-		home, err := userHome()
-		if err != nil {
-			return "", err
-		}
-		return filepath.Join(home, ".local", "share", AppDirName, "venv"), nil
+	base, err := studioDataDirForOS(goos, getenv, userHome)
+	if err != nil {
+		return "", err
 	}
+	return filepath.Join(base, "venv"), nil
+}
+
+// StudioToolsDir returns the OS-native path to Studio's managed helper binaries directory (e.g. uv).
+func StudioToolsDir() (string, error) {
+	return studioToolsDirForOS(runtime.GOOS, os.Getenv, os.UserHomeDir)
+}
+
+func studioToolsDirForOS(goos string, getenv func(string) string, userHome func() (string, error)) (string, error) {
+	base, err := studioDataDirForOS(goos, getenv, userHome)
+	if err != nil {
+		return "", err
+	}
+	return filepath.Join(base, "tools"), nil
+}
+
+// StudioUVPath returns the OS-native path to Studio's managed uv binary.
+func StudioUVPath() (string, error) {
+	return studioUVPathForOS(runtime.GOOS, os.Getenv, os.UserHomeDir)
+}
+
+func studioUVPathForOS(goos string, getenv func(string) string, userHome func() (string, error)) (string, error) {
+	toolsDir, err := studioToolsDirForOS(goos, getenv, userHome)
+	if err != nil {
+		return "", err
+	}
+	name := "uv"
+	if goos == "windows" {
+		name = "uv.exe"
+	}
+	return filepath.Join(toolsDir, name), nil
 }
 
 // VenvPythonExecutable returns the expected Python executable inside a venv directory.
