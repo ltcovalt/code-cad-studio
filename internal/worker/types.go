@@ -141,8 +141,13 @@ type DefaultChange struct {
 }
 
 type UnsupportedDefaultChange struct {
-	Path   string `json:"path"`
-	Reason string `json:"reason"`
+	Path          string `json:"path"`
+	Reason        string `json:"reason"`
+	ReasonCode    string `json:"reason_code,omitempty"`
+	OwnerClass    string `json:"owner_class,omitempty"`
+	SourceFile    string `json:"source_file,omitempty"`
+	SourceRelPath string `json:"source_rel_path,omitempty"`
+	InLibrary     bool   `json:"in_library,omitempty"`
 }
 
 type UpdateDefaultsResponse struct {

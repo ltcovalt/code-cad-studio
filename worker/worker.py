@@ -1115,6 +1115,7 @@ def _plan_dataclass_default_updates(
     py_path: Path,
     params_cls: type,
     overrides: dict[str, Any],
+    library_root: Path | None = None,
 ) -> tuple[bytes, str, list[dict[str, Any]], list[dict[str, Any]], list[tuple[int, int, bytes]]]:
     """Plan surgical UTF-8 byte-span replacements for changed dataclass default literals."""
     raw_bytes = py_path.read_bytes()
@@ -1134,10 +1135,34 @@ def _plan_dataclass_default_updates(
             class_defs.setdefault(node.name, []).append(node)
 
     resolved_py = py_path.resolve()
+    resolved_lib_root = library_root.resolve() if library_root is not None else None
     raw_changes = _collect_default_changes(params_cls, overrides)
     changes_out: list[dict[str, Any]] = []
     unsupported_out: list[dict[str, Any]] = []
     spans: list[tuple[int, int, bytes]] = []
+
+    def _add_unsupported(
+        path: str,
+        reason: str,
+        reason_code: str,
+        owner_cls: type,
+        *,
+        source_file: str | None = None,
+        source_rel_path: str | None = None,
+        in_library: bool = False,
+    ) -> None:
+        entry: dict[str, Any] = {
+            "path": path,
+            "reason": reason,
+            "reason_code": reason_code,
+            "owner_class": owner_cls.__name__,
+            "in_library": in_library,
+        }
+        if source_file:
+            entry["source_file"] = source_file
+        if source_rel_path:
+            entry["source_rel_path"] = source_rel_path
+        unsupported_out.append(entry)
 
     for ch in raw_changes:
         path = ch["path"]
@@ -1146,7 +1171,12 @@ def _plan_dataclass_default_updates(
         typed_val = ch["typed_value"]
 
         if isinstance(typed_val, enum.Enum):
-            unsupported_out.append({"path": path, "reason": "Enum defaults cannot be updated automatically"})
+            _add_unsupported(
+                path,
+                "Enum defaults cannot be updated automatically",
+                "enum_default",
+                owner_cls,
+            )
             continue
 
         try:
@@ -1154,12 +1184,39 @@ def _plan_dataclass_default_updates(
         except Exception:
             cls_file = None
         if not cls_file or Path(cls_file).resolve() != resolved_py:
-            unsupported_out.append({"path": path, "reason": "dataclass is defined outside this model file"})
+            src_file: str | None = None
+            src_rel: str | None = None
+            in_lib = False
+            if cls_file:
+                resolved_cls_file = Path(cls_file).resolve()
+                if resolved_lib_root is not None:
+                    try:
+                        src_rel = resolved_cls_file.relative_to(resolved_lib_root).as_posix()
+                        src_file = str(resolved_cls_file)
+                        in_lib = True
+                    except ValueError:
+                        src_rel = resolved_cls_file.name
+                else:
+                    src_rel = resolved_cls_file.name
+            _add_unsupported(
+                path,
+                "dataclass is defined outside this model file",
+                "external_component",
+                owner_cls,
+                source_file=src_file,
+                source_rel_path=src_rel,
+                in_library=in_lib,
+            )
             continue
 
         matches = class_defs.get(owner_cls.__name__, [])
         if len(matches) != 1:
-            unsupported_out.append({"path": path, "reason": f"class {owner_cls.__name__} not uniquely located"})
+            _add_unsupported(
+                path,
+                f"class {owner_cls.__name__} not uniquely located",
+                "class_not_located",
+                owner_cls,
+            )
             continue
 
         ann_matches = [
@@ -1170,16 +1227,31 @@ def _plan_dataclass_default_updates(
             and stmt.target.id == field_name
         ]
         if len(ann_matches) != 1:
-            unsupported_out.append({"path": path, "reason": f"field {field_name} not uniquely located"})
+            _add_unsupported(
+                path,
+                f"field {field_name} not uniquely located",
+                "field_not_located",
+                owner_cls,
+            )
             continue
 
         expr, err_reason = _locate_default_expr(ann_matches[0])
         if expr is None or err_reason is not None:
-            unsupported_out.append({"path": path, "reason": err_reason or "default expression not found"})
+            _add_unsupported(
+                path,
+                err_reason or "default expression not found",
+                "default_expr_not_found",
+                owner_cls,
+            )
             continue
 
         if not _is_safe_literal_expr(expr):
-            unsupported_out.append({"path": path, "reason": "uses a non-literal expression"})
+            _add_unsupported(
+                path,
+                "uses a non-literal expression",
+                "non_literal_expression",
+                owner_cls,
+            )
             continue
 
         if (
@@ -1188,19 +1260,24 @@ def _plan_dataclass_default_updates(
             or expr.end_lineno is None
             or expr.end_col_offset is None
         ):
-            unsupported_out.append({"path": path, "reason": "source span unavailable"})
+            _add_unsupported(
+                path,
+                "source span unavailable",
+                "source_span_unavailable",
+                owner_cls,
+            )
             continue
 
         try:
             replacement_str = _format_python_literal(typed_val)
         except Exception as exc:
-            unsupported_out.append({"path": path, "reason": str(exc)})
+            _add_unsupported(path, str(exc), "unsupported_value", owner_cls)
             continue
 
         start_b = bom_len + line_starts[expr.lineno - 1] + expr.col_offset
         end_b = bom_len + line_starts[expr.end_lineno - 1] + expr.end_col_offset
         if start_b < bom_len or end_b <= start_b or end_b > len(raw_bytes):
-            unsupported_out.append({"path": path, "reason": "invalid source byte span"})
+            _add_unsupported(path, "invalid source byte span", "invalid_source_span", owner_cls)
             continue
 
         old_src = raw_bytes[start_b:end_b].decode("utf-8")
@@ -2368,8 +2445,13 @@ class WorkerState:
                 }
 
             py_path = Path(meta["path"])
+            lib_entry = self.libraries_by_id.get(meta.get("library_id", ""))
+            lib_root = lib_entry.get("root") if isinstance(lib_entry, dict) else None
             raw_bytes, file_sha256, changes, unsupported, spans = _plan_dataclass_default_updates(
-                py_path, params_cls, params_dict if isinstance(params_dict, dict) else {}
+                py_path,
+                params_cls,
+                params_dict if isinstance(params_dict, dict) else {},
+                library_root=lib_root,
             )
 
             base_resp: dict[str, Any] = {
@@ -2383,11 +2465,11 @@ class WorkerState:
             if dry_run:
                 return base_resp
 
-            if unsupported:
+            if not changes and unsupported:
                 return {
                     **base_resp,
                     "ok": False,
-                    "error": "One or more changed fields cannot be updated safely; no changes were written.",
+                    "error": "None of the changed fields can be updated in this model file; no changes were written.",
                 }
 
             expected_clean = expected_sha256.strip()

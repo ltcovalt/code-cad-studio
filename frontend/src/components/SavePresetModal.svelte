@@ -1,6 +1,11 @@
 <script lang="ts">
   import { untrack } from 'svelte';
   import { mergeWithDefaults, normalizeParamsWithFields, paramsEqual } from '../lib/params';
+  import {
+    normalizePresetLabel,
+    slugifyPresetLabel,
+    suggestNewPresetName,
+  } from '../lib/presetNaming';
   import { studio } from '../lib/studioState.svelte';
   import type { Preset, PresetVerification } from '../lib/types';
   import { getPresetVerification } from '../lib/verification';
@@ -20,19 +25,6 @@
 
   let pressedOutside = false;
 
-  function normalizePresetLabel(raw: string): string {
-    return raw.trim().toLowerCase();
-  }
-
-  function slugifyLabel(raw: string): string {
-    const s = raw
-      .toLowerCase()
-      .trim()
-      .replace(/[^a-z0-9]+/g, '_')
-      .replace(/^_+|_+$/g, '');
-    return s === '' || s === 'default' ? 'custom_preset' : s;
-  }
-
   const savedPresets = $derived(
     studio.presets.filter(
       (p) => p.key !== 'default' && (p.source === 'user' || p.source === 'project')
@@ -43,7 +35,7 @@
     const trimmed = label.trim();
     if (!trimmed) return null;
     const norm = normalizePresetLabel(trimmed);
-    const slug = slugifyLabel(trimmed);
+    const slug = slugifyPresetLabel(trimmed);
 
     const sameScope = savedPresets.filter((p) => p.source === scope);
     const otherScope = savedPresets.filter((p) => p.source !== scope);
@@ -56,6 +48,8 @@
       null
     );
   });
+
+  const isSavingFromBase = $derived(studio.selectedPresetKey === 'default');
 
   type MatchKind = 'overwrite' | 'override-local' | 'replace-project' | null;
 
@@ -94,23 +88,23 @@
       return {
         title: `Existing ${scopeLabel} preset will be overwritten`,
         detail: matchedByKeyOnly
-          ? `This name maps to the same preset key as "${targetName}" and will overwrite it. Change the name to save as a new preset.`
-          : `Saving will overwrite "${targetName}". Change the name to save as a new preset.`,
+          ? `Maps to the same preset key as "${targetName}". Change the name to save as a new preset.`
+          : 'Change the name to save as a new preset.',
       };
     }
     if (matchKind === 'override-local') {
       return {
         title: 'Existing project preset will be overridden',
         detail: matchedByKeyOnly
-          ? `This name maps to the same preset key as "${targetName}" and will locally override it on this device. Change the name to save as a new preset.`
-          : `Saving will locally override "${targetName}" on this device without modifying presets.json. Change the name to save as a new preset.`,
+          ? `Maps to the same preset key as "${targetName}" on this device. Change the name to save as a new preset.`
+          : 'Saves a local override on this device without modifying presets.json. Change the name to save as a new preset.',
       };
     }
     return {
       title: 'Existing user preset will be replaced',
       detail: matchedByKeyOnly
-        ? `This name maps to the same preset key as "${targetName}" and will replace your local user copy. Change the name to save as a new preset.`
-        : `Saving as a Project preset will overwrite "${targetName}" and remove your local user copy. Change the name to save as a new preset.`,
+        ? `Maps to the same preset key as "${targetName}" and will remove your local user copy. Change the name to save as a new preset.`
+        : 'Removes your local user copy when saved as a Project preset. Change the name to save as a new preset.',
     };
   });
 
@@ -137,7 +131,13 @@
       description = cur.description;
       scope = cur.source === 'project' ? 'project' : 'user';
     } else {
-      label = '';
+      label = suggestNewPresetName({
+        exportFilename: studio.defaultExportFilename,
+        modelName: studio.activeModel?.name,
+        modelRelPath: studio.activeModel?.rel_path,
+        basePresetLabel: cur?.label,
+        existingPresets: studio.presets,
+      });
       description = '';
       scope = studio.config.preset_save_scope === 'project' ? 'project' : 'user';
     }
@@ -156,6 +156,9 @@
       }
       queueMicrotask(() => {
         nameInputEl?.focus();
+        if (label) {
+          nameInputEl?.select();
+        }
       });
     } else if (!isOpen && wasOpen) {
       wasOpen = false;
@@ -326,6 +329,11 @@
             >
               <p>{overwriteNotice.detail}</p>
             </Alert>
+          {:else if isSavingFromBase}
+            <p class="text-[11px] opacity-60 mt-1.5">
+              Saves as a new preset. To edit the <span class="font-medium">Base</span> defaults in
+              the Python source file, use <span class="font-medium">Manage Presets → Update Source File</span>.
+            </p>
           {/if}
         </div>
 

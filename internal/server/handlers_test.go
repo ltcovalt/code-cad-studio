@@ -650,20 +650,32 @@ def create_clip_demo(params: ClipDemoParams):
 		t.Fatalf("expected cleared default_preset_key after delete, got %+v", delResp)
 	}
 
-	// 2. Fail-closed test: attempting to update computed_gap (non-literal expression) must report unsupported and not write file
+	// 2. Fail-closed test: attempting to update only computed_gap (non-literal expression) must report unsupported and not write file
 	rec = httptest.NewRecorder()
-	badApply := `{"dry_run":false,"params":{"core":{"thickness":8.0,"computed_gap":5.0}}}`
+	badApply := `{"dry_run":false,"params":{"core":{"computed_gap":5.0}}}`
 	srv.Handler().ServeHTTP(rec, newAPIRequest(http.MethodPost, modelPath("test-lib/clip_demo", "/update-defaults"), bytes.NewBufferString(badApply)))
 	var badResp worker.UpdateDefaultsResponse
 	if err := json.Unmarshal(rec.Body.Bytes(), &badResp); err != nil {
 		t.Fatalf("decode badResp: %v", err)
 	}
-	if badResp.OK || len(badResp.Unsupported) != 1 || badResp.Unsupported[0].Path != "core.computed_gap" {
+	if badResp.OK || len(badResp.Unsupported) != 1 || badResp.Unsupported[0].Path != "core.computed_gap" || badResp.Unsupported[0].ReasonCode != "non_literal_expression" || badResp.Unsupported[0].OwnerClass != "CoreParams" {
 		t.Fatalf("expected fail-closed unsupported on core.computed_gap, got %+v", badResp)
 	}
 	afterBadBytes, _ := os.ReadFile(modelFile)
 	if string(afterBadBytes) != modelSrc {
 		t.Fatalf("file must remain untouched after failed update")
+	}
+
+	// 2b. Partial apply preview: mixed local literal + non-literal expression reports both
+	rec = httptest.NewRecorder()
+	mixedPreviewReq := `{"dry_run":true,"params":{"core":{"thickness":8.0,"computed_gap":5.0}}}`
+	srv.Handler().ServeHTTP(rec, newAPIRequest(http.MethodPost, modelPath("test-lib/clip_demo", "/update-defaults"), bytes.NewBufferString(mixedPreviewReq)))
+	var mixedPreview worker.UpdateDefaultsResponse
+	if err := json.Unmarshal(rec.Body.Bytes(), &mixedPreview); err != nil {
+		t.Fatalf("decode mixedPreview: %v", err)
+	}
+	if !mixedPreview.OK || len(mixedPreview.Changes) != 1 || len(mixedPreview.Unsupported) != 1 {
+		t.Fatalf("expected 1 local change + 1 unsupported in mixed preview, got %+v", mixedPreview)
 	}
 
 	// 3. Dry-run preview on safe literal changes

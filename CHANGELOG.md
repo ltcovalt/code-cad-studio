@@ -20,6 +20,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - **Explorer Right-Click Context Menu:** Added context menus on models (Open in
   Editor, Reveal, Copy Relative Path, Export…, Rebuild) and libraries (New
   Model…, Reveal Library Folder, Refresh Libraries).
+- **Smart Default Preset Names:** Saving a preset from the base model defaults
+  now pre-fills a humanized name derived from the model's
+  `export_filename(params)` (e.g., `can_lid_54mm_tpu` → `54mm TPU`) with
+  collision fallback (`(Modified)`, `(2)`, …) and select-all on focus. When
+  editing an already-saved preset, overwrite-in-place remains the default.
+- **Component-Aware Partial `update-defaults`:** Updating source defaults now
+  allows applying local parameter changes in `<model>.py` even when imported
+  shared component dataclasses (e.g., `components/pull_tab.py`) were also
+  modified. Skipped external component fields are grouped by class/file with
+  shared-impact context and an **Open in Editor** action for in-library files.
 
 ### Changed
 - **Consolidated Default Library Directory:** Default managed downloads and
@@ -33,6 +43,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   "repository" copy and removed unnecessary git references from setup prompts.
 
 ### Fixed
+- **Frameless Window Resize Grip & Edge Strips:** Added a subtle bottom-right
+  corner resize handle and thin right/bottom edge resize strips on unmaximized
+  Linux/Windows desktop windows so resizing remains effortless even when a
+  right-side Parameters scrollbar is visible.
 - **Non-Destructive Offline Demo:** Adding the built-in offline demo from
   Onboarding or Settings now appends alongside existing/draft libraries instead
   of replacing them or skipping Step 1.

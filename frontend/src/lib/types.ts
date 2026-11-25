@@ -359,6 +359,11 @@ export interface DefaultChange {
 export interface UnsupportedDefaultChange {
   path: string;
   reason: string;
+  reason_code?: string;
+  owner_class?: string;
+  source_file?: string;
+  source_rel_path?: string;
+  in_library?: boolean;
 }
 
 export interface UpdateDefaultsResponse {

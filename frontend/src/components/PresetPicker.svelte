@@ -260,9 +260,16 @@
       {/if}
     </span>
 
-    {#if selectedPreset && (selectedPreset.source === 'user' || isStartupDefault(selectedPreset))}
+    {#if selectedPreset && (selectedPreset.source === 'default' || selectedPreset.source === 'user' || isStartupDefault(selectedPreset))}
       <span class="hidden @[150px]:inline-flex items-center gap-1 shrink-0">
-        {#if selectedPreset.source === 'user'}
+        {#if selectedPreset.source === 'default'}
+          <span
+            class="badge badge-xs badge-secondary badge-soft h-4 px-1 text-[10px]"
+            title="Base defaults defined in the model's Python source file"
+          >
+            Base
+          </span>
+        {:else if selectedPreset.source === 'user'}
           <span class="badge badge-xs badge-soft h-4 px-1 text-[10px]">User</span>
         {/if}
         {#if isStartupDefault(selectedPreset)}
@@ -368,9 +375,16 @@
           {/if}
         </div>
 
-        {#if preset.source === 'user' || isDefault || hasAnyVerificationStatus}
+        {#if preset.source === 'default' || preset.source === 'user' || isDefault || hasAnyVerificationStatus}
           <div class="shrink-0 flex items-center gap-1.5 h-4">
-            {#if preset.source === 'user'}
+            {#if preset.source === 'default'}
+              <span
+                class="badge badge-xs badge-secondary badge-soft h-4 px-1 text-[10px] shrink-0"
+                title="Base defaults defined in the model's Python source file"
+              >
+                Base
+              </span>
+            {:else if preset.source === 'user'}
               <span class="badge badge-xs badge-soft h-4 px-1 text-[10px] shrink-0">
                 User
               </span>

@@ -2,6 +2,7 @@
   import { untrack } from 'svelte';
   import { studio } from '../lib/studioState.svelte';
   import type { Preset, UpdateDefaultsResponse, VerificationStatus } from '../lib/types';
+  import { groupUnsupportedDefaults } from '../lib/updateDefaults';
   import {
     VERIFICATION_STATUSES,
     formatVerificationTooltip,
@@ -50,6 +51,18 @@
   );
 
   const canonicalDefaultVer = $derived(getPresetVerification(canonicalDefault));
+
+  const unsupportedGroups = $derived(
+    previewData ? groupUnsupportedDefaults(previewData.unsupported) : []
+  );
+
+  const hasPartialChanges = $derived(
+    Boolean(previewData && previewData.changes.length > 0 && previewData.unsupported.length > 0)
+  );
+
+  const onlyUnsupportedChanges = $derived(
+    Boolean(previewData && previewData.changes.length === 0 && previewData.unsupported.length > 0)
+  );
 
   function initializeState() {
     activeTab = 'presets';
@@ -289,7 +302,7 @@
   }
 
   async function handleApplyDefaults() {
-    if (!previewData || previewData.unsupported.length > 0 || previewData.changes.length === 0) {
+    if (!previewData || previewData.changes.length === 0) {
       return;
     }
     applyingDefaults = true;
@@ -297,7 +310,13 @@
     defaultsSuccess = '';
     try {
       const resp = await studio.applyUpdateDefaults(previewData.sha256 ?? '');
-      defaultsSuccess = `Updated ${resp.updated ?? previewData.changes.length} default(s) in ${resp.rel_path || previewData.rel_path || 'source file'}.`;
+      const updatedCount = resp.updated ?? previewData.changes.length;
+      const targetRel = resp.rel_path || previewData.rel_path || 'source file';
+      const skippedCount = resp.unsupported?.length ?? previewData.unsupported.length;
+      defaultsSuccess =
+        skippedCount > 0
+          ? `Updated ${updatedCount} local default(s) in ${targetRel}. ${skippedCount} external/unsupported parameter(s) were skipped.`
+          : `Updated ${updatedCount} default(s) in ${targetRel}.`;
       previewData = {
         ...resp,
         changes: [],
@@ -401,7 +420,12 @@
                 >
                   <div class="flex items-center gap-1.5">
                     <span class="text-xs font-semibold truncate">{canonicalDefault.label}</span>
-                    <span class="badge badge-xs badge-secondary badge-soft shrink-0">Model</span>
+                    <span
+                      class="badge badge-xs badge-secondary badge-soft shrink-0"
+                      title="Base defaults defined in the model's Python source file"
+                    >
+                      Base
+                    </span>
                   </div>
                   <div class="grid grid-cols-2 gap-1.5">
                     {#each VERIFICATION_STATUSES as opt (opt.value)}
@@ -449,7 +473,12 @@
                   <div class="min-w-0">
                     <div class="flex items-center gap-1.5 min-w-0">
                       <span class="text-xs font-medium truncate">{canonicalDefault.label}</span>
-                      <span class="badge badge-xs badge-secondary badge-soft shrink-0">Model</span>
+                      <span
+                        class="badge badge-xs badge-secondary badge-soft shrink-0"
+                        title="Base defaults defined in the model's Python source file"
+                      >
+                        Base
+                      </span>
                       {#if isDefaultActive}
                         <span class="badge badge-xs badge-primary badge-soft shrink-0">Default</span>
                       {/if}
@@ -816,14 +845,55 @@
             </div>
           {:else if previewData}
             {#if previewData.unsupported.length > 0}
-              <Alert variant="warning" title="Some changed parameters can't be updated automatically">
-                <ul class="list-disc pl-4 space-y-0.5 text-[11px]">
-                  {#each previewData.unsupported as item (item.path)}
-                    <li>
-                      <code class="font-mono">{item.path}</code>: {item.reason}
-                    </li>
+              <Alert
+                variant={onlyUnsupportedChanges ? 'error' : 'warning'}
+                title={onlyUnsupportedChanges
+                  ? "Changed parameters can't be updated in this model file"
+                  : 'Some changed parameters will be skipped'}
+              >
+                <div class="space-y-2 text-[11px]">
+                  {#each unsupportedGroups as group (group.key)}
+                    {#if group.kind === 'external'}
+                      <div class="space-y-1">
+                        <div class="flex items-center justify-between gap-2 flex-wrap">
+                          <div class="font-medium">
+                            <code class="font-mono">{group.ownerClass}</code>
+                            {#if group.sourceRelPath}
+                              <span class="opacity-75">in</span>
+                              <code class="font-mono">{group.sourceRelPath}</code>
+                            {/if}
+                          </div>
+                          {#if studio.hasDesktop && group.inLibrary && group.sourceFile}
+                            <button
+                              type="button"
+                              class="btn btn-xs btn-outline"
+                              onclick={() => void studio.openModelInEditor(group.sourceFile)}
+                            >
+                              Open in Editor
+                            </button>
+                          {/if}
+                        </div>
+                        <p class="opacity-80">
+                          Defined in a shared component outside this model file; skipped to avoid
+                          changing defaults for other models.
+                        </p>
+                        <ul class="list-disc pl-4 space-y-0.5">
+                          {#each group.items as item (item.path)}
+                            <li><code class="font-mono">{item.path}</code></li>
+                          {/each}
+                        </ul>
+                      </div>
+                    {:else}
+                      <ul class="list-disc pl-4 space-y-0.5">
+                        {#each group.items as item (item.path)}
+                          <li>
+                            <code class="font-mono">{item.path}</code>: {item.reason}
+                          </li>
+                        {/each}
+                      </ul>
+                    {/if}
                   {/each}
-                </ul>
+                </div>
               </Alert>
             {/if}
 
@@ -882,12 +952,15 @@
               disabled={previewLoading ||
                 applyingDefaults ||
                 !previewData ||
-                previewData.changes.length === 0 ||
-                previewData.unsupported.length > 0}
+                previewData.changes.length === 0}
               onclick={handleApplyDefaults}
             >
               {#if applyingDefaults}
                 <span class="loading loading-spinner loading-xs"></span>
+              {:else if hasPartialChanges && previewData}
+                Update {previewData.changes.length} Local Default{previewData.changes.length === 1
+                  ? ''
+                  : 's'}
               {:else}
                 Update Source File
               {/if}

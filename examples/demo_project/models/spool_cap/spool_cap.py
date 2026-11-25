@@ -109,3 +109,10 @@ def create_spool_cap(params: SpoolCapParams):
     part = bp.part
     part.label = "Spool Cap"
     return part
+
+
+def export_filename(params: SpoolCapParams) -> str:
+    """Return standardized lowercase filename stem (without extension) for exports."""
+    dia = f"{params.core.shaft_diameter:g}mm"
+    flutes = "_fluted" if params.flutes.enabled else ""
+    return f"spool_cap_{dia}_{params.core.cap_style}{flutes}"

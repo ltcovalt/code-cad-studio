@@ -229,3 +229,81 @@ def test_update_defaults_preserves_tuple_literals(tmp_path: Path) -> None:
     assert "coords: tuple[float, ...] = (3.0, 4.0)" in text
     assert "single: tuple[float, ...] = (5.0,)" in text
     assert "empty_tup: tuple[float, ...] = ()" in text
+
+
+def test_update_defaults_partial_apply_with_external_component(tmp_path: Path) -> None:
+    lib_dir = tmp_path / "lib"
+    comp_dir = lib_dir / "components"
+    comp_dir.mkdir(parents=True)
+    comp_path = comp_dir / "pull_tab.py"
+    comp_src = (
+        "from dataclasses import dataclass\n"
+        "@dataclass\n"
+        "class PullTabParams:\n"
+        "    enabled: bool = True\n"
+        "    length: float = 12.0\n"
+    )
+    comp_path.write_text(comp_src, encoding="utf-8")
+
+    model_dir = lib_dir / "models" / "can_lid"
+    model_dir.mkdir(parents=True)
+    py_path = model_dir / "can_lid.py"
+    py_src = (
+        "from dataclasses import dataclass, field\n"
+        "from components.pull_tab import PullTabParams\n"
+        "@dataclass\n"
+        "class CanLidParams:\n"
+        "    diameter: float = 65.0\n"
+        "    pull_tab: PullTabParams = field(default_factory=PullTabParams)\n"
+        "def create_can_lid(params: CanLidParams):\n"
+        "    return None\n"
+    )
+    py_path.write_text(py_src, encoding="utf-8")
+
+    state = worker.WorkerState([{"id": "demo", "name": "Demo", "path": str(lib_dir)}])
+
+    # 1. Only external component field changed -> fails closed
+    only_ext = state.update_defaults(
+        "demo/can_lid",
+        {"diameter": 65.0, "pull_tab": {"enabled": True, "length": 18.0}},
+        dry_run=False,
+        expected_sha256="ignored",
+    )
+    assert only_ext["ok"] is False
+    assert only_ext["changes"] == []
+    assert len(only_ext["unsupported"]) == 1
+    u = only_ext["unsupported"][0]
+    assert u["path"] == "pull_tab.length"
+    assert u["reason_code"] == "external_component"
+    assert u["owner_class"] == "PullTabParams"
+    assert u["in_library"] is True
+    assert u["source_rel_path"] == "components/pull_tab.py"
+    assert u["source_file"] == str(comp_path.resolve())
+    assert py_path.read_text(encoding="utf-8") == py_src
+    assert comp_path.read_text(encoding="utf-8") == comp_src
+
+    # 2. Mixed local + external component changes -> preview + partial apply succeeds
+    preview = state.update_defaults(
+        "demo/can_lid",
+        {"diameter": 54.0, "pull_tab": {"enabled": True, "length": 18.0}},
+        dry_run=True,
+    )
+    assert preview["ok"] is True
+    assert len(preview["changes"]) == 1
+    assert preview["changes"][0]["path"] == "diameter"
+    assert len(preview["unsupported"]) == 1
+    assert preview["unsupported"][0]["path"] == "pull_tab.length"
+
+    applied = state.update_defaults(
+        "demo/can_lid",
+        {"diameter": 54.0, "pull_tab": {"enabled": True, "length": 18.0}},
+        dry_run=False,
+        expected_sha256=preview["sha256"],
+    )
+    assert applied["ok"] is True
+    assert applied["updated"] == 1
+    assert len(applied["unsupported"]) == 1
+    assert applied["unsupported"][0]["path"] == "pull_tab.length"
+    assert "diameter: float = 54.0" in py_path.read_text(encoding="utf-8")
+    # External shared component file must remain untouched
+    assert comp_path.read_text(encoding="utf-8") == comp_src

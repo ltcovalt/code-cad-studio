@@ -135,7 +135,7 @@ Project-level presets use an explicit versioned JSON envelope (`schema_version: 
 Studio can write modified parameter defaults back into `<model>.py` via `POST /models/<id>/update-defaults`:
 
 - **UTF-8 & BOM safe**: Preserves UTF-8 BOM (`\xef\xbb\xbf`) if present and computes AST byte spans accurately.
-- **Literal-only fail-closed edits**: Only simple literal expressions (constants, signed ints/floats, flat literal lists/tuples) defined inside the same `.py` file are eligible; computed expressions (`a + b`), `Enum` defaults, and `param_list` factories are reported under `unsupported` without modifying the file.
+- **Literal-only local edits with partial apply**: Only simple literal expressions (constants, signed ints/floats, flat literal lists/tuples) defined inside the model's own `.py` file are eligible. External shared component dataclasses, computed expressions (`a + b`), `Enum` defaults, and `param_list` factories are reported under `unsupported` with structured metadata (`reason_code`, `owner_class`, `in_library`, and optional `source_rel_path` / `source_file` for in-library components). When both local and unsupported fields are changed, applying updates writes only the local literals and leaves external/unsupported fields untouched; when zero local fields can be updated, apply fails closed without touching disk.
 - **Optimistic locking**: Non-dry-run applies (`dry_run: false`) require a non-empty `expected_sha256` matching the current file SHA-256 on disk; otherwise HTTP `400` or stale-file conflict is returned.
 - **In-memory syntax verification & atomic replace**: Re-parses the patched Python source in memory before writing via temporary file + `os.replace` retry.
 
