@@ -92,7 +92,7 @@
 </script>
 
 <div
-  class="@container border-t border-base-300 bg-base-200/60 px-3 py-1 min-h-9 flex items-center justify-between gap-3 shrink-0 text-xs relative"
+  class="@container border-t border-base-300 bg-base-200/60 px-3 py-1 min-h-9 grid grid-cols-[minmax(0,1fr)_auto_minmax(0,1fr)] items-center gap-2 @[520px]:gap-3 shrink-0 text-xs relative"
 >
   {#if studio.status.kind === 'error' && errorDrawerOpen}
     <div
@@ -160,12 +160,12 @@
   {/if}
 
   {#if !studio.activeModel}
-    <div class="flex-1 flex items-center justify-center">
+    <div class="col-span-3 flex items-center justify-center">
       <span class="text-[11px] opacity-50">No model selected</span>
     </div>
   {:else}
-    <!-- Left cluster: active file, quick actions, and live status / error indicator -->
-    <div class="min-w-0 flex-1 flex items-center gap-1.5">
+    <!-- Left cluster: active file and quick actions -->
+    <div class="min-w-0 flex items-center gap-1.5">
       <span
         class="font-mono text-[11px] opacity-80 truncate max-w-[14rem]"
         title={activeFileTitle}
@@ -241,11 +241,13 @@
           </svg>
         </button>
       {/if}
+    </div>
 
+    <!-- Center cluster: viewport-centered build status, progress, or dimensions & timing -->
+    <div class="min-w-0 flex items-center justify-center gap-1.5">
       {#if studio.rendering}
-        <span class="h-3.5 w-px bg-base-content/15 mx-0.5 shrink-0" aria-hidden="true"></span>
         <span class="loading loading-spinner loading-xs text-primary shrink-0"></span>
-        <span class="font-mono text-[11px] opacity-85 truncate">
+        <span class="font-mono text-[11px] opacity-85 whitespace-nowrap">
           Building… ({(elapsedMs / 1000).toFixed(1)}s)
         </span>
         <button
@@ -256,10 +258,9 @@
           Cancel
         </button>
       {:else if studio.status.kind === 'error'}
-        <span class="h-3.5 w-px bg-base-content/15 mx-0.5 shrink-0" aria-hidden="true"></span>
         <button
           type="button"
-          class="btn btn-ghost btn-xs btn-square h-6 w-6 min-h-0 text-error opacity-85 hover:opacity-100 hover:bg-error/15 hover:border-transparent shrink-0"
+          class="btn btn-ghost btn-xs h-6 min-h-0 px-1.5 gap-1 text-error opacity-85 hover:opacity-100 hover:bg-error/15 hover:border-transparent shrink-0 font-medium"
           aria-expanded={errorDrawerOpen}
           aria-label={hasModelError ? 'Toggle model error details' : 'Toggle build error details'}
           title={`${hasModelError ? 'Model Error' : 'Build Error'}: ${errorSummary}`}
@@ -267,7 +268,7 @@
         >
           <svg
             xmlns="http://www.w3.org/2000/svg"
-            class="h-3.5 w-3.5"
+            class="h-3.5 w-3.5 shrink-0"
             viewBox="0 0 24 24"
             fill="none"
             stroke="currentColor"
@@ -280,11 +281,13 @@
             <line x1="12" x2="12" y1="8" y2="12" />
             <line x1="12" x2="12.01" y1="16" y2="16" />
           </svg>
+          <span class="hidden @[440px]:inline text-[11px]">
+            {hasModelError ? 'Model Error' : 'Build Error'}
+          </span>
         </button>
       {:else if studio.status.kind === 'message'}
-        <span class="h-3.5 w-px bg-base-content/15 mx-0.5 shrink-0" aria-hidden="true"></span>
         <span
-          class="text-success font-medium text-[11px] truncate select-text"
+          class="text-success font-medium text-[11px] truncate max-w-[min(18rem,32cqi)] select-text"
           title={studio.status.message}
         >
           {studio.status.message}
@@ -307,15 +310,21 @@
           </button>
         {/if}
       {:else if studio.status.kind === 'ok'}
-        <span class="h-3.5 w-px bg-base-content/15 mx-0.5 shrink-0" aria-hidden="true"></span>
-        <div class="hidden @[440px]:flex items-center gap-1.5 text-[11px] font-mono opacity-75 min-w-0 truncate select-text">
+        <div
+          class="hidden @[460px]:flex items-center gap-1.5 text-[11px] font-mono opacity-75 min-w-0 select-text"
+        >
           {#if studio.status.bbox}
-            <span class="truncate" title="Bounding box (X × Y × Z mm)">
+            <span class="whitespace-nowrap" title="Bounding box (X × Y × Z mm)">
               {studio.status.bbox.dx.toFixed(2)} × {studio.status.bbox.dy.toFixed(2)} × {studio.status.bbox.dz.toFixed(2)} mm
             </span>
-            <span class="opacity-40 shrink-0" aria-hidden="true">·</span>
+            <span class="hidden @[600px]:inline opacity-40 shrink-0" aria-hidden="true">·</span>
           {/if}
-          <span class="shrink-0" title="Build + Tessellate time">
+          <span
+            class={studio.status.bbox
+              ? 'hidden @[600px]:inline shrink-0 whitespace-nowrap'
+              : 'shrink-0 whitespace-nowrap'}
+            title="Build + Tessellate time"
+          >
             {#if studio.status.cached}
               cached
             {:else}
@@ -327,7 +336,7 @@
     </div>
 
     <!-- Right cluster: primary Export modal trigger -->
-    <div class="shrink-0 flex items-center">
+    <div class="justify-self-end flex items-center">
       <button
         type="button"
         class="btn btn-xs btn-primary h-6 min-h-0 px-2.5 gap-1"
