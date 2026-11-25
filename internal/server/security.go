@@ -116,7 +116,7 @@ func isMutatingMethod(method string) bool {
 
 func (s *Server) securityMiddleware(next http.Handler, allowWailsInternal bool) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		w.Header().Set("Content-Security-Policy", cspPolicy)
+		w.Header().Set("Content-Security-Policy", effectiveCSP())
 		w.Header().Set("X-Content-Type-Options", "nosniff")
 		w.Header().Set("Referrer-Policy", "no-referrer")
 		if strings.HasPrefix(r.URL.Path, "/api/") || r.URL.Path == "/events" {

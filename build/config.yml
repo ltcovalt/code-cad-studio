@@ -24,13 +24,19 @@ dev_mode:
       - node_modules
       - frontend
       - bin
+      - examples
+      - .venv
+      - __pycache__
+      - .pytest_cache
     file:
       - .DS_Store
       - .gitignore
       - .gitkeep
       - "*_test.go"
+      - "test_*.py"
     watched_extension:
       - "*.go"
+      - "*.py"
       - "*.js" # Watch for changes to JS/TS files included using the //wails:include directive.
       - "*.ts" # The frontend directory will be excluded entirely by the setting above.
     git_ignore: true
