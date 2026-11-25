@@ -92,7 +92,7 @@
 </script>
 
 <div
-  class="border-t border-base-300 bg-base-200/60 px-3 py-1 min-h-9 flex items-center justify-between gap-3 shrink-0 text-xs relative"
+  class="@container border-t border-base-300 bg-base-200/60 px-3 py-1 min-h-9 flex items-center justify-between gap-3 shrink-0 text-xs relative"
 >
   {#if studio.status.kind === 'error' && errorDrawerOpen}
     <div
@@ -107,10 +107,41 @@
         {#snippet action()}
           <button
             type="button"
-            class="btn btn-ghost btn-xs text-[10px] h-5 min-h-0 px-1.5"
+            class="inline-flex items-center justify-center rounded-field h-6 w-6 p-0 text-current opacity-75 hover:opacity-100 hover:bg-error/15 transition-colors cursor-pointer focus-visible:outline-2 focus-visible:outline-offset-1 focus-visible:outline-current shrink-0"
+            title={copied ? 'Copied!' : 'Copy error'}
+            aria-label={copied ? 'Copied error to clipboard' : 'Copy error to clipboard'}
             onclick={copyError}
           >
-            {copied ? 'Copied!' : 'Copy'}
+            {#if copied}
+              <svg
+                xmlns="http://www.w3.org/2000/svg"
+                class="h-3.5 w-3.5"
+                viewBox="0 0 24 24"
+                fill="none"
+                stroke="currentColor"
+                stroke-width="2"
+                stroke-linecap="round"
+                stroke-linejoin="round"
+                aria-hidden="true"
+              >
+                <path d="M20 6 9 17l-5-5" />
+              </svg>
+            {:else}
+              <svg
+                xmlns="http://www.w3.org/2000/svg"
+                class="h-3.5 w-3.5"
+                viewBox="0 0 24 24"
+                fill="none"
+                stroke="currentColor"
+                stroke-width="2"
+                stroke-linecap="round"
+                stroke-linejoin="round"
+                aria-hidden="true"
+              >
+                <rect width="14" height="14" x="8" y="8" rx="2" ry="2" />
+                <path d="M4 16c-1.1 0-2-.9-2-2V4c0-1.1.9-2 2-2h10c1.1 0 2 .9 2 2" />
+              </svg>
+            {/if}
           </button>
         {/snippet}
         <p class="font-mono break-words whitespace-pre-wrap select-text">{studio.status.error}</p>
@@ -128,9 +159,13 @@
     </div>
   {/if}
 
-  <!-- Left cluster: active file & quick actions -->
-  <div class="min-w-0 flex items-center gap-1.5">
-    {#if studio.activeModel}
+  {#if !studio.activeModel}
+    <div class="flex-1 flex items-center justify-center">
+      <span class="text-[11px] opacity-50">No model selected</span>
+    </div>
+  {:else}
+    <!-- Left cluster: active file, quick actions, and live status / error indicator -->
+    <div class="min-w-0 flex-1 flex items-center gap-1.5">
       <span
         class="font-mono text-[11px] opacity-80 truncate max-w-[14rem]"
         title={activeFileTitle}
@@ -206,55 +241,33 @@
           </svg>
         </button>
       {/if}
-    {:else}
-      <span class="text-[11px] opacity-50">No model selected</span>
-    {/if}
-  </div>
 
-  <!-- Center cluster: build progress, error summary, export confirmation, or dimensions & timing -->
-  <div class="flex items-center justify-center gap-2 min-w-0 flex-1">
-    {#if studio.rendering}
-      <span class="loading loading-spinner loading-xs text-primary shrink-0"></span>
-      <span class="font-mono text-[11px] opacity-85 truncate">
-        Building… ({(elapsedMs / 1000).toFixed(1)}s)
-      </span>
-      <button
-        type="button"
-        class="btn btn-xs btn-ghost text-error h-6 min-h-0 px-1.5 shrink-0"
-        onclick={() => void studio.cancelActiveBuild()}
-      >
-        Cancel
-      </button>
-    {:else if studio.status.kind === 'error'}
-      <button
-        type="button"
-        class="btn btn-xs btn-ghost text-error h-6 min-h-0 px-2 gap-1.5 max-w-full min-w-0 font-normal"
-        aria-expanded={errorDrawerOpen}
-        title={studio.status.error}
-        onclick={() => (errorDrawerOpen = !errorDrawerOpen)}
-      >
-        <svg
-          xmlns="http://www.w3.org/2000/svg"
-          class="h-3.5 w-3.5 shrink-0"
-          viewBox="0 0 24 24"
-          fill="none"
-          stroke="currentColor"
-          stroke-width="2"
-          stroke-linecap="round"
-          stroke-linejoin="round"
-          aria-hidden="true"
+      {#if studio.rendering}
+        <span class="h-3.5 w-px bg-base-content/15 mx-0.5 shrink-0" aria-hidden="true"></span>
+        <span class="loading loading-spinner loading-xs text-primary shrink-0"></span>
+        <span class="font-mono text-[11px] opacity-85 truncate">
+          Building… ({(elapsedMs / 1000).toFixed(1)}s)
+        </span>
+        <button
+          type="button"
+          class="btn btn-xs btn-ghost text-error h-6 min-h-0 px-1.5 shrink-0"
+          onclick={() => void studio.cancelActiveBuild()}
         >
-          <circle cx="12" cy="12" r="10" />
-          <line x1="12" x2="12" y1="8" y2="12" />
-          <line x1="12" x2="12.01" y1="16" y2="16" />
-        </svg>
-        <span class="truncate font-mono text-[11px]">{errorSummary}</span>
-        <span class="inline-flex items-center gap-0.5 font-sans font-medium text-[11px] shrink-0">
-          Details
+          Cancel
+        </button>
+      {:else if studio.status.kind === 'error'}
+        <span class="h-3.5 w-px bg-base-content/15 mx-0.5 shrink-0" aria-hidden="true"></span>
+        <button
+          type="button"
+          class="btn btn-ghost btn-xs btn-square h-6 w-6 min-h-0 text-error opacity-85 hover:opacity-100 hover:bg-error/15 hover:border-transparent shrink-0"
+          aria-expanded={errorDrawerOpen}
+          aria-label={hasModelError ? 'Toggle model error details' : 'Toggle build error details'}
+          title={`${hasModelError ? 'Model Error' : 'Build Error'}: ${errorSummary}`}
+          onclick={() => (errorDrawerOpen = !errorDrawerOpen)}
+        >
           <svg
             xmlns="http://www.w3.org/2000/svg"
-            class="h-3 w-3 transition-transform"
-            class:rotate-180={errorDrawerOpen}
+            class="h-3.5 w-3.5"
             viewBox="0 0 24 24"
             fill="none"
             stroke="currentColor"
@@ -263,78 +276,83 @@
             stroke-linejoin="round"
             aria-hidden="true"
           >
-            <path d="m18 15-6-6-6 6" />
+            <circle cx="12" cy="12" r="10" />
+            <line x1="12" x2="12" y1="8" y2="12" />
+            <line x1="12" x2="12.01" y1="16" y2="16" />
           </svg>
+        </button>
+      {:else if studio.status.kind === 'message'}
+        <span class="h-3.5 w-px bg-base-content/15 mx-0.5 shrink-0" aria-hidden="true"></span>
+        <span
+          class="text-success font-medium text-[11px] truncate select-text"
+          title={studio.status.message}
+        >
+          {studio.status.message}
         </span>
-      </button>
-    {:else if studio.status.kind === 'message'}
-      <span
-        class="text-success font-medium text-[11px] truncate select-text"
-        title={studio.status.message}
-      >
-        {studio.status.message}
-      </span>
-      {#if studio.lastExportPath && studio.hasDesktop}
-        <button
-          type="button"
-          class="btn btn-xs btn-ghost border border-base-300 h-6 min-h-0 px-1.5 shrink-0"
-          title={revealLabel}
-          onclick={() => void studio.revealLastExport()}
-        >
-          Reveal
-        </button>
-        <button
-          type="button"
-          class="btn btn-xs btn-ghost border border-base-300 h-6 min-h-0 px-1.5 shrink-0"
-          onclick={() => void studio.openLastExportInSlicer()}
-        >
-          Open in Slicer
-        </button>
-      {/if}
-    {:else if studio.status.kind === 'ok'}
-      <div class="flex items-center gap-2 text-[11px] font-mono opacity-80 min-w-0 truncate select-text">
-        {#if studio.status.bbox}
-          <span class="truncate" title="Bounding box (X × Y × Z mm)">
-            {studio.status.bbox.dx.toFixed(2)} × {studio.status.bbox.dy.toFixed(2)} × {studio.status.bbox.dz.toFixed(2)} mm
-          </span>
-          <span class="opacity-40 shrink-0" aria-hidden="true">·</span>
+        {#if studio.lastExportPath && studio.hasDesktop}
+          <button
+            type="button"
+            class="btn btn-xs btn-ghost border border-base-300 h-6 min-h-0 px-1.5 shrink-0"
+            title={revealLabel}
+            onclick={() => void studio.revealLastExport()}
+          >
+            Reveal
+          </button>
+          <button
+            type="button"
+            class="btn btn-xs btn-ghost border border-base-300 h-6 min-h-0 px-1.5 shrink-0"
+            onclick={() => void studio.openLastExportInSlicer()}
+          >
+            Open in Slicer
+          </button>
         {/if}
-        <span class="shrink-0" title="Build + Tessellate time">
-          {#if studio.status.cached}
-            cached
-          {:else}
-            {Math.round(studio.status.buildTimeMs)}ms + {Math.round(studio.status.tessellateTimeMs)}ms
+      {:else if studio.status.kind === 'ok'}
+        <span class="h-3.5 w-px bg-base-content/15 mx-0.5 shrink-0" aria-hidden="true"></span>
+        <div class="hidden @[440px]:flex items-center gap-1.5 text-[11px] font-mono opacity-75 min-w-0 truncate select-text">
+          {#if studio.status.bbox}
+            <span class="truncate" title="Bounding box (X × Y × Z mm)">
+              {studio.status.bbox.dx.toFixed(2)} × {studio.status.bbox.dy.toFixed(2)} × {studio.status.bbox.dz.toFixed(2)} mm
+            </span>
+            <span class="opacity-40 shrink-0" aria-hidden="true">·</span>
           {/if}
-        </span>
-      </div>
-    {/if}
-  </div>
+          <span class="shrink-0" title="Build + Tessellate time">
+            {#if studio.status.cached}
+              cached
+            {:else}
+              {Math.round(studio.status.buildTimeMs)}ms + {Math.round(studio.status.tessellateTimeMs)}ms
+            {/if}
+          </span>
+        </div>
+      {/if}
+    </div>
 
-  <!-- Right cluster: primary Export modal trigger -->
-  <div class="shrink-0 flex items-center">
-    <button
-      type="button"
-      class="btn btn-xs btn-primary h-6 min-h-0 px-2.5 gap-1"
-      disabled={exportDisabled}
-      title="Export model (Ctrl+E)"
-      onclick={() => (studio.exportModalOpen = true)}
-    >
-      <svg
-        xmlns="http://www.w3.org/2000/svg"
-        class="h-3.5 w-3.5"
-        viewBox="0 0 24 24"
-        fill="none"
-        stroke="currentColor"
-        stroke-width="2"
-        stroke-linecap="round"
-        stroke-linejoin="round"
-        aria-hidden="true"
+    <!-- Right cluster: primary Export modal trigger -->
+    <div class="shrink-0 flex items-center">
+      <button
+        type="button"
+        class="btn btn-xs btn-primary h-6 min-h-0 px-2.5 gap-1"
+        disabled={exportDisabled}
+        title="Export model (Ctrl+E)"
+        aria-label="Export model"
+        onclick={() => (studio.exportModalOpen = true)}
       >
-        <path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4" />
-        <polyline points="7 10 12 15 17 10" />
-        <line x1="12" x2="12" y1="15" y2="3" />
-      </svg>
-      <span>Export…</span>
-    </button>
-  </div>
+        <svg
+          xmlns="http://www.w3.org/2000/svg"
+          class="h-3.5 w-3.5"
+          viewBox="0 0 24 24"
+          fill="none"
+          stroke="currentColor"
+          stroke-width="2"
+          stroke-linecap="round"
+          stroke-linejoin="round"
+          aria-hidden="true"
+        >
+          <path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4" />
+          <polyline points="7 10 12 15 17 10" />
+          <line x1="12" x2="12" y1="15" y2="3" />
+        </svg>
+        <span class="hidden @[360px]:inline">Export…</span>
+      </button>
+    </div>
+  {/if}
 </div>

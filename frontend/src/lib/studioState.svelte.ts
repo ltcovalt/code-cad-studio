@@ -100,6 +100,7 @@ export class StudioState {
   resolvedExportDir = $state('');
   hasDesktop = $state(false);
   os = $state('');
+  windowMaximized = $state(false);
   workerRunning = $state(false);
   workerError = $state('');
   theme = $state('dark');
@@ -776,6 +777,8 @@ export class StudioState {
       if (!resp.ok) {
         this.lastRenderedKey = '';
         this.pendingRender = null;
+        this.hasMesh = false;
+        this.viewport?.clear();
         this.status = {
           kind: 'error',
           error: resp.error || 'Model build failed',
@@ -815,6 +818,8 @@ export class StudioState {
       if (this.makeRenderKey(modelId, this.params) !== renderKey) return;
       this.lastRenderedKey = '';
       this.pendingRender = null;
+      this.hasMesh = false;
+      this.viewport?.clear();
       this.status = {
         kind: 'error',
         error: err instanceof Error ? err.message : String(err),

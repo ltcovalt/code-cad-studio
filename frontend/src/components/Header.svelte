@@ -11,13 +11,12 @@
   }
 
   let { layoutMode, onLayoutChange }: Props = $props();
-  let isMaximized = $state(false);
 
   async function syncWindowState() {
     if (!studio.hasDesktop) return;
     try {
       const res = await api.windowState();
-      isMaximized = Boolean(res?.maximized);
+      studio.windowMaximized = Boolean(res?.maximized);
     } catch {
       // ignore in web mode
     }
@@ -34,7 +33,7 @@
   async function handleToggleMaximize() {
     try {
       const res = await api.windowToggleMaximize();
-      isMaximized = Boolean(res?.maximized);
+      studio.windowMaximized = Boolean(res?.maximized);
     } catch {
       // ignore
     }
@@ -400,8 +399,8 @@
       <button
         type="button"
         class="btn btn-ghost btn-square h-[26px] w-[26px] min-h-0 p-0"
-        title={isMaximized ? 'Restore' : 'Maximize'}
-        aria-label={isMaximized ? 'Restore window' : 'Maximize window'}
+        title={studio.windowMaximized ? 'Restore' : 'Maximize'}
+        aria-label={studio.windowMaximized ? 'Restore window' : 'Maximize window'}
         onclick={handleToggleMaximize}
       >
         <svg
@@ -415,7 +414,7 @@
           stroke-linejoin="round"
           aria-hidden="true"
         >
-          {#if isMaximized}
+          {#if studio.windowMaximized}
             <rect x="4" y="8" width="12" height="12" rx="1.5" />
             <path d="M8 8V5.5A1.5 1.5 0 0 1 9.5 4H18.5A1.5 1.5 0 0 1 20 5.5V14.5A1.5 1.5 0 0 1 18.5 16H16" />
           {:else}

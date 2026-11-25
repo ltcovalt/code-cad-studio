@@ -36,10 +36,24 @@
     error: 'alert-error',
   };
 
+  const VARIANT_HOVER_CLASSES: Record<AlertVariant, string> = {
+    info: 'hover:bg-info/15',
+    success: 'hover:bg-success/15',
+    warning: 'hover:bg-warning/15',
+    error: 'hover:bg-error/15',
+  };
+
   const resolvedRole = $derived(role ?? (variant === 'error' ? 'alert' : 'status'));
   const iconSizeClass = $derived(compact ? 'h-3.5 w-3.5' : 'h-4 w-4');
   const basePaddingClass = $derived(
-    compact ? 'py-1.5 px-2 text-[11px]' : title ? 'py-2.5 px-3 text-xs' : 'py-2 px-3 text-xs'
+    compact
+      ? 'py-1.5! px-2! text-[11px]!'
+      : title
+        ? 'py-2.5! px-3! text-xs!'
+        : 'py-2! px-3! text-xs!'
+  );
+  const iconBtnClass = $derived(
+    `inline-flex items-center justify-center rounded-field h-6 w-6 p-0 text-current opacity-75 hover:opacity-100 ${VARIANT_HOVER_CLASSES[variant]} transition-colors cursor-pointer focus-visible:outline-2 focus-visible:outline-offset-1 focus-visible:outline-current shrink-0`
   );
 </script>
 
@@ -78,7 +92,8 @@
   {#if onDismiss}
     <button
       type="button"
-      class="btn btn-ghost btn-square h-5 w-5 min-h-0 p-0 opacity-70 hover:opacity-100 shrink-0"
+      class={iconBtnClass}
+      title="Dismiss"
       aria-label="Dismiss notification"
       onclick={onDismiss}
     >
@@ -104,22 +119,22 @@
   <div
     {id}
     role={resolvedRole}
-    class="alert {VARIANT_CLASSES[variant]} {soft ? 'alert-soft' : ''} block space-y-1 {basePaddingClass} {className}"
+    class="alert {VARIANT_CLASSES[variant]} {soft ? 'alert-soft' : ''} flex! flex-col! items-stretch! justify-start! gap-1.5! w-full {basePaddingClass} {className}"
   >
-    <div class="flex items-center justify-between gap-2">
-      <div class="flex items-center gap-1.5 font-semibold min-w-0">
+    <div class="flex items-center justify-between gap-2 w-full">
+      <div class="flex items-center gap-1.5 font-semibold min-w-0 flex-1">
         {@render alertIcon()}
         <span class="leading-snug">{title}</span>
       </div>
       {#if action || onDismiss}
-        <div class="flex items-center gap-1 shrink-0">
+        <div class="flex items-center gap-1 shrink-0 ml-auto">
           {@render action?.()}
           {@render dismissButton()}
         </div>
       {/if}
     </div>
     {#if children}
-      <div class="text-[11px] opacity-90 leading-snug space-y-1.5">
+      <div class="text-[11px] opacity-90 leading-snug space-y-1.5 w-full">
         {@render children()}
       </div>
     {/if}
@@ -128,14 +143,14 @@
   <div
     {id}
     role={resolvedRole}
-    class="alert {VARIANT_CLASSES[variant]} {soft ? 'alert-soft' : ''} flex items-center gap-2 {basePaddingClass} {className}"
+    class="alert {VARIANT_CLASSES[variant]} {soft ? 'alert-soft' : ''} flex! items-center! justify-between! gap-2! w-full {basePaddingClass} {className}"
   >
     {@render alertIcon()}
     <div class="min-w-0 flex-1 leading-snug">
       {@render children?.()}
     </div>
     {#if action || onDismiss}
-      <div class="flex items-center gap-1 shrink-0">
+      <div class="flex items-center gap-1 shrink-0 ml-auto">
         {@render action?.()}
         {@render dismissButton()}
       </div>

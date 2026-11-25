@@ -193,6 +193,22 @@ describe('StudioState', () => {
     expect(state.hasMesh).toBe(false);
     expect(state.modelLoadError).toBe('SyntaxError in broken.py');
     expect(fakeViewport.clear).toHaveBeenCalledTimes(2);
+
+    // Re-render good model, then hit a build error during render -> clears stale mesh
+    mockApi.getModel.mockResolvedValueOnce(makeDetail(box, 50));
+    mockApi.renderModel.mockResolvedValueOnce({ ok: true, shapes: { id: '/box' } });
+    await state.selectModel('lib/box');
+    expect(state.hasMesh).toBe(true);
+
+    mockApi.renderModel.mockResolvedValueOnce({
+      ok: false,
+      error: 'RuntimeError: fillet failed',
+      traceback: 'Traceback...',
+    });
+    await state.triggerRender(false, true);
+    expect(state.hasMesh).toBe(false);
+    expect(state.status.kind).toBe('error');
+    expect(fakeViewport.clear).toHaveBeenCalledTimes(3);
   });
 
   it('handleFileChanged filters unrelated models, sequences/coalesces rapid reloads, and refreshes defaultPresetKey', async () => {

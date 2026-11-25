@@ -85,6 +85,13 @@ input.no-spinner {
   appearance: textfield;
 }
 
+/* Compact CAD parameter range slider (one step sleeker than daisyUI range-xs) */
+.range.param-range {
+  --range-thumb-size: 0.75rem;
+  --range-p: 0.1875rem;
+  display: block;
+}
+
 /* Fluid select: matches numeric stepper size (7rem × 1.75rem) by default,
    grows to fit longer choices, and wraps below the label when the row is too narrow */
 .param-select {

@@ -564,7 +564,7 @@
           max={field.max}
           step={stepVal}
           value={rangeValue}
-          class="range range-primary range-xs w-full mt-1.5"
+          class="range range-primary range-xs param-range w-full mt-1"
           class:opacity-40={field.nullable && numValue === null}
           onpointerdown={handleRangePointerDown}
           onkeydown={handleRangeKeyDown}
