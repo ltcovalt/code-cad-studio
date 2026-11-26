@@ -97,6 +97,27 @@
 >
   <div class="flex-1 flex items-center gap-3 min-w-0">
     <div class="flex items-center gap-2 font-bold text-base tracking-tight pointer-events-none">
+      <svg
+        xmlns="http://www.w3.org/2000/svg"
+        class="h-5 w-auto text-primary shrink-0"
+        viewBox="0 0 30 24"
+        fill="none"
+        stroke="currentColor"
+        stroke-linecap="round"
+        stroke-linejoin="round"
+        aria-hidden="true"
+      >
+        <path d="M6.2 7.65L1.5 12L6.2 16.35" stroke-width="1.85" />
+        <path d="M23.8 7.65L28.5 12L23.8 16.35" stroke-width="1.85" />
+        <polygon
+          points="15,5 21.06,8.5 15,12 8.94,8.5"
+          fill="currentColor"
+          fill-opacity="0.2"
+          stroke="none"
+        />
+        <polygon points="15,5 21.06,8.5 21.06,15.5 15,19 8.94,15.5 8.94,8.5" stroke-width="1.75" />
+        <path d="M8.94 8.5L15 12L21.06 8.5M15 12V19" stroke-width="1.75" />
+      </svg>
       <span class="truncate">Code CAD Studio</span>
     </div>
     {#if studio.reloadedVisible}

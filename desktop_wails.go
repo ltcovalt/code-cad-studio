@@ -3,12 +3,16 @@
 package main
 
 import (
+	_ "embed"
 	"runtime"
 	"strings"
 
 	"github.com/ltcovalt/code-cad-studio/internal/server"
 	"github.com/wailsapp/wails/v3/pkg/application"
 )
+
+//go:embed build/appicon.png
+var appIcon []byte
 
 func isDialogCancelled(err error) bool {
 	if err == nil {
@@ -119,12 +123,16 @@ func newApplication(srv *server.Server, dialogs server.DesktopDialogs) *applicat
 	app := application.New(application.Options{
 		Name:        "Code CAD Studio",
 		Description: "Model-agnostic parametric GUI for build123d",
+		Icon:        appIcon,
 		Assets: application.AssetOptions{
 			Handler:    application.AssetFileServerFS(assets),
 			Middleware: srv.DesktopMiddleware,
 		},
 		Mac: application.MacOptions{
 			ApplicationShouldTerminateAfterLastWindowClosed: true,
+		},
+		Linux: application.LinuxOptions{
+			ProgramName: "code-cad-studio",
 		},
 	})
 	if wd, ok := dialogs.(*wailsDialogs); ok {
@@ -141,7 +149,7 @@ func attachDesktopWindow(app *application.App, srv *server.Server) {
 		MinWidth:         1024,
 		MinHeight:        680,
 		Frameless:        runtime.GOOS != "darwin",
-		BackgroundColour: application.NewRGB(25, 30, 36),
+		BackgroundColour: application.NewRGB(40, 42, 54),
 		URL:              "/",
 		Mac: application.MacWindow{
 			TitleBar:                application.MacTitleBarHiddenInset,

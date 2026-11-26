@@ -1,23 +1,10 @@
 <?xml version="1.0" encoding="UTF-8" standalone="no"?>
 <svg width="1024" height="1024" viewBox="0 0 1024 1024" fill="none" xmlns="http://www.w3.org/2000/svg">
-  <!-- Parametric code brackets (< and >) flanking the isometric CAD cube -->
-  <path d="M236 336L112 512L236 688" stroke="#F59E0B" stroke-width="56" stroke-linecap="round" stroke-linejoin="round"/>
-  <path d="M788 336L912 512L788 688" stroke="#F59E0B" stroke-width="56" stroke-linecap="round" stroke-linejoin="round"/>
-
-  <!-- Isometric 3D CAD cube -->
-  <!-- Top face -->
-  <polygon points="512,232 732,359 512,486 292,359" fill="#38BDF8"/>
-  <!-- Left face -->
-  <polygon points="292,359 512,486 512,748 292,621" fill="#0284C7"/>
-  <!-- Right face -->
-  <polygon points="732,359 512,486 512,748 732,621" fill="#0369A1"/>
-
-  <!-- Precision wireframe & chamfer accent lines -->
-  <polygon points="512,232 732,359 732,621 512,748 292,621 292,359" stroke="#BAE6FD" stroke-width="18" stroke-linejoin="round" fill="none"/>
-  <path d="M292 359L512 486L732 359M512 486V748" stroke="#E0F2FE" stroke-width="18" stroke-linecap="round" stroke-linejoin="round"/>
-
-  <!-- Inner parametric datum diamond on top face -->
-  <polygon points="512,302 608,359 512,416 416,359" stroke="#E0F2FE" stroke-width="14" stroke-linejoin="round" fill="none" opacity="0.85"/>
-  <!-- Origin datum node -->
-  <circle cx="512" cy="486" r="22" fill="#FBBF24" stroke="#0F172A" stroke-width="8"/>
+  <g stroke="#6eb5ff" stroke-linecap="round" stroke-linejoin="round">
+    <path d="M235 380L95 512L235 644" stroke-width="49"/>
+    <path d="M789 380L929 512L789 644" stroke-width="49"/>
+    <polygon points="512,296 699,404 512,512 325,404" fill="#6eb5ff" fill-opacity="0.22" stroke="none"/>
+    <polygon points="512,296 699,404 699,620 512,728 325,620 325,404" stroke-width="45"/>
+    <path d="M325 404L512 512L699 404M512 512V728" stroke-width="45"/>
+  </g>
 </svg>
