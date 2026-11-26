@@ -16,8 +16,6 @@
   let slicerCommand = $state('');
   let exportQuality = $state<ExportQuality>('standard');
   let saving = $state(false);
-  let savedBanner = $state(false);
-  let savedMessage = $state('');
   let formError = $state('');
 
   let libraryRoots = $derived((studio.config.libraries ?? []).map((l) => l.path));
@@ -28,8 +26,6 @@
     editorCommand = studio.config.editor_command ?? '';
     slicerCommand = studio.config.slicer_command ?? '';
     exportQuality = studio.config.export_quality ?? 'standard';
-    savedBanner = false;
-    savedMessage = '';
     formError = '';
     void pythonPanel?.runProbe(pythonPath);
   }
@@ -85,12 +81,10 @@
   async function handleSubmit(e: SubmitEvent) {
     e.preventDefault();
     saving = true;
-    savedBanner = false;
     formError = '';
     try {
       await persistCurrentConfig();
-      savedMessage = 'Settings saved and worker reloaded.';
-      savedBanner = true;
+      studio.settingsOpen = false;
     } catch (err) {
       formError = err instanceof Error ? err.message : String(err);
     } finally {
@@ -206,7 +200,6 @@
           bind:installing={installingPython}
           {libraryRoots}
           disabled={saving}
-          onSelectionChange={() => (savedBanner = false)}
         />
 
         <!-- Default Export Quality -->
@@ -262,10 +255,6 @@
           <Alert variant="error">{formError}</Alert>
         {/if}
 
-        {#if savedBanner}
-          <Alert variant="success">{savedMessage || 'Settings saved and worker reloaded.'}</Alert>
-        {/if}
-
         <div class="flex items-center justify-between gap-2 pt-2">
           <button
             type="button"
@@ -282,10 +271,10 @@
               disabled={busy}
               onclick={closeModal}
             >
-              Close
+              Cancel
             </button>
             <button type="submit" class="btn btn-sm btn-primary" disabled={busy}>
-              {saving ? 'Saving...' : 'Save & Reload'}
+              {saving ? 'Saving…' : 'Save'}
             </button>
           </div>
         </div>

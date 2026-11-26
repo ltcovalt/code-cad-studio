@@ -18,7 +18,7 @@
 <script lang="ts">
   import type { Snippet } from 'svelte';
   import * as api from '../lib/api';
-  import { pathBasename, pathsEqual, suggestLibraryName } from '../lib/paths';
+  import { pathBasename, pathDirname, pathsEqual, suggestLibraryName } from '../lib/paths';
   import { studio } from '../lib/studioState.svelte';
 
   interface Props {
@@ -81,12 +81,33 @@
     return true;
   }
 
+  const LAST_BROWSE_DIR_KEY = 'code-cad-last-library-browse-dir';
+
+  function getLastBrowseDir(): string {
+    try {
+      return localStorage.getItem(LAST_BROWSE_DIR_KEY) ?? '';
+    } catch {
+      return '';
+    }
+  }
+
+  function setLastBrowseDir(dir: string): void {
+    if (!dir) return;
+    try {
+      localStorage.setItem(LAST_BROWSE_DIR_KEY, dir);
+    } catch {
+      // ignore storage errors
+    }
+  }
+
   async function handleAddFolder() {
     onError?.('');
     try {
-      const lastPath = libraries[libraries.length - 1]?.path ?? '';
-      const resp = await api.browseProject(lastPath);
+      const startDir =
+        getLastBrowseDir() || (libraries[0]?.path ? pathDirname(libraries[0].path) : '');
+      const resp = await api.browseProject(startDir);
       if (!resp.cancelled && resp.path) {
+        setLastBrowseDir(pathDirname(resp.path));
         await appendLibraryPath(resp.path);
       }
     } catch (err) {

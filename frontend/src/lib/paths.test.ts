@@ -2,6 +2,7 @@ import { describe, expect, it } from 'vitest';
 import {
   normalizePathKey,
   pathBasename,
+  pathDirname,
   pathParent,
   pathsEqual,
   revealActionLabel,
@@ -146,6 +147,19 @@ describe('suggestLibraryName', () => {
   it('falls back to Library when path has no basename', () => {
     expect(suggestLibraryName('/', [])).toBe('Library');
     expect(suggestLibraryName('C:\\', ['Library'])).toBe('Library (2)');
+  });
+});
+
+describe('pathDirname', () => {
+  it('returns the parent directory path for POSIX and Windows paths', () => {
+    expect(pathDirname('/home/luke/repos/code-cad')).toBe('/home/luke/repos');
+    expect(pathDirname('/home/luke/repos/code-cad/')).toBe('/home/luke/repos');
+    expect(pathDirname('C:\\Users\\luke\\Documents\\code-cad')).toBe('C:\\Users\\luke\\Documents');
+    expect(pathDirname('C:\\code-cad')).toBe('C:\\');
+    expect(pathDirname('/code-cad')).toBe('/');
+    expect(pathDirname('/')).toBe('');
+    expect(pathDirname('C:\\')).toBe('');
+    expect(pathDirname('')).toBe('');
   });
 });
 

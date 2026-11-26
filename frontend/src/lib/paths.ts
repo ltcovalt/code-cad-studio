@@ -57,6 +57,23 @@ export function pathBasename(p: string): string {
 }
 
 /**
+ * Returns the parent directory path for either POSIX or Windows paths.
+ * Returns `''` for empty strings, root `/`, or bare Windows drive roots like `C:\`.
+ */
+export function pathDirname(p: string): string {
+  const clean = p.trim().replace(/[\\/]+$/, '');
+  if (!clean || WINDOWS_DRIVE_ONLY_RE.test(clean)) return '';
+  const idx = Math.max(clean.lastIndexOf('/'), clean.lastIndexOf('\\'));
+  if (idx < 0) return '';
+  if (idx === 0) return clean[0];
+  const parent = clean.slice(0, idx);
+  if (WINDOWS_DRIVE_ONLY_RE.test(parent)) {
+    return `${parent}${clean[idx]}`;
+  }
+  return parent;
+}
+
+/**
  * Returns the parent directory name (second-to-last segment) for disambiguating
  * colliding library names, or `''` if none exists.
  */

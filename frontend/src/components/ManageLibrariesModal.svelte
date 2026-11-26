@@ -22,7 +22,6 @@
   let exportDir = $state('');
   let resolvedExportDir = $state('');
   let saving = $state(false);
-  let savedBanner = $state(false);
   let formError = $state('');
 
   let busy = $derived(saving);
@@ -37,7 +36,6 @@
     }));
     exportDir = studio.config.export_dir ?? '';
     resolvedExportDir = studio.resolvedExportDir;
-    savedBanner = false;
     formError = '';
   }
 
@@ -78,7 +76,6 @@
       );
       if (!resp.cancelled && resp.path) {
         exportDir = resp.path;
-        savedBanner = false;
       }
     } catch (err) {
       formError = err instanceof Error ? err.message : String(err);
@@ -88,7 +85,6 @@
   async function handleSubmit(e: SubmitEvent) {
     e.preventDefault();
     saving = true;
-    savedBanner = false;
     formError = '';
     try {
       const payloadLibs = buildPayloadLibraries();
@@ -100,14 +96,7 @@
       exportDir = resp.config.export_dir ?? '';
       resolvedExportDir = resp.resolved_export_dir;
       await studio.applySavedConfig(resp);
-      libraries = (resp.config.libraries ?? []).map((lib) => ({
-        uid: nextLibraryDraftUid(),
-        id: lib.id,
-        name: lib.name,
-        path: lib.path,
-        modelCount: countModelsForLibrary(lib.id),
-      }));
-      savedBanner = true;
+      studio.librariesOpen = false;
     } catch (err) {
       formError = err instanceof Error ? err.message : String(err);
     } finally {
@@ -205,7 +194,6 @@
         reorderable={true}
         libraryErrors={studio.libraryErrors}
         {busy}
-        onChange={() => (savedBanner = false)}
         onError={(msg) => (formError = msg)}
       >
         {#snippet emptyState()}
@@ -228,7 +216,6 @@
             type="text"
             bind:value={exportDir}
             disabled={busy}
-            oninput={() => (savedBanner = false)}
             class="input input-bordered input-sm join-item w-full font-mono text-xs"
             placeholder="Per-library default (<library>/exports)"
           />
@@ -249,10 +236,6 @@
         <Alert variant="error">{formError}</Alert>
       {/if}
 
-      {#if savedBanner}
-        <Alert variant="success">Libraries saved and reloaded.</Alert>
-      {/if}
-
       <div class="flex justify-end gap-2 pt-2">
         <button
           type="button"
@@ -260,10 +243,10 @@
           disabled={busy}
           onclick={closeModal}
         >
-          Close
+          Cancel
         </button>
         <button type="submit" class="btn btn-sm btn-primary" disabled={busy}>
-          {saving ? 'Saving...' : 'Save & Reload'}
+          {saving ? 'Saving…' : 'Save'}
         </button>
       </div>
     </form>
