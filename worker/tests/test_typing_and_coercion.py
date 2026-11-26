@@ -4,7 +4,7 @@ from dataclasses import dataclass, field
 import types
 from typing import Optional
 
-from params import default_preset, param, param_list
+from params import default_preset, group, param, param_list
 import worker
 
 
@@ -185,3 +185,41 @@ def test_safe_get_type_hints_preserves_siblings_with_type_checking_field() -> No
     assert fn_by_name["a"]["type"] == "int"
     assert fn_by_name["a"]["nullable"] is True
     assert fn_by_name["a"]["default"] is None
+
+
+@dataclass
+class _OptSubGroup:
+    length: float = 10.0
+    ribs: bool = True
+
+
+@dataclass
+class _NullableGroupParent:
+    enabled_by_default: _OptSubGroup | None = group(_OptSubGroup)
+    disabled_by_default: _OptSubGroup | None = group(_OptSubGroup, enabled=False)
+
+
+def test_nullable_group_introspection_and_coercion() -> None:
+    fields, defaults = worker._introspect_dataclass(_NullableGroupParent)
+    by_name = {f["name"]: f for f in fields}
+
+    assert defaults["enabled_by_default"] == {"length": 10.0, "ribs": True}
+    assert defaults["disabled_by_default"] is None
+
+    assert by_name["enabled_by_default"]["nullable"] is True
+    assert by_name["enabled_by_default"]["default"] == {"length": 10.0, "ribs": True}
+    assert by_name["enabled_by_default"]["group_defaults"] == {"length": 10.0, "ribs": True}
+
+    assert by_name["disabled_by_default"]["nullable"] is True
+    assert by_name["disabled_by_default"]["default"] is None
+    assert by_name["disabled_by_default"]["group_defaults"] == {"length": 10.0, "ribs": True}
+
+    inst = worker._instantiate_dataclass(
+        _NullableGroupParent,
+        {
+            "enabled_by_default": None,
+            "disabled_by_default": {"length": "14.5", "ribs": False},
+        },
+    )
+    assert inst.enabled_by_default is None
+    assert inst.disabled_by_default == _OptSubGroup(length=14.5, ribs=False)

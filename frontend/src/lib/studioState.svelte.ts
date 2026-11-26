@@ -4,12 +4,20 @@ import type { CadViewportController } from './cadViewer';
 import { buildModelTree, collectFolderKeys, type TreeNode } from './modelTree';
 import {
   deepClone,
+  extractComponentPresetSelections,
+  getGroupDefaultsForField,
+  getParamByPath,
+  isPlainObject,
   mergeWithDefaults,
+  normalizeComponentPresetsForSave,
   normalizeParamsWithFields,
   paramsEqual,
+  resolveComponentPresetParams,
+  resolvePresetParams,
   setParamByPath,
 } from './params';
 import type {
+  ComponentPresetBundle,
   Config,
   ConfigResponse,
   ExportFormat,
@@ -187,6 +195,8 @@ export class StudioState {
   defaults = $state<ParamsRecord>({});
   params = $state<ParamsRecord>({});
   presets = $state<Preset[]>([]);
+  components = $state<Record<string, ComponentPresetBundle>>({});
+  selectedComponentPresets = $state<Record<string, string>>({});
   selectedPresetKey = $state('default');
   defaultPresetKey = $state('');
   defaultExportFilename = $state('');
@@ -199,13 +209,36 @@ export class StudioState {
     this.presets.find((p) => p.key === this.selectedPresetKey) ?? null
   );
 
-  presetDefaults = $derived.by<ParamsRecord>(() => {
-    const found = this.selectedPreset;
-    const merged = found ? mergeWithDefaults(this.defaults, found.params) : deepClone(this.defaults);
-    return normalizeParamsWithFields(merged, this.fields);
-  });
+  presetDefaults = $derived.by<ParamsRecord>(() =>
+    resolvePresetParams(this.defaults, this.fields, this.selectedPreset, this.components)
+  );
 
-  paramsModified = $derived(!paramsEqual(this.params, this.presetDefaults));
+  presetComponentPresets = $derived.by<Record<string, string>>(() =>
+    extractComponentPresetSelections(this.selectedPreset, this.fields)
+  );
+
+  effectiveComponentPresets = $derived.by<Record<string, string>>(() =>
+    normalizeComponentPresetsForSave(
+      this.selectedComponentPresets,
+      this.params,
+      this.defaults,
+      this.fields
+    )
+  );
+
+  effectivePresetComponentPresets = $derived.by<Record<string, string>>(() =>
+    normalizeComponentPresetsForSave(
+      this.presetComponentPresets,
+      this.presetDefaults,
+      this.defaults,
+      this.fields
+    )
+  );
+
+  paramsModified = $derived(
+    !paramsEqual(this.params, this.presetDefaults) ||
+      !paramsEqual(this.effectiveComponentPresets, this.effectivePresetComponentPresets)
+  );
 
   // Render & status
   rendering = $state(false);
@@ -216,7 +249,15 @@ export class StudioState {
 
   private viewport: CadViewportController | null = null;
   private pendingRender: { modelId: string; shapes: unknown; resetCamera: boolean } | null = null;
-  private paramMemory = new Map<string, { params: ParamsRecord; selectedPresetKey: string }>();
+  private paramMemory = new Map<
+    string,
+    {
+      params: ParamsRecord;
+      selectedPresetKey: string;
+      selectedComponentPresets: Record<string, string>;
+    }
+  >();
+  private nullableGroupMemory = new Map<string, ParamsRecord>();
   private latestRenderSeq = 0;
   private renderAbort: AbortController | null = null;
   private lastRenderedKey = '';
@@ -433,6 +474,9 @@ export class StudioState {
     this.defaults = {};
     this.params = {};
     this.presets = [];
+    this.components = {};
+    this.selectedComponentPresets = {};
+    this.nullableGroupMemory.clear();
     this.defaultPresetKey = '';
     this.selectedPresetKey = 'default';
     this.defaultExportFilename = '';
@@ -540,6 +584,7 @@ export class StudioState {
         this.paramMemory.set(this.activeModelId, {
           params: deepClone(this.params),
           selectedPresetKey: this.selectedPresetKey,
+          selectedComponentPresets: { ...this.selectedComponentPresets },
         });
       } else {
         this.paramMemory.delete(this.activeModelId);
@@ -547,6 +592,9 @@ export class StudioState {
     }
 
     const isDifferentModel = this.activeModelId !== modelId;
+    if (isDifferentModel) {
+      this.nullableGroupMemory.clear();
+    }
     this.activeModelId = modelId;
     this.modelLoading = true;
     this.modelLoadError = '';
@@ -597,6 +645,7 @@ export class StudioState {
       this.fields = resp.fields ?? [];
       this.defaults = deepClone(resp.defaults ?? {});
       this.presets = resp.presets ?? [];
+      this.components = resp.components ?? {};
       this.defaultPresetKey = resp.default_preset_key ?? '';
 
       const mem = this.paramMemory.get(modelId);
@@ -609,8 +658,13 @@ export class StudioState {
               ? this.defaultPresetKey
               : 'default';
         this.selectedPresetKey = memPreset;
+        const foundMemPreset = this.presets.find((p) => p.key === memPreset) ?? null;
+        this.selectedComponentPresets = {
+          ...extractComponentPresetSelections(foundMemPreset, this.fields),
+          ...(mem.selectedComponentPresets ?? {}),
+        };
         this.params = normalizeParamsWithFields(
-          mergeWithDefaults(this.defaults, mem.params),
+          mergeWithDefaults(this.defaults, mem.params, this.fields),
           this.fields
         );
       } else {
@@ -619,13 +673,12 @@ export class StudioState {
           : undefined;
         if (pinned) {
           this.selectedPresetKey = pinned.key;
-          this.params = normalizeParamsWithFields(
-            mergeWithDefaults(this.defaults, pinned.params),
-            this.fields
-          );
+          this.selectedComponentPresets = extractComponentPresetSelections(pinned, this.fields);
+          this.params = resolvePresetParams(this.defaults, this.fields, pinned, this.components);
         } else {
           this.selectedPresetKey = 'default';
-          this.params = normalizeParamsWithFields(deepClone(this.defaults), this.fields);
+          this.selectedComponentPresets = extractComponentPresetSelections(null, this.fields);
+          this.params = resolvePresetParams(this.defaults, this.fields, null, this.components);
         }
       }
 
@@ -661,12 +714,70 @@ export class StudioState {
     const found = this.presets.find((p) => p.key === presetKey);
     this.selectedPresetKey = found ? found.key : 'default';
     this.exportFilenameEdited = false;
-    const next = found
-      ? mergeWithDefaults(this.defaults, found.params)
-      : deepClone(this.defaults);
-    this.params = normalizeParamsWithFields(next, this.fields);
+    this.nullableGroupMemory.clear();
+    this.selectedComponentPresets = extractComponentPresetSelections(found ?? null, this.fields);
+    this.params = resolvePresetParams(this.defaults, this.fields, found ?? null, this.components);
     if (this.activeModelId) {
       this.paramMemory.delete(this.activeModelId);
+    }
+    void this.triggerRender(false);
+  }
+
+  selectComponentPreset(groupPath: string, componentId: string, presetKey: string): void {
+    const normalizedKey = presetKey.trim() || 'default';
+    const currentGroup = getParamByPath(this.params, groupPath);
+    const fallback = isPlainObject(currentGroup) ? currentGroup : {};
+    const resolved = resolveComponentPresetParams(
+      componentId,
+      normalizedKey,
+      fallback,
+      this.components
+    );
+    this.selectedComponentPresets = {
+      ...this.selectedComponentPresets,
+      [groupPath]: normalizedKey,
+    };
+    this.params = setParamByPath(this.params, groupPath, resolved);
+    if (this.debounceTimer) {
+      clearTimeout(this.debounceTimer);
+      this.debounceTimer = null;
+    }
+    void this.triggerRender(false);
+  }
+
+  resetComponentGroupToPreset(groupPath: string, componentId: string): void {
+    const activeKey = this.selectedComponentPresets[groupPath] || 'default';
+    this.selectComponentPreset(groupPath, componentId, activeKey);
+  }
+
+  toggleNullableGroup(groupPath: string, field: ParamField, enabled: boolean): void {
+    const current = getParamByPath(this.params, groupPath);
+    if (!enabled) {
+      if (isPlainObject(current)) {
+        this.nullableGroupMemory.set(groupPath, deepClone(current));
+      }
+      this.params = setParamByPath(this.params, groupPath, null);
+    } else {
+      const remembered = this.nullableGroupMemory.get(groupPath);
+      let nextVal: ParamsRecord;
+      if (remembered) {
+        nextVal = deepClone(remembered);
+      } else if (field.component_id) {
+        const compKey = this.selectedComponentPresets[groupPath] || 'default';
+        nextVal = resolveComponentPresetParams(
+          field.component_id,
+          compKey,
+          getGroupDefaultsForField(field),
+          this.components
+        );
+      } else {
+        nextVal = getGroupDefaultsForField(field);
+      }
+      this.params = setParamByPath(this.params, groupPath, nextVal);
+    }
+    if (this.debounceTimer) {
+      clearTimeout(this.debounceTimer);
+      this.debounceTimer = null;
     }
     void this.triggerRender(false);
   }
@@ -844,22 +955,31 @@ export class StudioState {
     const modelId = this.activeModelId;
     if (!modelId) return null;
 
+    const componentPresets = this.effectiveComponentPresets;
     const resp = await api.savePreset(modelId, {
       label,
       description,
       scope,
       full_snapshot: fullSnapshot,
       params: this.params,
+      ...(Object.keys(componentPresets).length > 0
+        ? { component_presets: componentPresets }
+        : {}),
       ...(verification ? { verification } : {}),
     });
     if (!resp.ok) {
       throw new Error(resp.error || 'Failed to save preset');
+    }
+    if (resp.components) {
+      this.components = resp.components;
     }
     if (resp.presets) {
       this.presets = resp.presets;
     }
     if (resp.selected_key) {
       this.selectedPresetKey = resp.selected_key;
+      const savedPreset = this.presets.find((p) => p.key === resp.selected_key) ?? null;
+      this.selectedComponentPresets = extractComponentPresetSelections(savedPreset, this.fields);
     }
     if (resp.preset_save_scope) {
       this.config = { ...this.config, preset_save_scope: resp.preset_save_scope };
@@ -908,13 +1028,17 @@ export class StudioState {
     if (this.selectedPresetKey === key) {
       const stillPresent = this.presets.find((p) => p.key === key);
       if (stillPresent) {
-        this.params = normalizeParamsWithFields(
-          mergeWithDefaults(this.defaults, stillPresent.params),
-          this.fields
+        this.selectedComponentPresets = extractComponentPresetSelections(stillPresent, this.fields);
+        this.params = resolvePresetParams(
+          this.defaults,
+          this.fields,
+          stillPresent,
+          this.components
         );
       } else {
         this.selectedPresetKey = 'default';
-        this.params = normalizeParamsWithFields(deepClone(this.defaults), this.fields);
+        this.selectedComponentPresets = extractComponentPresetSelections(null, this.fields);
+        this.params = resolvePresetParams(this.defaults, this.fields, null, this.components);
       }
       this.paramMemory.delete(modelId);
       void this.triggerRender(false);
@@ -1003,10 +1127,12 @@ export class StudioState {
       this.modelDescription = schemaResp.description ?? '';
       this.fields = schemaResp.fields ?? [];
       this.defaults = deepClone(schemaResp.defaults ?? {});
-      this.params = normalizeParamsWithFields(deepClone(schemaResp.defaults ?? {}), this.fields);
+      this.components = schemaResp.components ?? {};
       this.presets = schemaResp.presets ?? [];
       this.defaultPresetKey = schemaResp.default_preset_key ?? '';
       this.selectedPresetKey = 'default';
+      this.selectedComponentPresets = extractComponentPresetSelections(null, this.fields);
+      this.params = resolvePresetParams(this.defaults, this.fields, null, this.components);
       this.lastRenderedKey = '';
       this.paramMemory.delete(modelId);
       void this.triggerRender(false, true);
@@ -1271,8 +1397,9 @@ export class StudioState {
               this.modelDescription = resp.description ?? '';
               this.fields = resp.fields ?? [];
               this.defaults = deepClone(resp.defaults ?? {});
+              this.components = resp.components ?? {};
               this.params = normalizeParamsWithFields(
-                mergeWithDefaults(this.defaults, previousParams),
+                mergeWithDefaults(this.defaults, previousParams, this.fields),
                 this.fields
               );
               this.presets = resp.presets ?? [];
@@ -1283,6 +1410,12 @@ export class StudioState {
               ) {
                 this.selectedPresetKey = 'default';
               }
+              const activePreset =
+                this.presets.find((p) => p.key === this.selectedPresetKey) ?? null;
+              this.selectedComponentPresets = {
+                ...extractComponentPresetSelections(activePreset, this.fields),
+                ...this.selectedComponentPresets,
+              };
               this.modelLoadError = '';
               this.modelLoadTraceback = '';
               this.lastRenderedKey = '';
@@ -1309,12 +1442,31 @@ export class StudioState {
   private async handlePresetsChanged(): Promise<void> {
     const modelId = this.activeModelId;
     if (!modelId) return;
+    const wasModified = this.paramsModified;
     try {
       const resp = await api.getPresets(modelId);
       if (this.activeModelId === modelId && resp.ok) {
         this.presets = resp.presets;
+        if (resp.components) {
+          this.components = resp.components;
+        }
         if (resp.default_preset_key !== undefined) {
           this.defaultPresetKey = resp.default_preset_key;
+        }
+        // If user has no local unsaved edits, re-resolve active preset so updated component presets apply immediately.
+        if (!wasModified) {
+          const activePreset =
+            this.presets.find((p) => p.key === this.selectedPresetKey) ?? null;
+          const nextParams = resolvePresetParams(
+            this.defaults,
+            this.fields,
+            activePreset,
+            this.components
+          );
+          if (!paramsEqual(this.params, nextParams)) {
+            this.params = nextParams;
+            void this.triggerRender(false);
+          }
         }
       }
     } catch {

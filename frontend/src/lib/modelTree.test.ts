@@ -122,4 +122,56 @@ describe('modelTree helpers', () => {
     const tree = buildModelTree(libs, models, {}, '');
     expect(collectFolderKeys(tree)).toEqual(['folder:demo:a', 'folder:demo:a/b']);
   });
+
+  it('groups models and components into symmetrical Models and Components sections when components exist', () => {
+    const libs: Library[] = [{ id: 'cad', name: 'CAD', path: '/cad' }];
+    const models: ModelInfo[] = [
+      makeModel({
+        id: 'cad/can_lid',
+        name: 'Can Lid',
+        library_id: 'cad',
+        category: 'model',
+      }),
+      makeModel({
+        id: 'cad/components/pull_tab',
+        name: 'Pull Tab',
+        library_id: 'cad',
+        category: 'component',
+      }),
+      makeModel({
+        id: 'cad/components/hardware/knob',
+        name: 'Knob',
+        library_id: 'cad',
+        category: 'component',
+        folders: ['hardware'],
+        folder_labels: ['Hardware'],
+      }),
+    ];
+
+    const tree = buildModelTree(libs, models, {}, '');
+    expect(tree).toHaveLength(2);
+    expect(tree[0].kind).toBe('folder');
+    if (tree[0].kind === 'folder') {
+      expect(tree[0].nodeType).toBe('models');
+      expect(tree[0].label).toBe('Models');
+      expect(tree[0].modelCount).toBe(1);
+      expect(tree[0].children.map((c) => (c.kind === 'model' ? c.model.name : c.label))).toEqual([
+        'Can Lid',
+      ]);
+    }
+    expect(tree[1].kind).toBe('folder');
+    if (tree[1].kind === 'folder') {
+      expect(tree[1].nodeType).toBe('components');
+      expect(tree[1].label).toBe('Components');
+      expect(tree[1].modelCount).toBe(2);
+      expect(tree[1].children.map((c) => (c.kind === 'folder' ? c.label : c.model.name))).toEqual([
+        'Hardware',
+        'Pull Tab',
+      ]);
+    }
+
+    const compOnly = buildModelTree(libs, models, {}, 'component');
+    expect(compOnly).toHaveLength(1);
+    expect(compOnly[0].kind === 'folder' && compOnly[0].nodeType).toBe('components');
+  });
 });

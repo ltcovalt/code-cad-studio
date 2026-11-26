@@ -517,12 +517,13 @@ class FullMetaParams:
 def create_full_meta(params: FullMetaParams):
     return b3d.Box(10, 10, 10)
 `,
-		"utils/helper_not_model.py":       "def helper(): return 1\n",
-		"components/comp_not_model.py":    "def create_part(): pass\n",
-		"exports/exported_not_model.py":   "def create_x(): pass\n",
-		"__pycache__/cached_not_model.py": "def create_y(): pass\n",
-		".venv/venv_not_model.py":         "def create_z(): pass\n",
-		"tests/test_not_model.py":         "def create_w(): pass\n",
+		"utils/helper_not_model.py":             "def helper(): return 1\n",
+		"components/comp_helper_not_cad.py":     "CONST = 123\n",
+		"components/sample_comp/sample_comp.py": "def create_sample_comp(): pass\n",
+		"exports/exported_not_model.py":         "def create_x(): pass\n",
+		"__pycache__/cached_not_model.py":       "def create_y(): pass\n",
+		".venv/venv_not_model.py":               "def create_z(): pass\n",
+		"tests/test_not_model.py":               "def create_w(): pass\n",
 	})
 	// Copy canonical params.py into libDir/utils/params.py
 	paramsSrc, err := os.ReadFile(repoPath("examples", "demo_project", "utils", "params.py"))
@@ -589,13 +590,17 @@ def create_full_meta(params: FullMetaParams):
 		t.Fatalf("syntax_error expected kind=error & non-empty parse_error, got %v", synModel)
 	}
 
-	// T1-F5-05: non-model dir filtering
-	for _, forbidden := range []string{"helper_not_model", "comp_not_model", "exported_not_model", "cached_not_model", "venv_not_model", "test_not_model"} {
+	// T1-F5-05: non-model dir filtering & component discovery
+	for _, forbidden := range []string{"helper_not_model", "comp_helper_not_cad", "exported_not_model", "cached_not_model", "venv_not_model", "test_not_model"} {
 		for id := range byID {
 			if strings.Contains(id, forbidden) {
 				t.Fatalf("non-model file %q leaked into GET /models as %q", forbidden, id)
 			}
 		}
+	}
+	compItem, ok := byID["mylib/components/sample_comp"]
+	if !ok || jsonStr(compItem, "category") != "component" {
+		t.Fatalf("expected components/sample_comp discovered with category=component, got %v", compItem)
 	}
 
 	// T1-F5-06: AST cache invalidation by mtime/size

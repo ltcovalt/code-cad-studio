@@ -1,6 +1,12 @@
 <script lang="ts">
   import { untrack } from 'svelte';
-  import { mergeWithDefaults, normalizeParamsWithFields, paramsEqual } from '../lib/params';
+  import {
+    collectComponentFields,
+    extractComponentPresetSelections,
+    normalizeComponentPresetsForSave,
+    paramsEqual,
+    resolvePresetParams,
+  } from '../lib/params';
   import {
     normalizePresetLabel,
     slugifyPresetLabel,
@@ -69,11 +75,40 @@
 
   const matchingParamsChanged = $derived.by(() => {
     if (!matchingExisting) return false;
-    const existingParams = normalizeParamsWithFields(
-      mergeWithDefaults(studio.defaults, matchingExisting.params),
+    const existingParams = resolvePresetParams(
+      studio.defaults,
+      studio.fields,
+      matchingExisting,
+      studio.components
+    );
+    const existingCompPresets = normalizeComponentPresetsForSave(
+      extractComponentPresetSelections(matchingExisting, studio.fields),
+      existingParams,
+      studio.defaults,
       studio.fields
     );
-    return !paramsEqual(studio.params, existingParams);
+    return (
+      !paramsEqual(studio.params, existingParams) ||
+      !paramsEqual(studio.effectiveComponentPresets, existingCompPresets)
+    );
+  });
+
+  const userScopedComponentWarnings = $derived.by<string[]>(() => {
+    if (scope !== 'project') return [];
+    const warnings: string[] = [];
+    const activeRefs = studio.effectiveComponentPresets;
+    for (const f of collectComponentFields(studio.fields)) {
+      const refKey = activeRefs[f.path];
+      if (!refKey || refKey === 'default' || !f.component_id) continue;
+      const bundle = studio.components[f.component_id];
+      const matched = bundle?.presets.find((p) => p.key === refKey);
+      if (matched && matched.source === 'user') {
+        warnings.push(
+          `${f.label} references a user-only component preset ("${matched.label}") that won't be shared in presets.json.`
+        );
+      }
+    }
+    return warnings;
   });
 
   const isAlreadyDefault = $derived(
@@ -394,6 +429,13 @@
               </span>
             </label>
           </div>
+          {#if userScopedComponentWarnings.length > 0}
+            <Alert variant="warning" title="Local component preset referenced">
+              {#each userScopedComponentWarnings as msg (msg)}
+                <p>{msg}</p>
+              {/each}
+            </Alert>
+          {/if}
         </fieldset>
 
         <div class="rounded-box bg-base-200/60 border border-base-300 p-2.5 space-y-2">

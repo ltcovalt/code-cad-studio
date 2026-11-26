@@ -8,6 +8,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ## [Unreleased]
 
 ### Added
+- **First-Class Component Management & Component Preset References:** Studio now
+  discovers parametric components under `components/` into a dedicated
+  **Components** sidebar section with full 3D preview, parameter editing,
+  presets, verification badges, and `update-defaults`. Parent models that compose
+  a component (or another model) via `group(...)` automatically link to it,
+  rendering an inline component preset selector, jump-to-component link,
+  nullable group toggles (`T | None = group(..., enabled=False)`), and
+  preset-by-name references (`component_presets` in `presets.json`) that store
+  only sparse per-field overrides instead of duplicating component parameters.
 - **Auto-Bootstrapped `uv` & Managed Python 3.14 Setup:** First-run environment
   setup now automatically downloads a SHA-256-verified `uv` release when `uv` is
   not already installed and provisions a shared managed Python `3.14` virtual

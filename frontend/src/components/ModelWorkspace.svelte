@@ -163,8 +163,18 @@
               groupParams={studio.params}
               presetDefaults={studio.presetDefaults}
               showDescriptions={studio.showDescriptions}
+              components={studio.components}
+              selectedComponentPresets={studio.selectedComponentPresets}
+              presetComponentPresets={studio.presetComponentPresets}
               onUpdate={(path, val, mode) => studio.updateParam(path, val, mode)}
               onPreviewCommit={() => studio.commitPreviewIfStale()}
+              onToggleNullableGroup={(path, f, enabled) =>
+                studio.toggleNullableGroup(path, f, enabled)}
+              onSelectComponentPreset={(path, compId, presetKey) =>
+                studio.selectComponentPreset(path, compId, presetKey)}
+              onResetComponentGroup={(path, compId) =>
+                studio.resetComponentGroupToPreset(path, compId)}
+              onOpenComponent={(compId) => void studio.selectModel(compId)}
             />
           {/each}
         {/if}

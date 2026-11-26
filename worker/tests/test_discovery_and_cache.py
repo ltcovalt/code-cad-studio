@@ -327,3 +327,130 @@ def test_tier1_show_list_flattening_and_pos_exclusion(tmp_path: Path, monkeypatc
 
     _, res_pos, _, _ = state._build_shape("lib/with_pos", {})
     assert isinstance(res_pos, _FakeShape)
+
+
+def test_component_discovery_and_schema_linking(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    lib_dir = tmp_path / "lib"
+    (lib_dir / "utils").mkdir(parents=True)
+    (lib_dir / "components" / "pull_tab").mkdir(parents=True)
+    (lib_dir / "components" / "hardware" / "knob").mkdir(parents=True)
+    (lib_dir / "models" / "can_lid").mkdir(parents=True)
+    (lib_dir / "models" / "spacer").mkdir(parents=True)
+
+    params_src = (Path(__file__).resolve().parents[1] / "params.py").read_text(encoding="utf-8")
+    (lib_dir / "utils" / "params.py").write_text(params_src, encoding="utf-8")
+    (lib_dir / "components" / "__init__.py").write_text("", encoding="utf-8")
+    (lib_dir / "components" / "helper.py").write_text("VALUE = 42\n", encoding="utf-8")
+
+    (lib_dir / "components" / "pull_tab" / "__init__.py").write_text(
+        "from .pull_tab import PullTabParams, create_pull_tab\n",
+        encoding="utf-8",
+    )
+    (lib_dir / "components" / "pull_tab" / "pull_tab.py").write_text(
+        "from dataclasses import dataclass\n"
+        "from utils.params import param\n"
+        "@dataclass\n"
+        "class PullTabParams:\n"
+        "    length: float = param(6.0, unit='mm')\n"
+        "    width: float = param(16.0, unit='mm')\n"
+        "def create_pull_tab(params: PullTabParams):\n"
+        "    return params\n",
+        encoding="utf-8",
+    )
+    (lib_dir / "components" / "hardware" / "knob" / "knob.py").write_text(
+        "from dataclasses import dataclass\n"
+        "from utils.params import param\n"
+        "@dataclass\n"
+        "class KnobParams:\n"
+        "    diameter: float = param(20.0, unit='mm')\n"
+        "def create_knob(params: KnobParams):\n"
+        "    return params\n",
+        encoding="utf-8",
+    )
+    (lib_dir / "models" / "spacer" / "spacer.py").write_text(
+        "from dataclasses import dataclass\n"
+        "from utils.params import param\n"
+        "@dataclass\n"
+        "class SpacerParams:\n"
+        "    thickness: float = param(3.0, unit='mm')\n"
+        "def create_spacer(params: SpacerParams):\n"
+        "    return params\n",
+        encoding="utf-8",
+    )
+    (lib_dir / "models" / "can_lid" / "can_lid.py").write_text(
+        "from __future__ import annotations\n"
+        "from dataclasses import dataclass\n"
+        "from components.pull_tab import PullTabParams\n"
+        "from models.spacer.spacer import SpacerParams\n"
+        "from utils.params import group, param\n"
+        "@dataclass\n"
+        "class CoreParams:\n"
+        "    diameter: float = param(54.0, unit='mm')\n"
+        "@dataclass\n"
+        "class CanLidParams:\n"
+        "    core: CoreParams = group(CoreParams)\n"
+        "    pull_tab: PullTabParams | None = group(PullTabParams)\n"
+        "    spacer: SpacerParams | None = group(SpacerParams, enabled=False)\n"
+        "def create_can_lid(params: CanLidParams):\n"
+        "    return params\n",
+        encoding="utf-8",
+    )
+
+    monkeypatch.setattr(worker, "_CAD_WARMUP_DONE", worker.threading.Event())
+    worker._CAD_WARMUP_DONE.set()
+    monkeypatch.setattr(worker, "_CAD_WARMUP_STARTED", True)
+
+    state = worker.WorkerState([{"id": "lib", "name": "Lib", "path": str(lib_dir)}])
+    try:
+        models, _ = state.discover_models()
+        by_id = {m["id"]: m for m in models}
+
+        # Non-CAD helper in components/ is still ignored; parametric components are discovered
+        assert "lib/components/helper" not in by_id
+        assert set(by_id.keys()) == {
+            "lib/can_lid",
+            "lib/spacer",
+            "lib/components/pull_tab",
+            "lib/components/hardware/knob",
+        }
+        assert by_id["lib/can_lid"]["category"] == "model"
+        assert by_id["lib/components/pull_tab"]["category"] == "component"
+        assert by_id["lib/components/pull_tab"]["folders"] == []
+        assert by_id["lib/components/pull_tab"]["presets_path"].endswith("components/pull_tab/presets.json")
+        assert by_id["lib/components/hardware/knob"]["category"] == "component"
+        assert by_id["lib/components/hardware/knob"]["folders"] == ["hardware"]
+
+        # Models sort ahead of components
+        assert [m["category"] for m in models] == ["model", "model", "component", "component"]
+
+        # Parent model schema automatically links both component and imported-model groups
+        schema = state.get_schema("lib/can_lid")
+        fields_by_name = {f["name"]: f for f in schema["fields"]}
+
+        assert "component_id" not in fields_by_name["core"]
+
+        pt_field = fields_by_name["pull_tab"]
+        assert pt_field["type"] == "group"
+        assert pt_field["nullable"] is True
+        assert pt_field["component_id"] == "lib/components/pull_tab"
+        assert pt_field["component_name"] == "Pull Tab"
+        assert pt_field["default"] == {"length": 6.0, "width": 16.0}
+        assert pt_field["group_defaults"] == {"length": 6.0, "width": 16.0}
+        assert schema["defaults"]["pull_tab"] == {"length": 6.0, "width": 16.0}
+
+        sp_field = fields_by_name["spacer"]
+        assert sp_field["type"] == "group"
+        assert sp_field["nullable"] is True
+        assert sp_field["component_id"] == "lib/spacer"
+        assert sp_field["component_name"] == "Spacer"
+        assert sp_field["default"] is None
+        assert sp_field["group_defaults"] == {"thickness": 3.0}
+        assert schema["defaults"]["spacer"] is None
+
+        # Update-defaults reports nullable group toggles cleanly as unsupported
+        plan = state.update_defaults("lib/can_lid", {"pull_tab": None, "spacer": {"thickness": 5.0}}, dry_run=True)
+        unsupported_by_path = {u["path"]: u for u in plan["unsupported"]}
+        assert unsupported_by_path["pull_tab"]["reason_code"] == "nullable_group_toggle"
+        assert unsupported_by_path["spacer"]["reason_code"] == "nullable_group_toggle"
+    finally:
+        state._evict_project_modules()

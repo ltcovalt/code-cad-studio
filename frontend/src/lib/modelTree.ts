@@ -3,7 +3,7 @@ import type { Library, ModelInfo } from './types';
 export interface TreeFolderNode {
   kind: 'folder';
   key: string;
-  nodeType: 'library' | 'category';
+  nodeType: 'library' | 'category' | 'models' | 'components';
   label: string;
   subtitle?: string;
   path?: string;
@@ -41,6 +41,7 @@ function modelMatchesTokens(model: ModelInfo, tokens: string[]): boolean {
     model.description,
     model.library_name,
     model.library_id,
+    model.category === 'component' ? 'component components' : '',
     ...(model.folders ?? []),
     ...(model.folder_labels ?? []),
   ]
@@ -49,8 +50,20 @@ function modelMatchesTokens(model: ModelInfo, tokens: string[]): boolean {
   return tokens.every((tok) => haystack.includes(tok));
 }
 
+function sectionRank(node: TreeNode): number {
+  if (node.kind === 'folder') {
+    if (node.nodeType === 'models') return 0;
+    if (node.nodeType === 'components') return 2;
+  }
+  return 1;
+}
+
 function sortTreeChildren(nodes: TreeNode[]): void {
   nodes.sort((a, b) => {
+    const rankDiff = sectionRank(a) - sectionRank(b);
+    if (rankDiff !== 0) {
+      return rankDiff;
+    }
     if (a.kind !== b.kind) {
       return a.kind === 'folder' ? -1 : 1;
     }
@@ -147,15 +160,52 @@ export function buildModelTree(
     };
 
     const folderMap = new Map<string, TreeFolderNode>();
+    const hasComponents = libModels.some((m) => m.category === 'component');
+    let modelsRoot: TreeFolderNode | null = null;
+    let componentsRoot: TreeFolderNode | null = null;
 
     for (const model of libModels) {
+      const isComponent = model.category === 'component';
+      let parent = rootNode;
+      let keyPrefix = `folder:${lib.id}:`;
+
+      if (isComponent) {
+        if (!componentsRoot) {
+          componentsRoot = {
+            kind: 'folder',
+            key: `components:${lib.id}`,
+            nodeType: 'components',
+            label: 'Components',
+            libraryId: lib.id,
+            children: [],
+            modelCount: 0,
+          };
+          rootNode.children.push(componentsRoot);
+        }
+        parent = componentsRoot;
+        keyPrefix = `comp-folder:${lib.id}:`;
+      } else if (hasComponents) {
+        if (!modelsRoot) {
+          modelsRoot = {
+            kind: 'folder',
+            key: `models:${lib.id}`,
+            nodeType: 'models',
+            label: 'Models',
+            libraryId: lib.id,
+            children: [],
+            modelCount: 0,
+          };
+          rootNode.children.push(modelsRoot);
+        }
+        parent = modelsRoot;
+      }
+
       const folders = model.folders ?? [];
       const labels = model.folder_labels ?? [];
-      let parent = rootNode;
 
       for (let i = 0; i < folders.length; i++) {
         const segPath = folders.slice(0, i + 1).join('/');
-        const folderKey = `folder:${lib.id}:${segPath}`;
+        const folderKey = `${keyPrefix}${segPath}`;
         let existing = folderMap.get(folderKey);
         if (!existing) {
           existing = {

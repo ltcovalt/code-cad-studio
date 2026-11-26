@@ -1458,7 +1458,8 @@ func (s *Server) handleGetModel(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	presetList, err := presets.ListStrict(modelID, schema.Model.Dir, schema.Defaults, schemaDefaultPresetMeta(schema))
+	schemaShape := buildSchemaShape(schema.Defaults, schema.Fields)
+	presetList, err := presets.ListStrict(modelID, schema.Model.Dir, schemaShape, schemaDefaultPresetMeta(schema))
 	if err != nil {
 		writeError(w, http.StatusUnprocessableEntity, "invalid_presets_file", err.Error())
 		return
@@ -1471,6 +1472,7 @@ func (s *Server) handleGetModel(w http.ResponseWriter, r *http.Request) {
 	if defaults == nil {
 		defaults = map[string]any{}
 	}
+	componentBundles := s.loadComponentBundles(r.Context(), modelID, fields)
 
 	cfg := s.cfgStore.Get()
 	defaultPresetKey := ""
@@ -1485,6 +1487,7 @@ func (s *Server) handleGetModel(w http.ResponseWriter, r *http.Request) {
 		"fields":             fields,
 		"defaults":           defaults,
 		"presets":            presetList,
+		"components":         componentBundles,
 		"default_preset_key": defaultPresetKey,
 	})
 }
@@ -1714,11 +1717,13 @@ func (s *Server) handleGetPresets(w http.ResponseWriter, r *http.Request) {
 		writeWorkerSchemaError(w, schema, err)
 		return
 	}
-	presetList, err := presets.ListStrict(modelID, schema.Model.Dir, schema.Defaults, schemaDefaultPresetMeta(schema))
+	schemaShape := buildSchemaShape(schema.Defaults, schema.Fields)
+	presetList, err := presets.ListStrict(modelID, schema.Model.Dir, schemaShape, schemaDefaultPresetMeta(schema))
 	if err != nil {
 		writeError(w, http.StatusUnprocessableEntity, "invalid_presets_file", err.Error())
 		return
 	}
+	componentBundles := s.loadComponentBundles(r.Context(), modelID, schema.Fields)
 	cfg := s.cfgStore.Get()
 	defaultPresetKey := ""
 	if cfg.DefaultPresets != nil {
@@ -1727,6 +1732,7 @@ func (s *Server) handleGetPresets(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusOK, map[string]any{
 		"ok":                 true,
 		"presets":            presetList,
+		"components":         componentBundles,
 		"default_preset_key": defaultPresetKey,
 	})
 }
@@ -1737,12 +1743,13 @@ func (s *Server) handleSavePreset(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	var req struct {
-		Label        string                `json:"label"`
-		Description  string                `json:"description"`
-		Scope        string                `json:"scope"`
-		FullSnapshot bool                  `json:"full_snapshot"`
-		Params       map[string]any        `json:"params"`
-		Verification *presets.Verification `json:"verification,omitempty"`
+		Label            string                `json:"label"`
+		Description      string                `json:"description"`
+		Scope            string                `json:"scope"`
+		FullSnapshot     bool                  `json:"full_snapshot"`
+		Params           map[string]any        `json:"params"`
+		ComponentPresets map[string]string     `json:"component_presets,omitempty"`
+		Verification     *presets.Verification `json:"verification,omitempty"`
 	}
 	if !decodeJSON(w, r, &req, false) {
 		return
@@ -1785,17 +1792,32 @@ func (s *Server) handleSavePreset(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	key, err := presets.Save(
-		modelID,
-		schema.Model.Dir,
-		label,
-		strings.TrimSpace(req.Description),
-		scope,
-		req.FullSnapshot,
+	schemaShape := buildSchemaShape(schema.Defaults, schema.Fields)
+	componentBundles := s.loadComponentBundles(r.Context(), modelID, schema.Fields)
+	normalizedCompPresets := normalizeModelComponentPresets(
+		req.ComponentPresets,
 		req.Params,
 		schema.Defaults,
-		verification,
+		schema.Fields,
 	)
+	effectiveDefaults := buildEffectiveSaveDefaults(
+		schema.Defaults,
+		schema.Fields,
+		normalizedCompPresets,
+		componentBundles,
+	)
+
+	key, err := presets.Save(modelID, schema.Model.Dir, presets.SaveOptions{
+		Label:            label,
+		Description:      strings.TrimSpace(req.Description),
+		Scope:            scope,
+		FullSnapshot:     req.FullSnapshot,
+		CurrentParams:    req.Params,
+		Defaults:         effectiveDefaults,
+		SchemaShape:      schemaShape,
+		ComponentPresets: normalizedCompPresets,
+		Verification:     verification,
+	})
 	if err != nil {
 		writeError(w, http.StatusUnprocessableEntity, "preset_save_error", err.Error())
 		return
@@ -1805,7 +1827,7 @@ func (s *Server) handleSavePreset(w http.ResponseWriter, r *http.Request) {
 		c.PresetSaveScope = scope
 	})
 
-	presetList, err := presets.ListStrict(modelID, schema.Model.Dir, schema.Defaults, schemaDefaultPresetMeta(schema))
+	presetList, err := presets.ListStrict(modelID, schema.Model.Dir, schemaShape, schemaDefaultPresetMeta(schema))
 	if err != nil {
 		writeError(w, http.StatusUnprocessableEntity, "invalid_presets_file", err.Error())
 		return
@@ -1814,6 +1836,7 @@ func (s *Server) handleSavePreset(w http.ResponseWriter, r *http.Request) {
 		"ok":                true,
 		"selected_key":      key,
 		"presets":           presetList,
+		"components":        componentBundles,
 		"preset_save_scope": scope,
 	})
 }
@@ -1865,7 +1888,7 @@ func (s *Server) handleSetPresetVerification(w http.ResponseWriter, r *http.Requ
 		return
 	}
 
-	presetList, err := presets.ListStrict(modelID, schema.Model.Dir, schema.Defaults, schemaDefaultPresetMeta(schema))
+	presetList, err := presets.ListStrict(modelID, schema.Model.Dir, buildSchemaShape(schema.Defaults, schema.Fields), schemaDefaultPresetMeta(schema))
 	if err != nil {
 		writeError(w, http.StatusUnprocessableEntity, "invalid_presets_file", err.Error())
 		return
@@ -1921,7 +1944,7 @@ func (s *Server) handleRenamePreset(w http.ResponseWriter, r *http.Request) {
 		defaultPresetKey = cfg.DefaultPresets[modelID]
 	}
 
-	presetList, err := presets.ListStrict(modelID, schema.Model.Dir, schema.Defaults, schemaDefaultPresetMeta(schema))
+	presetList, err := presets.ListStrict(modelID, schema.Model.Dir, buildSchemaShape(schema.Defaults, schema.Fields), schemaDefaultPresetMeta(schema))
 	if err != nil {
 		writeError(w, http.StatusUnprocessableEntity, "invalid_presets_file", err.Error())
 		return
@@ -1960,7 +1983,7 @@ func (s *Server) handleDeletePreset(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	presetList, err := presets.ListStrict(modelID, schema.Model.Dir, schema.Defaults, schemaDefaultPresetMeta(schema))
+	presetList, err := presets.ListStrict(modelID, schema.Model.Dir, buildSchemaShape(schema.Defaults, schema.Fields), schemaDefaultPresetMeta(schema))
 	if err != nil {
 		writeError(w, http.StatusUnprocessableEntity, "invalid_presets_file", err.Error())
 		return

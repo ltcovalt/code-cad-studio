@@ -5,12 +5,20 @@
   import {
     deepClone,
     evaluateWhen,
+    getGroupDefaultsForField,
     getParamByPath,
     isPlainObject,
     paramsEqual,
+    resolveComponentPresetParams,
+    setParamByPath,
     stepNumber,
   } from '../lib/params';
-  import type { ParamField, ParamsRecord, ParamUpdateMode } from '../lib/types';
+  import type {
+    ComponentPresetBundle,
+    ParamField,
+    ParamsRecord,
+    ParamUpdateMode,
+  } from '../lib/types';
 
   interface Props {
     field: ParamField;
@@ -18,8 +26,15 @@
     groupParams: ParamsRecord;
     presetDefaults: ParamsRecord;
     showDescriptions: boolean;
+    components?: Record<string, ComponentPresetBundle>;
+    selectedComponentPresets?: Record<string, string>;
+    presetComponentPresets?: Record<string, string>;
     onUpdate: (path: string, value: unknown, mode?: ParamUpdateMode) => void;
     onPreviewCommit?: () => void;
+    onToggleNullableGroup?: (path: string, field: ParamField, enabled: boolean) => void;
+    onSelectComponentPreset?: (path: string, componentId: string, presetKey: string) => void;
+    onResetComponentGroup?: (path: string, componentId: string) => void;
+    onOpenComponent?: (componentId: string) => void;
   }
 
   let {
@@ -28,19 +43,28 @@
     groupParams,
     presetDefaults,
     showDescriptions,
+    components = {},
+    selectedComponentPresets = {},
+    presetComponentPresets = {},
     onUpdate,
     onPreviewCommit,
+    onToggleNullableGroup,
+    onSelectComponentPreset,
+    onResetComponentGroup,
+    onOpenComponent,
   }: Props = $props();
 
   let isVisible = $derived(evaluateWhen(field.when, rootParams, groupParams));
 
   // For group fields
   let toggleChild = $derived(
-    field.type === 'group'
+    field.type === 'group' && !field.nullable
       ? (field.children?.find((c) => c.name === 'enabled' && c.type === 'bool' && !c.nullable) ??
           null)
       : null
   );
+  let isNullableGroup = $derived(field.type === 'group' && Boolean(field.nullable));
+  let isToggleableGroup = $derived(toggleChild !== null || isNullableGroup);
 
   let bodyChildren = $derived(
     field.type === 'group'
@@ -59,16 +83,95 @@
   );
 
   let childGroupParams = $derived<ParamsRecord>(
-    isPlainObject(currentValue) ? currentValue : {}
+    isPlainObject(currentValue) ? currentValue : getGroupDefaultsForField(field)
   );
 
   let toggleChecked = $derived(
-    toggleChild ? Boolean(getParamByPath(rootParams, toggleChild.path)) : true
+    toggleChild
+      ? Boolean(getParamByPath(rootParams, toggleChild.path))
+      : isNullableGroup
+        ? currentValue !== null && currentValue !== undefined
+        : true
   );
   let toggleDefaultValue = $derived(
-    toggleChild ? Boolean(getParamByPath(presetDefaults, toggleChild.path)) : true
+    toggleChild
+      ? Boolean(getParamByPath(presetDefaults, toggleChild.path))
+      : isNullableGroup
+        ? presetDefaultValue !== null && presetDefaultValue !== undefined
+        : true
   );
-  let isToggleModified = $derived(toggleChild !== null && toggleChecked !== toggleDefaultValue);
+  let isToggleModified = $derived(isToggleableGroup && toggleChecked !== toggleDefaultValue);
+
+  // Component-backed group state
+  let componentId = $derived(field.type === 'group' ? (field.component_id ?? '') : '');
+  let componentBundle = $derived<ComponentPresetBundle | null>(
+    componentId && components[componentId] ? components[componentId] : null
+  );
+  let activeComponentPresetKey = $derived(
+    componentId ? (selectedComponentPresets[field.path] || 'default') : ''
+  );
+  let savedComponentPresetKey = $derived(
+    componentId ? (presetComponentPresets[field.path] || 'default') : ''
+  );
+  let activeComponentPreset = $derived(
+    componentBundle?.presets.find((p) => p.key === activeComponentPresetKey) ?? null
+  );
+  let isMissingComponentPreset = $derived(
+    Boolean(
+      componentId &&
+        componentBundle &&
+        activeComponentPresetKey &&
+        activeComponentPresetKey !== 'default' &&
+        !activeComponentPreset
+    )
+  );
+  let componentPresetBaseline = $derived.by<ParamsRecord | null>(() => {
+    if (!componentId) return null;
+    return resolveComponentPresetParams(
+      componentId,
+      activeComponentPresetKey,
+      getGroupDefaultsForField(field),
+      components
+    );
+  });
+  let isComponentGroupOverridden = $derived(
+    Boolean(
+      componentId &&
+        toggleChecked &&
+        isPlainObject(currentValue) &&
+        componentPresetBaseline !== null &&
+        !paramsEqual(currentValue, componentPresetBaseline)
+    )
+  );
+  let isComponentPresetRefModified = $derived(
+    Boolean(componentId && toggleChecked && activeComponentPresetKey !== savedComponentPresetKey)
+  );
+  let childPresetDefaults = $derived.by<ParamsRecord>(() => {
+    if (componentId && componentPresetBaseline !== null) {
+      return setParamByPath(presetDefaults, field.path, componentPresetBaseline);
+    }
+    return presetDefaults;
+  });
+
+  function formatComponentPresetOption(p: {
+    key: string;
+    label: string;
+    source: string;
+    verification?: { status: string } | null;
+  }): string {
+    const status = p.verification?.status;
+    const prefix =
+      status === 'verified'
+        ? '✓ '
+        : status === 'usable'
+          ? '~ '
+          : status === 'unusable'
+            ? '! '
+            : '';
+    const suffix =
+      p.key === activeComponentPresetKey && isComponentGroupOverridden ? ' (modified)' : '';
+    return `${prefix}${p.label}${suffix}`;
+  }
 
   function formatValueForLabel(value: unknown, targetField: ParamField): string {
     if (value === null || value === undefined) return 'Auto';
@@ -99,7 +202,7 @@
   let lastToggleState = $state<boolean | null>(null);
 
   $effect(() => {
-    if (field.type === 'group' && toggleChild) {
+    if (field.type === 'group' && isToggleableGroup) {
       if (lastToggleState === null || lastToggleState !== toggleChecked) {
         detailsOpen = toggleChecked;
         lastToggleState = toggleChecked;
@@ -254,10 +357,17 @@
   }
 
   function handleToggleGroupChange(checked: boolean) {
-    if (!toggleChild) return;
-    detailsOpen = checked;
-    lastToggleState = checked;
-    onUpdate(toggleChild.path, checked, 'immediate');
+    if (toggleChild) {
+      detailsOpen = checked;
+      lastToggleState = checked;
+      onUpdate(toggleChild.path, checked, 'immediate');
+      return;
+    }
+    if (isNullableGroup) {
+      detailsOpen = checked;
+      lastToggleState = checked;
+      onToggleNullableGroup?.(field.path, field, checked);
+    }
   }
 
   function handleResetField() {
@@ -306,14 +416,47 @@
         <!-- Inner flex wrapper because DaisyUI v5 sets display: block on details > summary -->
         <div class="flex items-center justify-between gap-2 min-w-0">
           <div class="min-w-0 flex-1">
-            <div class="text-xs font-semibold leading-tight break-words">{field.label}</div>
+            <div class="flex items-center gap-1.5 min-w-0">
+              <span class="text-xs font-semibold leading-tight break-words">{field.label}</span>
+              {#if componentId && onOpenComponent}
+                <!-- svelte-ignore a11y_click_events_have_key_events -->
+                <!-- svelte-ignore a11y_no_static_element_interactions -->
+                <span class="shrink-0 inline-flex items-center" onclick={(e) => e.stopPropagation()}>
+                  <button
+                    type="button"
+                    class="inline-flex items-center gap-0.5 rounded px-1 py-0.5 text-[10px] font-medium text-secondary/90 hover:text-secondary hover:bg-secondary/10 transition-colors cursor-pointer"
+                    title="Open {field.component_name || field.label} component"
+                    aria-label="Open {field.component_name || field.label} component"
+                    onclick={() => onOpenComponent(componentId)}
+                  >
+                    <svg
+                      xmlns="http://www.w3.org/2000/svg"
+                      class="h-2.5 w-2.5 shrink-0"
+                      viewBox="0 0 24 24"
+                      fill="none"
+                      stroke="currentColor"
+                      stroke-width="2"
+                      stroke-linecap="round"
+                      stroke-linejoin="round"
+                      aria-hidden="true"
+                    >
+                      <path d="M5.5 8.5 9 12l-3.5 3.5L2 12l3.5-3.5Z" />
+                      <path d="m12 2 3.5 3.5L12 9 8.5 5.5 12 2Z" />
+                      <path d="M18.5 8.5 22 12l-3.5 3.5L15 12l3.5-3.5Z" />
+                      <path d="m12 15 3.5 3.5L12 22l-3.5-3.5L12 15Z" />
+                    </svg>
+                    <span>Component</span>
+                  </button>
+                </span>
+              {/if}
+            </div>
             {#if field.description}
               <div class="text-[11px] font-normal opacity-60 leading-snug mt-0.5 break-words">
                 {field.description}
               </div>
             {/if}
           </div>
-          {#if toggleChild}
+          {#if isToggleableGroup}
             <!-- svelte-ignore a11y_click_events_have_key_events -->
             <!-- svelte-ignore a11y_no_static_element_interactions -->
             <span class="shrink-0 flex items-center gap-1.5" onclick={(e) => e.stopPropagation()}>
@@ -331,22 +474,83 @@
           {/if}
         </div>
       </summary>
-      {#if bodyChildren.length > 0}
+      {#if bodyChildren.length > 0 || componentBundle}
         <div class="collapse-content px-3 pb-3 pt-1 min-w-0">
           <div
             class="space-y-2.5 pt-2 border-t border-base-300/70 transition-opacity min-w-0"
-            class:opacity-45={toggleChild !== null && !toggleChecked}
-            inert={toggleChild !== null && !toggleChecked}
+            class:opacity-45={isToggleableGroup && !toggleChecked}
+            inert={isToggleableGroup && !toggleChecked}
           >
+            {#if componentId && componentBundle}
+              <div class="space-y-1.5 pb-2 border-b border-base-300/60">
+                <div class="flex items-center gap-1.5 min-w-0">
+                  <label
+                    for="comp-preset-{field.path}"
+                    class="text-[11px] font-medium opacity-75 shrink-0"
+                  >
+                    Preset
+                  </label>
+                  <select
+                    id="comp-preset-{field.path}"
+                    class="select select-bordered select-xs flex-1 min-w-0"
+                    value={activeComponentPresetKey}
+                    onchange={(e) =>
+                      onSelectComponentPreset?.(
+                        field.path,
+                        componentId,
+                        (e.currentTarget as HTMLSelectElement).value
+                      )}
+                  >
+                    {#if isMissingComponentPreset}
+                      <option value={activeComponentPresetKey}>
+                        {activeComponentPresetKey} (missing)
+                      </option>
+                    {/if}
+                    {#each componentBundle.presets as cp (cp.key)}
+                      <option value={cp.key}>{formatComponentPresetOption(cp)}</option>
+                    {/each}
+                  </select>
+                  {#if isComponentGroupOverridden}
+                    {@render resetIconButton(
+                      `Reset ${field.label} overrides to ${activeComponentPreset?.label ?? 'Base'}`,
+                      () => onResetComponentGroup?.(field.path, componentId)
+                    )}
+                  {:else if isComponentPresetRefModified}
+                    {@render resetIconButton(
+                      `Reset ${field.label} preset to ${componentBundle.presets.find((p) => p.key === savedComponentPresetKey)?.label ?? savedComponentPresetKey}`,
+                      () => onSelectComponentPreset?.(field.path, componentId, savedComponentPresetKey)
+                    )}
+                  {/if}
+                </div>
+                {#if isMissingComponentPreset}
+                  <div class="text-[11px] text-warning flex items-center gap-1">
+                    <span>Preset "{activeComponentPresetKey}" not found — using defaults.</span>
+                  </div>
+                {/if}
+                {#if componentBundle.presets_error}
+                  <div class="text-[11px] text-warning break-words">
+                    {componentBundle.presets_error}
+                  </div>
+                {/if}
+              </div>
+            {/if}
+
             {#each bodyChildren as child (child.path)}
               <Self
                 field={child}
                 {rootParams}
                 groupParams={childGroupParams}
-                {presetDefaults}
+                presetDefaults={childPresetDefaults}
                 {showDescriptions}
+                {components}
+                {selectedComponentPresets}
+                {presetComponentPresets}
                 {onUpdate}
                 {onPreviewCommit}
+                {onToggleNullableGroup}
+                {onSelectComponentPreset}
+                {onResetComponentGroup}
+                {onOpenComponent}
               />
             {/each}
           </div>

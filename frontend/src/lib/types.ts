@@ -153,12 +153,14 @@ export interface DialogResponse {
 }
 
 export type ModelKind = 'parametric' | 'script' | 'error';
+export type ModelCategory = 'model' | 'component';
 
 export interface ModelInfo {
   id: string;
   local_id: string;
   library_id: string;
   library_name: string;
+  category?: ModelCategory;
   folders: string[];
   folder_labels: string[];
   name: string;
@@ -190,6 +192,9 @@ export interface ParamField {
   label: string;
   type: ParamFieldType;
   default: unknown;
+  group_defaults?: ParamsRecord;
+  component_id?: string;
+  component_name?: string;
   description: string;
   unit?: string;
   nullable?: boolean;
@@ -219,7 +224,17 @@ export interface Preset {
   description: string;
   source: 'default' | 'project' | 'user' | string;
   verification?: PresetVerification | null;
+  component_presets?: Record<string, string>;
   params: ParamsRecord;
+}
+
+export interface ComponentPresetBundle {
+  id: string;
+  name: string;
+  defaults: ParamsRecord;
+  fields?: ParamField[];
+  presets: Preset[];
+  presets_error?: string;
 }
 
 export interface ModelDetailResponse {
@@ -229,6 +244,7 @@ export interface ModelDetailResponse {
   fields?: ParamField[];
   defaults?: ParamsRecord;
   presets?: Preset[];
+  components?: Record<string, ComponentPresetBundle>;
   default_preset_key?: string;
   error?: string;
   code?: string;
@@ -307,6 +323,7 @@ export interface DesktopActionResponse {
 export interface PresetsResponse {
   ok: boolean;
   presets: Preset[];
+  components?: Record<string, ComponentPresetBundle>;
   default_preset_key?: string;
   error?: string;
 }
@@ -315,6 +332,7 @@ export interface SavePresetResponse {
   ok: boolean;
   selected_key?: string;
   presets?: Preset[];
+  components?: Record<string, ComponentPresetBundle>;
   preset_save_scope?: string;
   error?: string;
 }

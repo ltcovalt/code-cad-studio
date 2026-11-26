@@ -177,7 +177,6 @@ ALWAYS_SKIP_DIRS = {
 }
 
 ROOT_ONLY_SKIP_DIRS = {
-    "components",
     "utils",
     "exports",
     "tests",
@@ -341,7 +340,10 @@ def _build_model_info(
 ) -> dict[str, Any]:
     rel = py_file.relative_to(library_root)
     parts = list(rel.parts)
-    if parts and parts[0] == "models":
+    is_component = bool(parts and parts[0] == "components")
+    if is_component:
+        parts = parts[1:]
+    elif parts and parts[0] == "models":
         parts = parts[1:]
 
     stem = py_file.stem
@@ -352,7 +354,10 @@ def _build_model_info(
     else:
         category_folders = parent_dirs
 
-    local_segments = [*category_folders, stem]
+    if is_component:
+        local_segments = ["components", *category_folders, stem]
+    else:
+        local_segments = [*category_folders, stem]
     local_id = "/".join(local_segments)
     model_id = f"{library_id}/{local_id}"
     presets_path = (
@@ -366,6 +371,7 @@ def _build_model_info(
         "local_id": local_id,
         "library_id": library_id,
         "library_name": library_name,
+        "category": "component" if is_component else "model",
         "folders": category_folders,
         "folder_labels": [humanize_name(seg) for seg in category_folders],
         "name": humanize_name(stem),
@@ -503,10 +509,42 @@ def _infer_numeric_bounds(name: str, default: float | int, is_int: bool) -> dict
     return {"step": step}
 
 
+def _resolve_component_link(
+    nested_cls: type,
+    current_py_path: Path | None,
+    component_index: dict[Path, dict[str, Any]] | None,
+) -> tuple[str, str] | None:
+    """Return (component_id, component_name) if `nested_cls` is another discovered parametric model/component."""
+    if not component_index:
+        return None
+    try:
+        cls_file = inspect.getsourcefile(nested_cls)
+    except Exception:
+        return None
+    if not cls_file:
+        return None
+    try:
+        resolved = Path(cls_file).resolve()
+    except OSError:
+        return None
+    if current_py_path is not None and resolved == current_py_path:
+        return None
+    target = component_index.get(resolved)
+    if target is None:
+        return None
+    target_cls_name = str(target.get("params_class") or "").strip()
+    if target_cls_name and nested_cls.__name__ != target_cls_name:
+        return None
+    return str(target["id"]), str(target["name"])
+
+
 def _introspect_list_item(
     elem_type: Any,
     sample_val: Any,
     meta: dict[str, Any],
+    *,
+    current_py_path: Path | None = None,
+    component_index: dict[Path, dict[str, Any]] | None = None,
 ) -> dict[str, Any] | None:
     """Build a ParamField schema describing a single element of a list parameter."""
     elem_unwrapped, elem_nullable = _unwrap_optional(elem_type)
@@ -516,7 +554,12 @@ def _introspect_list_item(
     explicit_item_label = str(meta.get("item_label") or "").strip()
 
     if dataclasses.is_dataclass(elem_unwrapped):
-        item_fields, item_defaults = _introspect_dataclass(elem_unwrapped, prefix="")
+        item_fields, item_defaults = _introspect_dataclass(
+            elem_unwrapped,
+            prefix="",
+            current_py_path=current_py_path,
+            component_index=component_index,
+        )
         item_doc = inspect.getdoc(elem_unwrapped) or ""
         item_desc = item_doc.splitlines()[0].strip() if item_doc else ""
         item_label = explicit_item_label or humanize_class_name(elem_unwrapped.__name__)
@@ -531,6 +574,12 @@ def _introspect_list_item(
         }
         if elem_nullable:
             item_schema["nullable"] = True
+            item_schema["group_defaults"] = item_defaults
+        comp_link = _resolve_component_link(elem_unwrapped, current_py_path, component_index)
+        if comp_link is not None:
+            item_schema["component_id"] = comp_link[0]
+            item_schema["component_name"] = comp_link[1]
+            item_schema.setdefault("group_defaults", item_defaults)
         return item_schema
 
     item_label = explicit_item_label or "Item"
@@ -616,6 +665,9 @@ def _introspect_list_item(
 def _introspect_dataclass(
     cls: type,
     prefix: str = "",
+    *,
+    current_py_path: Path | None = None,
+    component_index: dict[Path, dict[str, Any]] | None = None,
 ) -> tuple[list[dict[str, Any]], dict[str, Any]]:
     """Introspect a @dataclass into UI schema fields and canonical default dict."""
     hints = _safe_get_type_hints(cls)
@@ -640,11 +692,22 @@ def _introspect_dataclass(
         label = str(meta.get("label") or "").strip() or humanize_name(f.name)
         unit = str(meta.get("unit") or "").strip()
 
-        # Nested dataclass -> explicit collapsible section (toggleable if it has `enabled: bool`)
+        # Nested dataclass -> explicit collapsible section (toggleable if nullable or has `enabled: bool`)
         if dataclasses.is_dataclass(unwrapped) or dataclasses.is_dataclass(default_val):
             nested_cls = unwrapped if dataclasses.is_dataclass(unwrapped) else type(default_val)
-            nested_fields, nested_defaults = _introspect_dataclass(nested_cls, prefix=field_path)
-            defaults[f.name] = nested_defaults
+            nested_fields, nested_defaults = _introspect_dataclass(
+                nested_cls,
+                prefix=field_path,
+                current_py_path=current_py_path,
+                component_index=component_index,
+            )
+            if is_nullable and default_val is None:
+                group_default_val: Any = None
+            elif dataclasses.is_dataclass(default_val):
+                group_default_val = _serialize_default(default_val)
+            else:
+                group_default_val = nested_defaults
+            defaults[f.name] = group_default_val
             if not desc:
                 nested_doc = inspect.getdoc(nested_cls) or ""
                 desc = nested_doc.splitlines()[0].strip() if nested_doc else ""
@@ -653,9 +716,18 @@ def _introspect_dataclass(
                 "path": field_path,
                 "label": label,
                 "type": "group",
+                "default": group_default_val,
                 "description": desc,
                 "children": nested_fields,
             }
+            if is_nullable:
+                group_info["nullable"] = True
+                group_info["group_defaults"] = nested_defaults
+            comp_link = _resolve_component_link(nested_cls, current_py_path, component_index)
+            if comp_link is not None:
+                group_info["component_id"] = comp_link[0]
+                group_info["component_name"] = comp_link[1]
+                group_info.setdefault("group_defaults", nested_defaults)
             if "when" in meta and isinstance(meta["when"], dict):
                 group_info["when"] = meta["when"]
             fields_schema.append(group_info)
@@ -680,7 +752,13 @@ def _introspect_dataclass(
             elem_args = get_args(unwrapped)
             elem_type = elem_args[0] if elem_args else Any
             sample_val = default_val[0] if isinstance(default_val, list) and len(default_val) > 0 else None
-            item_schema = _introspect_list_item(elem_type, sample_val, meta)
+            item_schema = _introspect_list_item(
+                elem_type,
+                sample_val,
+                meta,
+                current_py_path=current_py_path,
+                component_index=component_index,
+            )
             if item_schema is not None:
                 field_info["type"] = "list"
                 field_info["item"] = item_schema
@@ -1091,7 +1169,19 @@ def _collect_default_changes(
 
         if dataclasses.is_dataclass(unwrapped) or dataclasses.is_dataclass(default_val):
             nested_cls = unwrapped if dataclasses.is_dataclass(unwrapped) else type(default_val)
-            if isinstance(raw_override, dict):
+            if (default_val is None) != (raw_override is None):
+                changes.append(
+                    {
+                        "path": field_path,
+                        "owner_cls": cls,
+                        "field_name": f.name,
+                        "old_value": _serialize_default(default_val),
+                        "new_value": raw_override,
+                        "typed_value": None,
+                        "nullable_group_toggle": True,
+                    }
+                )
+            elif isinstance(raw_override, dict):
                 changes.extend(_collect_default_changes(nested_cls, raw_override, prefix=field_path))
             continue
 
@@ -1169,6 +1259,15 @@ def _plan_dataclass_default_updates(
         owner_cls = ch["owner_cls"]
         field_name = ch["field_name"]
         typed_val = ch["typed_value"]
+
+        if ch.get("nullable_group_toggle"):
+            _add_unsupported(
+                path,
+                "Optional group enabled/disabled default cannot be updated automatically",
+                "nullable_group_toggle",
+                owner_cls,
+            )
+            continue
 
         if isinstance(typed_val, enum.Enum):
             _add_unsupported(
@@ -2213,7 +2312,13 @@ class WorkerState:
                         self.models[unique_id] = meta
                         lib_models.append(meta)
 
-                lib_models.sort(key=lambda m: ([f.lower() for f in m["folders"]], m["name"].lower()))
+                lib_models.sort(
+                    key=lambda m: (
+                        0 if m.get("category") != "component" else 1,
+                        [f.lower() for f in m["folders"]],
+                        m["name"].lower(),
+                    )
+                )
                 found.extend(lib_models)
 
             for stale_key in [k for k in self._ast_cache if k not in seen_files]:
@@ -2372,6 +2477,20 @@ class WorkerState:
 
         return params_cls, func
 
+    def _build_component_path_index(self, library_id: str) -> dict[Path, dict[str, Any]]:
+        """Map resolved .py file paths in `library_id` to discovered parametric model/component metadata."""
+        index: dict[Path, dict[str, Any]] = {}
+        for meta in self.models.values():
+            if meta.get("library_id") != library_id:
+                continue
+            if meta.get("kind") != "parametric":
+                continue
+            try:
+                index[Path(meta["path"]).resolve()] = meta
+            except OSError:
+                continue
+        return index
+
     def get_schema(self, model_id: str) -> dict[str, Any]:
         with self.lock:
             meta = self._get_model_meta(model_id)
@@ -2390,7 +2509,12 @@ class WorkerState:
             params_cls, func = self._resolve_entrypoints(meta, module)
 
             if params_cls is not None:
-                fields, defaults = _introspect_dataclass(params_cls)
+                comp_index = self._build_component_path_index(meta["library_id"])
+                fields, defaults = _introspect_dataclass(
+                    params_cls,
+                    current_py_path=Path(meta["path"]).resolve(),
+                    component_index=comp_index,
+                )
             else:
                 fields, defaults = _introspect_function_signature(func)
 

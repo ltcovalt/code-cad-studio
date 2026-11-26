@@ -85,10 +85,11 @@ type DefaultSection struct {
 
 // PresetEntry is the JSON schema stored for each named preset inside presets.json.
 type PresetEntry struct {
-	Label        string         `json:"label,omitempty"`
-	Description  string         `json:"description,omitempty"`
-	Verification *Verification  `json:"verification,omitempty"`
-	Params       map[string]any `json:"params,omitempty"`
+	Label            string            `json:"label,omitempty"`
+	Description      string            `json:"description,omitempty"`
+	Verification     *Verification     `json:"verification,omitempty"`
+	ComponentPresets map[string]string `json:"component_presets,omitempty"`
+	Params           map[string]any    `json:"params,omitempty"`
 }
 
 // PresetFile is the v1 envelope stored on disk in presets.json / <stem>.presets.json / user preset files.
@@ -106,12 +107,45 @@ type DefaultMeta struct {
 
 // Preset is the resolved preset returned to the UI.
 type Preset struct {
-	Key          string         `json:"key"`
-	Label        string         `json:"label"`
-	Description  string         `json:"description"`
-	Source       string         `json:"source"` // "default", "project", "user"
-	Verification *Verification  `json:"verification,omitempty"`
-	Params       map[string]any `json:"params"`
+	Key              string            `json:"key"`
+	Label            string            `json:"label"`
+	Description      string            `json:"description"`
+	Source           string            `json:"source"` // "default", "project", "user"
+	Verification     *Verification     `json:"verification,omitempty"`
+	ComponentPresets map[string]string `json:"component_presets,omitempty"`
+	Params           map[string]any    `json:"params"`
+}
+
+// SaveOptions configures saving a preset entry.
+type SaveOptions struct {
+	Label            string
+	Description      string
+	Scope            string
+	FullSnapshot     bool
+	CurrentParams    map[string]any
+	Defaults         map[string]any
+	SchemaShape      map[string]any
+	ComponentPresets map[string]string
+	Verification     *Verification
+}
+
+func normalizeComponentPresets(raw map[string]string) map[string]string {
+	if len(raw) == 0 {
+		return nil
+	}
+	out := make(map[string]string, len(raw))
+	for k, v := range raw {
+		ck := strings.TrimSpace(k)
+		cv := strings.TrimSpace(v)
+		if ck == "" || cv == "" {
+			continue
+		}
+		out[ck] = cv
+	}
+	if len(out) == 0 {
+		return nil
+	}
+	return out
 }
 
 var (
@@ -343,7 +377,7 @@ func writePresetFile(path string, file PresetFile) error {
 	return writeFileAtomic(path, append(data, '\n'), 0o644)
 }
 
-// FilterParams removes keys not present in canonical defaults (recursively for nested maps).
+// FilterParams removes keys not present in canonical defaults/shape (recursively for nested maps).
 func FilterParams(raw map[string]any, defaults map[string]any) map[string]any {
 	res := make(map[string]any)
 	for k, defVal := range defaults {
@@ -351,15 +385,19 @@ func FilterParams(raw map[string]any, defaults map[string]any) map[string]any {
 		if !ok {
 			continue
 		}
+		if val == nil {
+			res[k] = nil
+			continue
+		}
 		defMap, defIsMap := defVal.(map[string]any)
 		valMap, valIsMap := val.(map[string]any)
 		if defIsMap && valIsMap {
 			nested := FilterParams(valMap, defMap)
-			if len(nested) > 0 {
+			if len(nested) > 0 || len(valMap) == 0 {
 				res[k] = nested
 			}
 		} else {
-			res[k] = val
+			res[k] = deepCopyValue(val)
 		}
 	}
 	return res
@@ -386,26 +424,85 @@ func MergeWithDefaults(defaults map[string]any, overrides map[string]any) map[st
 
 // SparseDiff computes only the fields that differ from canonical defaults.
 func SparseDiff(current map[string]any, defaults map[string]any) map[string]any {
+	return sparseDiffWithShape(current, defaults, defaults)
+}
+
+func sparseDiffWithShape(current map[string]any, baseline map[string]any, shape map[string]any) map[string]any {
 	diff := make(map[string]any)
-	for k, defVal := range defaults {
+	for k, defVal := range baseline {
 		curVal, ok := current[k]
 		if !ok {
 			continue
 		}
 		defMap, defIsMap := defVal.(map[string]any)
 		curMap, curIsMap := curVal.(map[string]any)
+		var shapeMap map[string]any
+		if shape != nil {
+			if sm, sok := shape[k].(map[string]any); sok {
+				shapeMap = sm
+			}
+		}
 		if defIsMap && curIsMap {
-			sub := SparseDiff(curMap, defMap)
+			sub := sparseDiffWithShape(curMap, defMap, shapeMap)
 			if len(sub) > 0 {
 				diff[k] = sub
 			}
 			continue
 		}
 		if !valuesEqual(curVal, defVal) {
-			diff[k] = curVal
+			if curIsMap && shapeMap != nil {
+				diff[k] = FilterParams(curMap, shapeMap)
+			} else {
+				diff[k] = deepCopyValue(curVal)
+			}
 		}
 	}
 	return diff
+}
+
+func getMapAtPath(root map[string]any, path string) (any, bool) {
+	if root == nil || path == "" {
+		return nil, false
+	}
+	parts := strings.Split(path, ".")
+	var curr any = root
+	for _, part := range parts {
+		m, ok := curr.(map[string]any)
+		if !ok {
+			return nil, false
+		}
+		v, exists := m[part]
+		if !exists {
+			return nil, false
+		}
+		curr = v
+	}
+	return curr, true
+}
+
+func setOrDeleteAtPath(root map[string]any, path string, val any, remove bool) {
+	if root == nil || path == "" {
+		return
+	}
+	parts := strings.Split(path, ".")
+	curr := root
+	for i := 0; i < len(parts)-1; i++ {
+		next, ok := curr[parts[i]].(map[string]any)
+		if !ok {
+			if remove {
+				return
+			}
+			next = map[string]any{}
+			curr[parts[i]] = next
+		}
+		curr = next
+	}
+	last := parts[len(parts)-1]
+	if remove {
+		delete(curr, last)
+	} else {
+		curr[last] = val
+	}
 }
 
 func valuesEqual(a, b any) bool {
@@ -500,12 +597,13 @@ func buildPresetList(projFile, userFile PresetFile, defaults map[string]any, def
 			label = key
 		}
 		byKey[key] = Preset{
-			Key:          key,
-			Label:        label,
-			Description:  entry.Description,
-			Source:       "project",
-			Verification: NormalizeVerification(entry.Verification),
-			Params:       FilterParams(entry.Params, defaults),
+			Key:              key,
+			Label:            label,
+			Description:      entry.Description,
+			Source:           "project",
+			Verification:     NormalizeVerification(entry.Verification),
+			ComponentPresets: normalizeComponentPresets(entry.ComponentPresets),
+			Params:           FilterParams(entry.Params, defaults),
 		}
 	}
 
@@ -518,12 +616,13 @@ func buildPresetList(projFile, userFile PresetFile, defaults map[string]any, def
 			label = key
 		}
 		byKey[key] = Preset{
-			Key:          key,
-			Label:        label,
-			Description:  entry.Description,
-			Source:       "user",
-			Verification: NormalizeVerification(entry.Verification),
-			Params:       FilterParams(entry.Params, defaults),
+			Key:              key,
+			Label:            label,
+			Description:      entry.Description,
+			Source:           "user",
+			Verification:     NormalizeVerification(entry.Verification),
+			ComponentPresets: normalizeComponentPresets(entry.ComponentPresets),
+			Params:           FilterParams(entry.Params, defaults),
 		}
 	}
 
@@ -660,13 +759,13 @@ func findMatchingKey(entries map[string]PresetEntry, label string) (string, bool
 // existing key is preserved and updated in-place rather than creating a duplicate entry. Saving to
 // "project" also removes any identically keyed or identically named user preset so a stale local
 // copy cannot silently shadow or duplicate the shared project preset.
-func Save(modelID, modelDir, label, description, scope string, fullSnapshot bool, currentParams, defaults map[string]any, verification *Verification) (string, error) {
+func Save(modelID, modelDir string, opts SaveOptions) (string, error) {
 	storeMu.Lock()
 	defer storeMu.Unlock()
 
-	trimmedLabel := strings.TrimSpace(label)
+	trimmedLabel := strings.TrimSpace(opts.Label)
 	projPath := ProjectPresetPath(modelID, modelDir)
-	isProject := scope == "project" && projPath != ""
+	isProject := opts.Scope == "project" && projPath != ""
 
 	var projFile PresetFile
 	var projErr error
@@ -717,18 +816,42 @@ func Save(modelID, modelDir, label, description, scope string, fullSnapshot bool
 		}
 	}
 
+	shape := opts.SchemaShape
+	if shape == nil {
+		shape = opts.Defaults
+	}
+	compPresets := normalizeComponentPresets(opts.ComponentPresets)
+
 	var storedParams map[string]any
-	if fullSnapshot {
-		storedParams = FilterParams(currentParams, defaults)
+	if opts.FullSnapshot {
+		storedParams = FilterParams(opts.CurrentParams, shape)
+		// Preserve sparse inheritance for groups explicitly referencing a component preset.
+		for compPath := range compPresets {
+			curSub, curOk := getMapAtPath(opts.CurrentParams, compPath)
+			defSub, defOk := getMapAtPath(opts.Defaults, compPath)
+			shapeSub, _ := getMapAtPath(shape, compPath)
+			curMap, curIsMap := curSub.(map[string]any)
+			defMap, defIsMap := defSub.(map[string]any)
+			shapeMap, _ := shapeSub.(map[string]any)
+			if curOk && defOk && curIsMap && defIsMap {
+				subDiff := sparseDiffWithShape(curMap, defMap, shapeMap)
+				if len(subDiff) == 0 {
+					setOrDeleteAtPath(storedParams, compPath, nil, true)
+				} else {
+					setOrDeleteAtPath(storedParams, compPath, subDiff, false)
+				}
+			}
+		}
 	} else {
-		storedParams = SparseDiff(currentParams, defaults)
+		storedParams = sparseDiffWithShape(opts.CurrentParams, opts.Defaults, shape)
 	}
 
 	entry := PresetEntry{
-		Label:        trimmedLabel,
-		Description:  strings.TrimSpace(description),
-		Verification: NormalizeVerification(verification),
-		Params:       storedParams,
+		Label:            trimmedLabel,
+		Description:      strings.TrimSpace(opts.Description),
+		Verification:     NormalizeVerification(opts.Verification),
+		ComponentPresets: compPresets,
+		Params:           storedParams,
 	}
 
 	if isProject {

@@ -19,7 +19,10 @@
     {#if node.kind === 'folder'}
       {@const collapsed = studio.isFolderCollapsed(node.key)}
       {@const isLibrary = node.nodeType === 'library'}
-      <div class:pt-1={isLibrary && depth === 0}>
+      {@const isModelsSection = node.nodeType === 'models'}
+      {@const isComponentsSection = node.nodeType === 'components'}
+      {@const isSection = isModelsSection || isComponentsSection}
+      <div class:pt-1={isLibrary && depth === 0} class:pt-2={isComponentsSection}>
         <button
           type="button"
           class="w-full flex items-center gap-1.5 rounded-field px-1.5 py-1 text-left hover:bg-base-200/80 transition-colors cursor-pointer select-none focus:outline-none focus-visible:outline-2 focus-visible:outline-primary"
@@ -49,7 +52,7 @@
             <polyline points="9 6 15 12 9 18" />
           </svg>
 
-          <!-- Node Icon (Library vs Category Folder) -->
+          <!-- Node Icon (Library vs Models Section vs Components Section vs Category Folder) -->
           {#if isLibrary}
             <svg
               xmlns="http://www.w3.org/2000/svg"
@@ -66,6 +69,39 @@
               <path d="M12 2 2 7l10 5 10-5-10-5Z" />
               <path d="m2 17 10 5 10-5" />
               <path d="m2 12 10 5 10-5" />
+            </svg>
+          {:else if isModelsSection}
+            <svg
+              xmlns="http://www.w3.org/2000/svg"
+              class="h-3.5 w-3.5 shrink-0 text-primary/85"
+              fill="none"
+              viewBox="0 0 24 24"
+              stroke="currentColor"
+              stroke-width="1.9"
+              stroke-linecap="round"
+              stroke-linejoin="round"
+              aria-hidden="true"
+            >
+              <path d="M21 8a2 2 0 0 0-1-1.73l-7-4a2 2 0 0 0-2 0l-7 4A2 2 0 0 0 3 8v8a2 2 0 0 0 1 1.73l7 4a2 2 0 0 0 2 0l7-4A2 2 0 0 0 21 16Z" />
+              <path d="m3.3 7 8.7 5 8.7-5" />
+              <path d="M12 22V12" />
+            </svg>
+          {:else if isComponentsSection}
+            <svg
+              xmlns="http://www.w3.org/2000/svg"
+              class="h-3.5 w-3.5 shrink-0 text-secondary/90"
+              fill="none"
+              viewBox="0 0 24 24"
+              stroke="currentColor"
+              stroke-width="1.9"
+              stroke-linecap="round"
+              stroke-linejoin="round"
+              aria-hidden="true"
+            >
+              <path d="M5.5 8.5 9 12l-3.5 3.5L2 12l3.5-3.5Z" />
+              <path d="m12 2 3.5 3.5L12 9 8.5 5.5 12 2Z" />
+              <path d="M18.5 8.5 22 12l-3.5 3.5L15 12l3.5-3.5Z" />
+              <path d="m12 15 3.5 3.5L12 22l-3.5-3.5L12 15Z" />
             </svg>
           {:else}
             <svg
@@ -89,8 +125,8 @@
 
           <span
             class="text-xs truncate min-w-0 flex-1"
-            class:font-semibold={isLibrary}
-            class:font-medium={!isLibrary}
+            class:font-semibold={isLibrary || isSection}
+            class:font-medium={!isLibrary && !isSection}
           >
             {node.label}
             {#if node.subtitle}
@@ -108,7 +144,7 @@
           {:else}
             <span
               class="rounded-full bg-base-content/10 text-base-content/70 px-1.5 py-0.5 text-[10px] font-medium leading-none tabular-nums shrink-0"
-              title="{node.modelCount} model{node.modelCount === 1 ? '' : 's'}"
+              title="{node.modelCount} {isComponentsSection ? 'component' : 'model'}{node.modelCount === 1 ? '' : 's'}"
             >
               {node.modelCount}
             </span>

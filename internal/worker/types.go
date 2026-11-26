@@ -26,6 +26,7 @@ type ModelInfo struct {
 	LocalID      string   `json:"local_id"`
 	LibraryID    string   `json:"library_id"`
 	LibraryName  string   `json:"library_name"`
+	Category     string   `json:"category,omitempty"`
 	Folders      []string `json:"folders"`
 	FolderLabels []string `json:"folder_labels"`
 	Name         string   `json:"name"`
@@ -48,21 +49,24 @@ type ModelsResponse struct {
 }
 
 type ParamField struct {
-	Name        string         `json:"name"`
-	Path        string         `json:"path"`
-	Label       string         `json:"label"`
-	Type        string         `json:"type"` // bool, int, float, str, enum, group, list
-	Default     any            `json:"default"`
-	Description string         `json:"description"`
-	Unit        string         `json:"unit,omitempty"`
-	Nullable    bool           `json:"nullable,omitempty"`
-	When        map[string]any `json:"when,omitempty"`
-	Choices     []string       `json:"choices,omitempty"`
-	Min         *float64       `json:"min,omitempty"`
-	Max         *float64       `json:"max,omitempty"`
-	Step        *float64       `json:"step,omitempty"`
-	Children    []ParamField   `json:"children,omitempty"`
-	Item        *ParamField    `json:"item,omitempty"`
+	Name          string         `json:"name"`
+	Path          string         `json:"path"`
+	Label         string         `json:"label"`
+	Type          string         `json:"type"` // bool, int, float, str, enum, group, list
+	Default       any            `json:"default"`
+	GroupDefaults map[string]any `json:"group_defaults,omitempty"`
+	ComponentID   string         `json:"component_id,omitempty"`
+	ComponentName string         `json:"component_name,omitempty"`
+	Description   string         `json:"description"`
+	Unit          string         `json:"unit,omitempty"`
+	Nullable      bool           `json:"nullable,omitempty"`
+	When          map[string]any `json:"when,omitempty"`
+	Choices       []string       `json:"choices,omitempty"`
+	Min           *float64       `json:"min,omitempty"`
+	Max           *float64       `json:"max,omitempty"`
+	Step          *float64       `json:"step,omitempty"`
+	Children      []ParamField   `json:"children,omitempty"`
+	Item          *ParamField    `json:"item,omitempty"`
 }
 
 type DefaultPresetMeta struct {

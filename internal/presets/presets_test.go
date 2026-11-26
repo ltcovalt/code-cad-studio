@@ -183,7 +183,13 @@ func TestSaveSparseVsFullAndDelete(t *testing.T) {
 	}
 
 	// Sparse user save stores only changed fields
-	key, err := Save("lib/clip", dir, "Thin Clip", "Half width", "user", false, current, defaults, nil)
+	key, err := Save("lib/clip", dir, SaveOptions{
+		Label:         "Thin Clip",
+		Description:   "Half width",
+		Scope:         "user",
+		CurrentParams: current,
+		Defaults:      defaults,
+	})
 	if err != nil || key != "thin_clip" {
 		t.Fatalf("Save sparse user failed: key=%q err=%v", key, err)
 	}
@@ -197,9 +203,17 @@ func TestSaveSparseVsFullAndDelete(t *testing.T) {
 	}
 
 	// Full snapshot project save stores all fields and clears shadowed user copy
-	key2, err := Save("lib/clip", dir, "Thin Clip", "Shared full", "project", true, current, defaults, &Verification{
-		Status: StatusVerified,
-		Note:   "Printed in PETG, snug fit",
+	key2, err := Save("lib/clip", dir, SaveOptions{
+		Label:         "Thin Clip",
+		Description:   "Shared full",
+		Scope:         "project",
+		FullSnapshot:  true,
+		CurrentParams: current,
+		Defaults:      defaults,
+		Verification: &Verification{
+			Status: StatusVerified,
+			Note:   "Printed in PETG, snug fit",
+		},
 	})
 	if err != nil || key2 != "thin_clip" {
 		t.Fatalf("Save full project failed: key=%q err=%v", key2, err)
@@ -341,7 +355,12 @@ func TestVerificationLifecycleAndDefaultMetadata(t *testing.T) {
 		t.Fatalf("expected empty presets.json to be removed after clearing default verification")
 	}
 
-	if _, err := Save("lib/lid", dir, "Small Bowl", "", "user", false, map[string]any{"diameter": 98.0}, defaults, nil); err != nil {
+	if _, err := Save("lib/lid", dir, SaveOptions{
+		Label:         "Small Bowl",
+		Scope:         "user",
+		CurrentParams: map[string]any{"diameter": 98.0},
+		Defaults:      defaults,
+	}); err != nil {
 		t.Fatalf("Save user failed: %v", err)
 	}
 	if err := SetVerification("lib/lid", dir, "small_bowl", "user", &Verification{Status: StatusUsable, Note: "Slightly loose"}); err != nil {
@@ -390,17 +409,14 @@ func TestSaveOverwritesHandKeyedAndCrossScopePresetsWithoutDuplicates(t *testing
 		t.Fatal(err)
 	}
 
-	key, err := Save(
-		"lib/lid",
-		dir,
-		"Anchor Hocking Round 6-Cup (1.5 qt)",
-		"Updated fit",
-		"project",
-		false,
-		map[string]any{"diameter": 186.5, "height": 10.0},
-		defaults,
-		&Verification{Status: StatusVerified, Note: "Snug fit"},
-	)
+	key, err := Save("lib/lid", dir, SaveOptions{
+		Label:         "Anchor Hocking Round 6-Cup (1.5 qt)",
+		Description:   "Updated fit",
+		Scope:         "project",
+		CurrentParams: map[string]any{"diameter": 186.5, "height": 10.0},
+		Defaults:      defaults,
+		Verification:  &Verification{Status: StatusVerified, Note: "Snug fit"},
+	})
 	if err != nil {
 		t.Fatalf("Save overwrite failed: %v", err)
 	}
@@ -415,17 +431,13 @@ func TestSaveOverwritesHandKeyedAndCrossScopePresetsWithoutDuplicates(t *testing
 		t.Fatalf("unexpected overwritten project preset: %#v", list[1])
 	}
 
-	key2, err := Save(
-		"lib/lid",
-		dir,
-		"  anchor hocking round 6-cup (1.5 qt)  ",
-		"Trimmed case update",
-		"project",
-		false,
-		map[string]any{"diameter": 186.0, "height": 10.0},
-		defaults,
-		nil,
-	)
+	key2, err := Save("lib/lid", dir, SaveOptions{
+		Label:         "  anchor hocking round 6-cup (1.5 qt)  ",
+		Description:   "Trimmed case update",
+		Scope:         "project",
+		CurrentParams: map[string]any{"diameter": 186.0, "height": 10.0},
+		Defaults:      defaults,
+	})
 	if err != nil || key2 != "anchor_round_6_cup" {
 		t.Fatalf("case-insensitive overwrite failed: key=%q err=%v", key2, err)
 	}
@@ -434,17 +446,13 @@ func TestSaveOverwritesHandKeyedAndCrossScopePresetsWithoutDuplicates(t *testing
 		t.Fatalf("expected single updated preset after case-insensitive save, got %#v", list)
 	}
 
-	userKey, err := Save(
-		"lib/lid",
-		dir,
-		"Anchor Hocking Round 6-Cup (1.5 qt)",
-		"Local override",
-		"user",
-		false,
-		map[string]any{"diameter": 185.0, "height": 10.0},
-		defaults,
-		nil,
-	)
+	userKey, err := Save("lib/lid", dir, SaveOptions{
+		Label:         "Anchor Hocking Round 6-Cup (1.5 qt)",
+		Description:   "Local override",
+		Scope:         "user",
+		CurrentParams: map[string]any{"diameter": 185.0, "height": 10.0},
+		Defaults:      defaults,
+	})
 	if err != nil || userKey != "anchor_round_6_cup" {
 		t.Fatalf("user override save failed: key=%q err=%v", userKey, err)
 	}
@@ -461,17 +469,13 @@ func TestSaveOverwritesHandKeyedAndCrossScopePresetsWithoutDuplicates(t *testing
 		t.Fatalf("expected underlying project preset restored, got %#v", list)
 	}
 
-	newKey, err := Save(
-		"lib/lid",
-		dir,
-		"Anchor Hocking Round 6-Cup (Tight)",
-		"Tighter variant",
-		"project",
-		false,
-		map[string]any{"diameter": 184.5, "height": 10.0},
-		defaults,
-		nil,
-	)
+	newKey, err := Save("lib/lid", dir, SaveOptions{
+		Label:         "Anchor Hocking Round 6-Cup (Tight)",
+		Description:   "Tighter variant",
+		Scope:         "project",
+		CurrentParams: map[string]any{"diameter": 184.5, "height": 10.0},
+		Defaults:      defaults,
+	})
 	if err != nil || newKey != "anchor_hocking_round_6_cup_tight" {
 		t.Fatalf("new preset save failed: key=%q err=%v", newKey, err)
 	}
@@ -518,10 +522,10 @@ func TestSharedDirectoryStemPresetScoping(t *testing.T) {
 	}
 
 	// Save presets for alpha and beta in the same directory; verify complete isolation
-	if _, err := Save(alphaID, sharedDir, "Alpha Large", "", "project", false, map[string]any{"size": 40.0}, defaults, nil); err != nil {
+	if _, err := Save(alphaID, sharedDir, SaveOptions{Label: "Alpha Large", Scope: "project", CurrentParams: map[string]any{"size": 40.0}, Defaults: defaults}); err != nil {
 		t.Fatalf("Save alpha failed: %v", err)
 	}
-	if _, err := Save(betaID, sharedDir, "Beta Small", "", "project", false, map[string]any{"size": 5.0}, defaults, nil); err != nil {
+	if _, err := Save(betaID, sharedDir, SaveOptions{Label: "Beta Small", Scope: "project", CurrentParams: map[string]any{"size": 5.0}, Defaults: defaults}); err != nil {
 		t.Fatalf("Save beta failed: %v", err)
 	}
 
@@ -575,7 +579,7 @@ func TestMalformedOrWrongSchemaPresetsPreservedOnDisk(t *testing.T) {
 	if _, err := ListStrict("lib/corrupt_model", dir, defaults, nil); err == nil {
 		t.Fatalf("expected ListStrict to error on malformed JSON")
 	}
-	if _, err := Save("lib/corrupt_model", dir, "New", "", "project", false, map[string]any{"width": 20.0}, defaults, nil); err == nil {
+	if _, err := Save("lib/corrupt_model", dir, SaveOptions{Label: "New", Scope: "project", CurrentParams: map[string]any{"width": 20.0}, Defaults: defaults}); err == nil {
 		t.Fatalf("expected Save to error on malformed project presets.json")
 	}
 	if err := SetVerification("lib/corrupt_model", dir, "default", "default", &Verification{Status: StatusVerified}); err == nil {
@@ -604,7 +608,7 @@ func TestMalformedOrWrongSchemaPresetsPreservedOnDisk(t *testing.T) {
 	if _, err := ListStrict("lib/corrupt_model", dir, defaults, nil); err == nil {
 		t.Fatalf("expected ListStrict to reject schema_version 2")
 	}
-	if _, err := Save("lib/corrupt_model", dir, "New", "", "project", false, map[string]any{"width": 20.0}, defaults, nil); err == nil {
+	if _, err := Save("lib/corrupt_model", dir, SaveOptions{Label: "New", Scope: "project", CurrentParams: map[string]any{"width": 20.0}, Defaults: defaults}); err == nil {
 		t.Fatalf("expected Save to reject schema_version 2")
 	}
 	afterWrong, err := os.ReadFile(presetPath)
@@ -623,13 +627,13 @@ func TestUserPresetsCanonicalModelIDWindowsSafeAndCollisionFree(t *testing.T) {
 	idB := "personal/gridfinity/bin"
 	idUnderscore := "code-cad/gridfinity_bin"
 
-	if _, err := Save(idA, dirA, "Wide", "Lib A wide", "user", false, map[string]any{"width": 84.0}, defaults, nil); err != nil {
+	if _, err := Save(idA, dirA, SaveOptions{Label: "Wide", Description: "Lib A wide", Scope: "user", CurrentParams: map[string]any{"width": 84.0}, Defaults: defaults}); err != nil {
 		t.Fatalf("Save lib A failed: %v", err)
 	}
-	if _, err := Save(idB, dirB, "Wide", "Lib B wide", "user", false, map[string]any{"width": 126.0}, defaults, nil); err != nil {
+	if _, err := Save(idB, dirB, SaveOptions{Label: "Wide", Description: "Lib B wide", Scope: "user", CurrentParams: map[string]any{"width": 126.0}, Defaults: defaults}); err != nil {
 		t.Fatalf("Save lib B failed: %v", err)
 	}
-	if _, err := Save(idUnderscore, dirA, "Wide", "Underscore wide", "user", false, map[string]any{"width": 168.0}, defaults, nil); err != nil {
+	if _, err := Save(idUnderscore, dirA, SaveOptions{Label: "Wide", Description: "Underscore wide", Scope: "user", CurrentParams: map[string]any{"width": 168.0}, Defaults: defaults}); err != nil {
 		t.Fatalf("Save underscore ID failed: %v", err)
 	}
 
@@ -699,7 +703,7 @@ func TestConcurrentPresetMutationsUnderRace(t *testing.T) {
 		go func(idx int) {
 			defer wg.Done()
 			label := fmt.Sprintf("Variant %d", idx)
-			key, err := Save(modelID, dir, label, "concurrent save", "project", false, map[string]any{"val": float64(idx + 2)}, defaults, nil)
+			key, err := Save(modelID, dir, SaveOptions{Label: label, Description: "concurrent save", Scope: "project", CurrentParams: map[string]any{"val": float64(idx + 2)}, Defaults: defaults})
 			if err != nil {
 				errCh <- fmt.Errorf("Save(%d): %w", idx, err)
 				return
@@ -726,5 +730,136 @@ func TestConcurrentPresetMutationsUnderRace(t *testing.T) {
 	}
 	if len(finalList) != workers+1 {
 		t.Fatalf("expected %d presets (default + %d concurrent saves), got %d", workers+1, workers, len(finalList))
+	}
+}
+
+func TestComponentPresetReferencesAndNullableGroups(t *testing.T) {
+	setTestPresetEnv(t)
+	dir := makeCanonicalModelDir(t, "can_lid")
+
+	schemaShape := map[string]any{
+		"core": map[string]any{"rim_diameter": 54.0},
+		"pull_tab": map[string]any{
+			"length":       6.0,
+			"width":        16.0,
+			"hanging_hole": false,
+		},
+	}
+
+	// Effective defaults with "heavy_duty" component preset (length=8, width=20, hanging_hole=false)
+	effectiveDefaults := map[string]any{
+		"core": map[string]any{"rim_diameter": 54.0},
+		"pull_tab": map[string]any{
+			"length":       8.0,
+			"width":        20.0,
+			"hanging_hole": false,
+		},
+	}
+
+	// 1. Unmodified component preset -> pull_tab omitted from params, only component_presets saved
+	key, err := Save("lib/can_lid", dir, SaveOptions{
+		Label: "Food 28oz",
+		Scope: "project",
+		CurrentParams: map[string]any{
+			"core": map[string]any{"rim_diameter": 101.5},
+			"pull_tab": map[string]any{
+				"length":       8.0,
+				"width":        20.0,
+				"hanging_hole": false,
+			},
+		},
+		Defaults:         effectiveDefaults,
+		SchemaShape:      schemaShape,
+		ComponentPresets: map[string]string{"pull_tab": "heavy_duty"},
+	})
+	if err != nil || key != "food_28oz" {
+		t.Fatalf("Save failed: key=%q err=%v", key, err)
+	}
+
+	// 2. Modified component preset -> only the single overridden field saved under pull_tab
+	if _, err := Save("lib/can_lid", dir, SaveOptions{
+		Label: "Food 28oz Hanging",
+		Scope: "project",
+		CurrentParams: map[string]any{
+			"core": map[string]any{"rim_diameter": 101.5},
+			"pull_tab": map[string]any{
+				"length":       8.0,
+				"width":        20.0,
+				"hanging_hole": true,
+			},
+		},
+		Defaults:         effectiveDefaults,
+		SchemaShape:      schemaShape,
+		ComponentPresets: map[string]string{"pull_tab": "heavy_duty"},
+	}); err != nil {
+		t.Fatalf("Save modified component preset failed: %v", err)
+	}
+
+	// 3. Disabled nullable group -> saved as null without component_presets
+	if _, err := Save("lib/can_lid", dir, SaveOptions{
+		Label: "No Tab",
+		Scope: "project",
+		CurrentParams: map[string]any{
+			"core":     map[string]any{"rim_diameter": 54.0},
+			"pull_tab": nil,
+		},
+		Defaults:    schemaShape,
+		SchemaShape: schemaShape,
+	}); err != nil {
+		t.Fatalf("Save disabled nullable group failed: %v", err)
+	}
+
+	list, err := ListStrict("lib/can_lid", dir, schemaShape, nil)
+	if err != nil {
+		t.Fatalf("ListStrict failed: %v", err)
+	}
+	byKey := map[string]Preset{}
+	for _, p := range list {
+		byKey[p.Key] = p
+	}
+
+	p1 := byKey["food_28oz"]
+	if p1.ComponentPresets["pull_tab"] != "heavy_duty" {
+		t.Fatalf("expected component_presets.pull_tab=heavy_duty, got %#v", p1.ComponentPresets)
+	}
+	if _, hasTab := p1.Params["pull_tab"]; hasTab {
+		t.Fatalf("expected pull_tab omitted from params when unmodified, got %#v", p1.Params)
+	}
+
+	p2 := byKey["food_28oz_hanging"]
+	if p2.ComponentPresets["pull_tab"] != "heavy_duty" {
+		t.Fatalf("expected component_presets.pull_tab=heavy_duty, got %#v", p2.ComponentPresets)
+	}
+	tabDiff, ok := p2.Params["pull_tab"].(map[string]any)
+	if !ok || len(tabDiff) != 1 || tabDiff["hanging_hole"] != true {
+		t.Fatalf("expected only hanging_hole=true override, got %#v", p2.Params["pull_tab"])
+	}
+
+	p3 := byKey["no_tab"]
+	if len(p3.ComponentPresets) != 0 {
+		t.Fatalf("expected empty component_presets for disabled group, got %#v", p3.ComponentPresets)
+	}
+	if val, exists := p3.Params["pull_tab"]; !exists || val != nil {
+		t.Fatalf("expected pull_tab=nil in params for disabled group, got %#v", p3.Params)
+	}
+
+	// Rename preserves component_presets
+	renamedKey, err := Rename("lib/can_lid", dir, "food_28oz", "project", "Large Food 28oz", "")
+	if err != nil || renamedKey != "large_food_28oz" {
+		t.Fatalf("Rename failed: key=%q err=%v", renamedKey, err)
+	}
+	list, err = ListStrict("lib/can_lid", dir, schemaShape, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var foundRenamed *Preset
+	for i := range list {
+		if list[i].Key == "large_food_28oz" {
+			foundRenamed = &list[i]
+			break
+		}
+	}
+	if foundRenamed == nil || foundRenamed.ComponentPresets["pull_tab"] != "heavy_duty" {
+		t.Fatalf("expected component_presets preserved after rename, got %#v", foundRenamed)
 	}
 }

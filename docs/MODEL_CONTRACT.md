@@ -8,12 +8,14 @@ This document defines the open contract between `build123d` model repositories a
 
 A library is a directory registered in Studio's `config.json`. During discovery (`GET /models`):
 
-- **Root-only skipped directories**: `components/`, `utils/`, `exports/`, `tests/`, `test/` (reusable sub-assemblies and helpers in `components/` and `utils/` are added to `sys.path` and hot-reloaded on edit, not listed as standalone models).
+- **Root-only skipped directories**: `utils/`, `exports/`, `tests/`, `test/` (helpers in `utils/` and reusable components in `components/` are added to `sys.path` and hot-reloaded on edit).
 - **Always-skipped directories**: `.git/`, `.venv/`, `venv/`, `__pycache__/`, `node_modules/`, `.mypy_cache/`, `.pytest_cache/`, `.ruff_cache/`, `build/`, `dist/`, and any dot-prefixed directory.
 - **Skipped Python files**: files starting with `_`, starting with `test_`, or named `setup.py`.
-- **Canonical model layout**:
-  - Preferred: `models/<model_name>/<model_name>.py` (with optional `presets.json` in the same folder).
-  - Standalone script in a shared folder: `models/<shared>/<script_name>.py` (with optional `<script_name>.presets.json`).
+- **Canonical model & component layout**:
+  - Preferred model layout: `models/<model_name>/<model_name>.py` (with optional `presets.json` in the same folder), discovered with `category: "model"`.
+  - Preferred component layout: `components/<component_name>/<component_name>.py` (with optional `presets.json` and an `__init__.py` re-exporting public symbols), discovered with `category: "component"`.
+  - Standalone script in a shared folder: `models/<shared>/<script_name>.py` or `components/<script_name>.py` (with optional `<script_name>.presets.json`).
+  - Non-CAD helper modules under `components/` (containing no `create_*`/`build`/`generate`/`create` entrypoint and no `build123d`/`ocp_vscode`/`show` usage) are ignored during discovery.
   - When a file resides directly in `<name>/<name>.py`, the redundant `<name>` directory wrapper is collapsed from the sidebar tree.
 
 ---
@@ -42,7 +44,8 @@ Every discovered model receives a collision-free, filesystem-safe canonical iden
 ```
 
 Examples:
-- `code-cad/container_lid` (from `models/container_lid/container_lid.py`)
+- `code-cad/container_lid` (from `models/container_lid/container_lid.py`, `category: "model"`)
+- `code-cad/components/pull_tab` (from `components/pull_tab/pull_tab.py`, `category: "component"`)
 - `demo/spool_cap` (from `models/spool_cap/spool_cap.py`)
 - `my-lib/brackets/wall_mount` (from `models/brackets/wall_mount.py`)
 
@@ -70,7 +73,7 @@ Studio embeds the canonical zero-dependency `params.py` (`worker/params.py`), id
   - `item_label` (`str`): Label for items inside a list field.
   - `when` (`dict[str, Any]`): Conditional visibility rules (`{"mode": "beaded"}`, `{"core.shape": ["round", "oval"]}`). Bare keys resolve relative to the current nested dataclass group; dotted keys resolve from root `<Model>Params`.
 - **`param_list(factory, ...)`**: Declares `default_factory` list fields with the same UI metadata.
-- **`group(factory, *, label=None, desc=None, when=None)`**: Declares nested `@dataclass` parameter groups.
+- **`group(factory, *, enabled=True, label=None, desc=None, when=None)`**: Declares nested `@dataclass` parameter groups. Pass `enabled=False` on a nullable group (`SubParams | None`) to make the section optional and disabled (`None`) by default.
 
 ### 4.2 Supported Runtime Types
 
@@ -78,7 +81,7 @@ Studio embeds the canonical zero-dependency `params.py` (`worker/params.py`), id
 - Constrained choices (dropdowns): `typing.Literal[...]` and `enum.Enum` subclasses
 - Nullable / auto-computed parameters: `Optional[T]` or PEP 604 `T | None` (empty string `""` for numeric/boolean/list fields coerces to `None` when nullable, else falls back to the field default)
 - Collections: `list[T]`, `list[SubDataclass]`, bare `list`, and `tuple` / `tuple[T, ...]`
-- Nested groups: `@dataclass` fields (nested class docstrings provide section descriptions; an `enabled: bool` field inside a nested group is promoted to a toggle in the collapsible section header)
+- Nested groups: `@dataclass` fields (nested class docstrings provide section descriptions; nullable groups `SubParams | None` or groups with an `enabled: bool` field render a toggle switch in the collapsible section header). When a nested group's `@dataclass` is defined in another discovered parametric component or model in the same library, Studio automatically links it (`component_id`, `component_name`, `group_defaults`) and renders an inline component preset picker.
 
 ---
 
@@ -112,6 +115,9 @@ Project-level presets use an explicit versioned JSON envelope (`schema_version: 
         "status": "usable",
         "note": "Slightly tight on painted rods"
       },
+      "component_presets": {
+        "pull_tab": "heavy_duty"
+      },
       "params": {
         "core": {
           "shaft_diameter": 12.7
@@ -122,6 +128,7 @@ Project-level presets use an explicit versioned JSON envelope (`schema_version: 
 }
 ```
 
+- **Component preset references (`component_presets`)**: Optional map from nested group path (e.g. `"pull_tab"`) to component preset key (e.g. `"heavy_duty"`). When resolving a preset, Studio layers `model defaults → referenced component preset → sparse params overrides`. Saving a parent preset stores only the component preset key plus any per-field overrides beyond that component preset (omitting unchanged component fields).
 - **File scoping**:
   - Canonical model directory (`parent.name == file.stem`): `<dir>/presets.json`.
   - Shared-directory standalone script (`parent.name != file.stem`): `<dir>/<stem>.presets.json`.

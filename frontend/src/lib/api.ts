@@ -379,6 +379,7 @@ export function savePreset(
     scope: string;
     full_snapshot?: boolean;
     params: ParamsRecord;
+    component_presets?: Record<string, string>;
     verification?: PresetVerification | null;
   }
 ): Promise<SavePresetResponse> {

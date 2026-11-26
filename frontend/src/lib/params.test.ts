@@ -2,16 +2,19 @@ import { describe, expect, it } from 'vitest';
 import {
   deepClone,
   evaluateWhen,
+  extractComponentPresetSelections,
   getParamByPath,
   mergeWithDefaults,
+  normalizeComponentPresetsForSave,
   normalizeParamsWithFields,
   paramsEqual,
   prefixFieldPaths,
+  resolvePresetParams,
   setParamByPath,
   splitFields,
   stepNumber,
 } from './params';
-import type { ParamField, ParamsRecord } from './types';
+import type { ComponentPresetBundle, ParamField, ParamsRecord, Preset } from './types';
 
 describe('params helpers', () => {
   it('mergeWithDefaults overlays nested objects, preserves nulls, and prunes removed keys', () => {
@@ -175,5 +178,166 @@ describe('params helpers', () => {
     ]);
     expect(coreFields.map((f) => f.name)).toEqual(['a']);
     expect(nestedGroups.map((f) => f.name)).toEqual(['g']);
+  });
+
+  it('resolves component presets, nullable groups, and save normalization', () => {
+    const fields: ParamField[] = [
+      {
+        name: 'core',
+        path: 'core',
+        label: 'Core',
+        type: 'group',
+        default: { rim_diameter: 54 },
+        description: '',
+        children: [
+          {
+            name: 'rim_diameter',
+            path: 'core.rim_diameter',
+            label: 'Rim Diameter',
+            type: 'float',
+            default: 54,
+            description: '',
+          },
+        ],
+      },
+      {
+        name: 'pull_tab',
+        path: 'pull_tab',
+        label: 'Pull Tab',
+        type: 'group',
+        nullable: true,
+        component_id: 'lib/components/pull_tab',
+        component_name: 'Pull Tab',
+        default: { length: 6, width: 16, hanging_hole: false },
+        group_defaults: { length: 6, width: 16, hanging_hole: false },
+        description: '',
+        children: [
+          { name: 'length', path: 'pull_tab.length', label: 'Length', type: 'float', default: 6, description: '' },
+          { name: 'width', path: 'pull_tab.width', label: 'Width', type: 'float', default: 16, description: '' },
+          { name: 'hanging_hole', path: 'pull_tab.hanging_hole', label: 'Hanging Hole', type: 'bool', default: false, description: '' },
+        ],
+      },
+      {
+        name: 'gridfinity',
+        path: 'gridfinity',
+        label: 'Gridfinity',
+        type: 'group',
+        nullable: true,
+        component_id: 'lib/components/gridfinity_base',
+        component_name: 'Gridfinity Base',
+        default: null,
+        group_defaults: { magnets: true, magnet_diameter: 6.1 },
+        description: '',
+        children: [
+          { name: 'magnets', path: 'gridfinity.magnets', label: 'Magnets', type: 'bool', default: true, description: '' },
+          { name: 'magnet_diameter', path: 'gridfinity.magnet_diameter', label: 'Magnet Diameter', type: 'float', default: 6.1, description: '' },
+        ],
+      },
+    ];
+
+    const defaults: ParamsRecord = {
+      core: { rim_diameter: 54 },
+      pull_tab: { length: 6, width: 16, hanging_hole: false },
+      gridfinity: null,
+    };
+
+    const components: Record<string, ComponentPresetBundle> = {
+      'lib/components/pull_tab': {
+        id: 'lib/components/pull_tab',
+        name: 'Pull Tab',
+        defaults: { length: 6, width: 16, hanging_hole: false },
+        fields: fields[1].children,
+        presets: [
+          { key: 'default', label: 'Standard', description: '', source: 'default', params: {} },
+          {
+            key: 'heavy_duty',
+            label: 'Heavy Duty',
+            description: '',
+            source: 'project',
+            params: { length: 8, width: 20 },
+          },
+        ],
+      },
+      'lib/components/gridfinity_base': {
+        id: 'lib/components/gridfinity_base',
+        name: 'Gridfinity Base',
+        defaults: { magnets: true, magnet_diameter: 6.1 },
+        fields: fields[2].children,
+        presets: [
+          { key: 'default', label: 'With Magnets', description: '', source: 'default', params: {} },
+          {
+            key: 'no_magnets',
+            label: 'No Magnets',
+            description: '',
+            source: 'project',
+            params: { magnets: false },
+          },
+        ],
+      },
+    };
+
+    const preset: Preset = {
+      key: 'food_28oz',
+      label: 'Food 28oz',
+      description: '',
+      source: 'project',
+      component_presets: { pull_tab: 'heavy_duty', gridfinity: 'no_magnets' },
+      params: { core: { rim_diameter: 101.5 }, pull_tab: { hanging_hole: true } },
+    };
+
+    const resolved = resolvePresetParams(defaults, fields, preset, components);
+    expect(resolved).toEqual({
+      core: { rim_diameter: 101.5 },
+      pull_tab: { length: 8, width: 20, hanging_hole: true },
+      gridfinity: { magnets: false, magnet_diameter: 6.1 },
+    });
+
+    // Disabled nullable group overrides component_presets cleanly
+    const disabledPreset: Preset = {
+      key: 'no_tab',
+      label: 'No Tab',
+      description: '',
+      source: 'project',
+      params: { pull_tab: null },
+    };
+    expect(resolvePresetParams(defaults, fields, disabledPreset, components).pull_tab).toBeNull();
+
+    // Missing component preset falls back to component defaults
+    const missingRefPreset: Preset = {
+      key: 'broken_ref',
+      label: 'Broken Ref',
+      description: '',
+      source: 'project',
+      component_presets: { pull_tab: 'deleted_variant' },
+      params: {},
+    };
+    expect(resolvePresetParams(defaults, fields, missingRefPreset, components).pull_tab).toEqual({
+      length: 6,
+      width: 16,
+      hanging_hole: false,
+    });
+
+    expect(extractComponentPresetSelections(preset, fields)).toEqual({
+      pull_tab: 'heavy_duty',
+      gridfinity: 'no_magnets',
+    });
+
+    // Save normalization omits implicit default for enabled pull_tab, preserves explicit default for disabled-by-default gridfinity
+    expect(
+      normalizeComponentPresetsForSave(
+        { pull_tab: 'default', gridfinity: 'default' },
+        {
+          core: { rim_diameter: 54 },
+          pull_tab: { length: 6, width: 16, hanging_hole: false },
+          gridfinity: { magnets: true, magnet_diameter: 6.1 },
+        },
+        defaults,
+        fields
+      )
+    ).toEqual({ gridfinity: 'default' });
+
+    // evaluateWhen supports checking top-level nullable groups from sibling groups (e.g. when={"gridfinity": null})
+    expect(evaluateWhen({ gridfinity: null }, { gridfinity: null, structure: { wall: 3 } }, { wall: 3 })).toBe(true);
+    expect(evaluateWhen({ gridfinity: null }, { gridfinity: { magnets: true }, structure: { wall: 3 } }, { wall: 3 })).toBe(false);
   });
 });

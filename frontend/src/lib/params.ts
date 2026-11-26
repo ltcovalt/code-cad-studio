@@ -1,4 +1,4 @@
-import type { ParamField, ParamsRecord } from './types';
+import type { ComponentPresetBundle, ParamField, ParamsRecord, Preset } from './types';
 
 const DANGEROUS_KEYS = new Set(['__proto__', 'constructor', 'prototype']);
 
@@ -44,22 +44,249 @@ export function deepClone<T>(value: T): T {
   return value;
 }
 
+export function getGroupDefaultsForField(field: ParamField): ParamsRecord {
+  if (isPlainObject(field.group_defaults)) {
+    return deepClone(field.group_defaults);
+  }
+  if (isPlainObject(field.default)) {
+    return deepClone(field.default);
+  }
+  return {};
+}
+
+export function collectComponentFields(fields: ParamField[]): ParamField[] {
+  const result: ParamField[] = [];
+  const walk = (list: ParamField[]) => {
+    for (const f of list) {
+      if (f.type === 'group') {
+        if (f.component_id) {
+          result.push(f);
+        }
+        if (f.children) {
+          walk(f.children);
+        }
+      }
+    }
+  };
+  walk(fields);
+  return result;
+}
+
 /**
  * Overlay existing user edits or sparse preset overrides onto canonical defaults.
- * Preserves null values for Optional[T] fields and drops keys removed from schema.
+ * Preserves null values for Optional[T] fields (including nullable groups) and drops keys removed from schema.
  */
-export function mergeWithDefaults(defaults: ParamsRecord, overrides: ParamsRecord): ParamsRecord {
+export function mergeWithDefaults(
+  defaults: ParamsRecord,
+  overrides: ParamsRecord,
+  fields?: ParamField[]
+): ParamsRecord {
   const merged = deepClone(defaults);
+  const fieldByName = fields ? new Map(fields.map((f) => [f.name, f])) : null;
+
   for (const [key, val] of Object.entries(overrides)) {
     if (DANGEROUS_KEYS.has(key) || !hasOwn(merged, key)) continue;
     const defVal = merged[key];
+    const field = fieldByName?.get(key);
     if (isPlainObject(defVal) && isPlainObject(val)) {
-      merged[key] = mergeWithDefaults(defVal, val);
+      merged[key] = mergeWithDefaults(defVal, val, field?.children);
+    } else if (defVal === null && isPlainObject(val) && field?.type === 'group') {
+      merged[key] = mergeWithDefaults(getGroupDefaultsForField(field), val, field.children);
     } else {
       merged[key] = deepClone(val);
     }
   }
   return merged;
+}
+
+export function resolveComponentPresetParams(
+  componentId: string,
+  presetKey: string,
+  fallbackDefaults: ParamsRecord,
+  components: Record<string, ComponentPresetBundle>,
+  visited: ReadonlySet<string> = new Set()
+): ParamsRecord {
+  const bundle = hasOwn(components, componentId) ? components[componentId] : undefined;
+  const baseDefaults =
+    bundle && isPlainObject(bundle.defaults) && Object.keys(bundle.defaults).length > 0
+      ? deepClone(bundle.defaults)
+      : deepClone(fallbackDefaults);
+
+  if (!presetKey || presetKey === 'default' || !bundle || visited.has(componentId)) {
+    return normalizeParamsWithFields(baseDefaults, bundle?.fields ?? []);
+  }
+
+  const matched = bundle.presets.find((p) => p.key === presetKey);
+  if (!matched) {
+    return normalizeParamsWithFields(baseDefaults, bundle.fields ?? []);
+  }
+
+  const nextVisited = new Set(visited);
+  nextVisited.add(componentId);
+  return resolvePresetParams(
+    baseDefaults,
+    bundle.fields ?? [],
+    matched,
+    components,
+    nextVisited
+  );
+}
+
+function applyPresetLayer(
+  target: ParamsRecord,
+  fields: ParamField[],
+  compPresets: Record<string, string> | undefined,
+  overrides: ParamsRecord | undefined,
+  components: Record<string, ComponentPresetBundle>,
+  visited: ReadonlySet<string>
+): void {
+  const fieldByName = new Map(fields.map((f) => [f.name, f]));
+
+  // First handle declared schema fields (supporting nullable groups and component_presets)
+  for (const f of fields) {
+    if (DANGEROUS_KEYS.has(f.name)) continue;
+    const hasOverride = overrides !== undefined && hasOwn(overrides, f.name);
+    const overrideVal = hasOverride ? overrides[f.name] : undefined;
+
+    if (f.type === 'group') {
+      if (hasOverride && overrideVal === null) {
+        target[f.name] = null;
+        continue;
+      }
+
+      const compKey =
+        f.component_id && compPresets && hasOwn(compPresets, f.path)
+          ? String(compPresets[f.path] ?? '').trim()
+          : '';
+
+      if (compKey && f.component_id) {
+        const fallback = isPlainObject(f.group_defaults)
+          ? f.group_defaults
+          : isPlainObject(target[f.name])
+            ? (target[f.name] as ParamsRecord)
+            : {};
+        const base = resolveComponentPresetParams(
+          f.component_id,
+          compKey,
+          fallback,
+          components,
+          visited
+        );
+        if (hasOverride && isPlainObject(overrideVal)) {
+          applyPresetLayer(base, f.children ?? [], undefined, overrideVal, components, visited);
+        }
+        target[f.name] = base;
+        continue;
+      }
+
+      if (hasOverride && isPlainObject(overrideVal)) {
+        const base = isPlainObject(target[f.name])
+          ? deepClone(target[f.name] as ParamsRecord)
+          : getGroupDefaultsForField(f);
+        applyPresetLayer(base, f.children ?? [], compPresets, overrideVal, components, visited);
+        target[f.name] = base;
+        continue;
+      }
+
+      if (isPlainObject(target[f.name])) {
+        applyPresetLayer(
+          target[f.name] as ParamsRecord,
+          f.children ?? [],
+          compPresets,
+          undefined,
+          components,
+          visited
+        );
+      }
+      continue;
+    }
+
+    if (hasOverride) {
+      target[f.name] = deepClone(overrideVal);
+    }
+  }
+
+  // Fallback for any keys present in defaults/overrides when schema fields weren't provided
+  if (overrides) {
+    for (const [key, val] of Object.entries(overrides)) {
+      if (DANGEROUS_KEYS.has(key) || fieldByName.has(key) || !hasOwn(target, key)) continue;
+      const defVal = target[key];
+      if (isPlainObject(defVal) && isPlainObject(val)) {
+        target[key] = mergeWithDefaults(defVal, val);
+      } else {
+        target[key] = deepClone(val);
+      }
+    }
+  }
+}
+
+/**
+ * Resolve a model preset's effective parameters by layering:
+ *   model defaults -> referenced component presets -> sparse preset param overrides
+ */
+export function resolvePresetParams(
+  defaults: ParamsRecord,
+  fields: ParamField[],
+  preset: Preset | null | undefined,
+  components: Record<string, ComponentPresetBundle> = {},
+  visited: ReadonlySet<string> = new Set()
+): ParamsRecord {
+  const resolved = deepClone(defaults);
+  if (preset) {
+    applyPresetLayer(
+      resolved,
+      fields,
+      preset.component_presets,
+      preset.params,
+      components,
+      visited
+    );
+  }
+  return normalizeParamsWithFields(resolved, fields);
+}
+
+/**
+ * Return the active component preset key for every component-backed group on a preset.
+ */
+export function extractComponentPresetSelections(
+  preset: Preset | null | undefined,
+  fields: ParamField[]
+): Record<string, string> {
+  const result: Record<string, string> = {};
+  const compFields = collectComponentFields(fields);
+  const refs = preset?.component_presets;
+  for (const f of compFields) {
+    const refKey = refs && hasOwn(refs, f.path) ? String(refs[f.path] ?? '').trim() : '';
+    result[f.path] = refKey || 'default';
+  }
+  return result;
+}
+
+/**
+ * Normalize a map of selected component preset keys against current params & model defaults,
+ * matching the server's save-time normalization rules (omits disabled groups and implicit defaults).
+ */
+export function normalizeComponentPresetsForSave(
+  selected: Record<string, string>,
+  currentParams: ParamsRecord,
+  modelDefaults: ParamsRecord,
+  fields: ParamField[]
+): Record<string, string> {
+  const out: Record<string, string> = {};
+  for (const f of collectComponentFields(fields)) {
+    const curVal = getParamByPath(currentParams, f.path);
+    if (curVal === null || curVal === undefined) {
+      continue;
+    }
+    const defVal = getParamByPath(modelDefaults, f.path);
+    const defaultIsNull = defVal === null;
+    const key = (selected[f.path] ?? '').trim() || 'default';
+    if (key === 'default' && !defaultIsNull) {
+      continue;
+    }
+    out[f.path] = key;
+  }
+  return out;
 }
 
 function parseArrayIndex(part: string): number | null {
@@ -189,7 +416,8 @@ export function normalizeParamsWithFields(
 /**
  * Evaluate conditional visibility (`metadata={"when": {...}}`).
  * - Keys containing `.` resolve from root params (e.g. "core.shape").
- * - Bare keys resolve from the current group object (e.g. "style").
+ * - Bare keys resolve from the current group object first, falling back to root params
+ *   (e.g. "style" within a group, or "gridfinity": null checking a top-level nullable group).
  * - Expected value matches by strict equality or array membership.
  */
 export function evaluateWhen(
@@ -204,7 +432,9 @@ export function evaluateWhen(
       ? getParamByPath(rootParams, key)
       : hasOwn(groupParams, key)
         ? groupParams[key]
-        : undefined;
+        : hasOwn(rootParams, key)
+          ? rootParams[key]
+          : undefined;
     if (Array.isArray(expected)) {
       if (!expected.includes(actual)) return false;
     } else if (actual !== expected) {

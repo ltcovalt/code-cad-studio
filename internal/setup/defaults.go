@@ -60,12 +60,11 @@ var alwaysSkipDirs = map[string]struct{}{
 }
 
 var rootOnlySkipDirs = map[string]struct{}{
-	"exports":    {},
-	"components": {},
-	"utils":      {},
-	"tests":      {},
-	"test":       {},
-	"docs":       {},
+	"exports": {},
+	"utils":   {},
+	"tests":   {},
+	"test":    {},
+	"docs":    {},
 }
 
 // ExpandPath expands a leading "~" to the user's home directory and cleans the path.
