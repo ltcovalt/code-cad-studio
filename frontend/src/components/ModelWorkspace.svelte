@@ -58,38 +58,6 @@
           <span class="text-xs font-semibold uppercase tracking-wider opacity-70 truncate">
             Parameters
           </span>
-          {#if !hasModelError && studio.activeModel.kind !== 'script'}
-            <button
-              type="button"
-              class="btn btn-xs btn-square h-6 w-6 min-h-0 {studio.showDescriptions
-                ? 'btn-soft btn-primary'
-                : 'btn-ghost opacity-60 hover:opacity-100'}"
-              aria-pressed={studio.showDescriptions}
-              aria-label={studio.showDescriptions
-                ? 'Hide parameter descriptions'
-                : 'Show parameter descriptions'}
-              title={studio.showDescriptions
-                ? 'Parameter descriptions shown inline (click for hover tooltips)'
-                : 'Parameter descriptions in hover tooltips (click to show inline)'}
-              onclick={() => studio.toggleShowDescriptions()}
-            >
-              <svg
-                xmlns="http://www.w3.org/2000/svg"
-                class="h-3.5 w-3.5"
-                viewBox="0 0 24 24"
-                fill="none"
-                stroke="currentColor"
-                stroke-width="2"
-                stroke-linecap="round"
-                stroke-linejoin="round"
-                aria-hidden="true"
-              >
-                <circle cx="12" cy="12" r="10" />
-                <path d="M12 16v-4" />
-                <path d="M12 8h.01" />
-              </svg>
-            </button>
-          {/if}
         </div>
         {#if !hasModelError && studio.activeModel.kind !== 'script'}
           <PresetBar />
@@ -146,7 +114,6 @@
                       rootParams={studio.params}
                       groupParams={studio.params}
                       presetDefaults={studio.presetDefaults}
-                      showDescriptions={studio.showDescriptions}
                       onUpdate={(path, val, mode) => studio.updateParam(path, val, mode)}
                       onPreviewCommit={() => studio.commitPreviewIfStale()}
                     />
@@ -162,7 +129,6 @@
               rootParams={studio.params}
               groupParams={studio.params}
               presetDefaults={studio.presetDefaults}
-              showDescriptions={studio.showDescriptions}
               components={studio.components}
               selectedComponentPresets={studio.selectedComponentPresets}
               presetComponentPresets={studio.presetComponentPresets}

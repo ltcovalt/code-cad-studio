@@ -16,7 +16,6 @@
     rootParams: ParamsRecord;
     groupParams: ParamsRecord;
     presetDefaults: ParamsRecord;
-    showDescriptions: boolean;
     onUpdate: (path: string, value: unknown, mode?: ParamUpdateMode) => void;
     onPreviewCommit?: () => void;
   }
@@ -26,7 +25,6 @@
     rootParams,
     groupParams,
     presetDefaults,
-    showDescriptions,
     onUpdate,
     onPreviewCommit,
   }: Props = $props();
@@ -247,7 +245,7 @@
       {#if !isAutoNull}
         <span class="badge badge-xs badge-ghost font-mono opacity-70 shrink-0">{items.length}</span>
       {/if}
-      {#if field.description && !showDescriptions}
+      {#if field.description}
         <InfoTooltip text={field.description} label={field.label} />
       {/if}
       {#if isModified}
@@ -313,10 +311,6 @@
       </button>
     </div>
   </div>
-
-  {#if field.description && showDescriptions}
-    <p class="text-[11px] opacity-60 leading-snug -mt-1 break-words">{field.description}</p>
-  {/if}
 
   <!-- Body: Auto / Empty / List of Items -->
   {#if isAutoNull}
@@ -432,7 +426,6 @@
                   {rootParams}
                   groupParams={itemObj}
                   {presetDefaults}
-                  {showDescriptions}
                   onUpdate={forwardUpdate}
                   {onPreviewCommit}
                 />
@@ -453,7 +446,6 @@
               {rootParams}
               {groupParams}
               {presetDefaults}
-              {showDescriptions}
               onUpdate={forwardUpdate}
               {onPreviewCommit}
             />

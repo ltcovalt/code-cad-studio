@@ -8,6 +8,7 @@
   import ModelSidebar from './components/ModelSidebar.svelte';
   import ModelWorkspace from './components/ModelWorkspace.svelte';
   import OnboardingModal from './components/OnboardingModal.svelte';
+  import PresetDetailsModal from './components/PresetDetailsModal.svelte';
   import SavePresetModal from './components/SavePresetModal.svelte';
   import SettingsModal from './components/SettingsModal.svelte';
   import WindowResizeHandles from './components/WindowResizeHandles.svelte';
@@ -244,6 +245,7 @@
     if (
       studio.onboardingOpen ||
       studio.settingsOpen ||
+      studio.presetDetailsModalOpen ||
       studio.savePresetModalOpen ||
       studio.managePresetsModalOpen ||
       studio.exportModalOpen ||
@@ -403,6 +405,7 @@
 
 <OnboardingModal />
 <SettingsModal />
+<PresetDetailsModal />
 <SavePresetModal />
 <ManagePresetsModal />
 <ExportModal />

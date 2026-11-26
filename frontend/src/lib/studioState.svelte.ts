@@ -38,17 +38,8 @@ import type {
 } from './types';
 
 const THEME_STORAGE_KEY = 'code-cad-theme';
-const DESCRIPTIONS_STORAGE_KEY = 'code-cad-show-descriptions';
 const COLLAPSED_TREE_STORAGE_KEY = 'code-cad-tree-collapsed';
 const RENDER_DEBOUNCE_MS = 180;
-
-function loadShowDescriptions(): boolean {
-  try {
-    return localStorage.getItem(DESCRIPTIONS_STORAGE_KEY) === 'true';
-  } catch {
-    return false;
-  }
-}
 
 function loadCollapsedFolders(): Record<string, boolean> {
   try {
@@ -112,13 +103,13 @@ export class StudioState {
   workerRunning = $state(false);
   workerError = $state('');
   theme = $state('dark');
-  showDescriptions = $state(loadShowDescriptions());
   needsOnboarding = $state(false);
   onboardingOpen = $state(false);
   onboardingInitialStep = $state<1 | 2>(1);
   setupProgress = $state<SetupProgressEvent | null>(null);
   setupLogs = $state<string[]>([]);
   settingsOpen = $state(false);
+  presetDetailsModalOpen = $state(false);
   savePresetModalOpen = $state(false);
   managePresetsModalOpen = $state(false);
   exportModalOpen = $state(false);
@@ -371,19 +362,6 @@ export class StudioState {
     api.saveTheme(themeName).catch(() => {});
   }
 
-  setShowDescriptions(show: boolean): void {
-    this.showDescriptions = show;
-    try {
-      localStorage.setItem(DESCRIPTIONS_STORAGE_KEY, String(show));
-    } catch {
-      // ignore
-    }
-  }
-
-  toggleShowDescriptions(): void {
-    this.setShowDescriptions(!this.showDescriptions);
-  }
-
   setExportFilename(name: string): void {
     this.exportFilename = name;
     this.exportFilenameEdited = true;
@@ -482,6 +460,7 @@ export class StudioState {
     this.defaultExportFilename = '';
     this.exportFilename = '';
     this.exportFilenameEdited = false;
+    this.presetDetailsModalOpen = false;
     this.exportModalOpen = false;
     this.lastExportPath = '';
     this.modelLoadError = '';

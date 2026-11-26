@@ -25,7 +25,6 @@
     rootParams: ParamsRecord;
     groupParams: ParamsRecord;
     presetDefaults: ParamsRecord;
-    showDescriptions: boolean;
     components?: Record<string, ComponentPresetBundle>;
     selectedComponentPresets?: Record<string, string>;
     presetComponentPresets?: Record<string, string>;
@@ -42,7 +41,6 @@
     rootParams,
     groupParams,
     presetDefaults,
-    showDescriptions,
     components = {},
     selectedComponentPresets = {},
     presetComponentPresets = {},
@@ -541,7 +539,6 @@
                 {rootParams}
                 groupParams={childGroupParams}
                 presetDefaults={childPresetDefaults}
-                {showDescriptions}
                 {components}
                 {selectedComponentPresets}
                 {presetComponentPresets}
@@ -563,7 +560,6 @@
       {rootParams}
       {groupParams}
       {presetDefaults}
-      {showDescriptions}
       {onUpdate}
       {onPreviewCommit}
     />
@@ -574,7 +570,7 @@
       >
         <div class="flex items-center gap-1 min-w-0 flex-1">
           <span class="text-xs font-medium leading-snug break-words min-w-0">{field.label}</span>
-          {#if field.description && !showDescriptions}
+          {#if field.description}
             <InfoTooltip text={field.description} label={field.label} />
           {/if}
           {#if isModified}
@@ -618,9 +614,6 @@
           </button>
         </div>
       </div>
-      {#if field.description && showDescriptions}
-        <p class="text-[11px] opacity-60 leading-snug mt-0.5 break-words">{field.description}</p>
-      {/if}
     </div>
   {:else if field.type === 'bool'}
     <div class="w-full min-w-0 py-0.5">
@@ -632,7 +625,7 @@
           >
             {field.label}
           </label>
-          {#if field.description && !showDescriptions}
+          {#if field.description}
             <InfoTooltip text={field.description} label={field.label} />
           {/if}
           {#if isModified}
@@ -648,9 +641,6 @@
             onUpdate(field.path, (e.currentTarget as HTMLInputElement).checked, 'immediate')}
         />
       </div>
-      {#if field.description && showDescriptions}
-        <p class="text-[11px] opacity-60 leading-snug mt-0.5 break-words">{field.description}</p>
-      {/if}
     </div>
   {:else if field.type === 'enum'}
     <div class="w-full min-w-0">
@@ -662,7 +652,7 @@
           >
             {field.label}
           </label>
-          {#if field.description && !showDescriptions}
+          {#if field.description}
             <InfoTooltip text={field.description} label={field.label} />
           {/if}
           {#if isModified}
@@ -686,9 +676,6 @@
           {/each}
         </select>
       </div>
-      {#if field.description && showDescriptions}
-        <p class="text-[11px] opacity-60 leading-snug mt-1 break-words">{field.description}</p>
-      {/if}
     </div>
   {:else if field.type === 'int' || field.type === 'float'}
     <div class="w-full min-w-0">
@@ -702,7 +689,7 @@
           >
             {field.label}{#if field.unit}<span class="font-normal opacity-55 ml-1">({field.unit})</span>{/if}
           </label>
-          {#if field.description && !showDescriptions}
+          {#if field.description}
             <InfoTooltip text={field.description} label={field.label} />
           {/if}
           {#if isModified}
@@ -779,9 +766,6 @@
           onblur={(e) => handleRangeCancel((e.currentTarget as HTMLInputElement).value)}
         />
       {/if}
-      {#if field.description && showDescriptions}
-        <p class="text-[11px] opacity-60 mt-1 leading-snug break-words">{field.description}</p>
-      {/if}
     </div>
   {:else}
     <div class="w-full min-w-0">
@@ -792,7 +776,7 @@
         >
           {field.label}
         </label>
-        {#if field.description && !showDescriptions}
+        {#if field.description}
           <InfoTooltip text={field.description} label={field.label} />
         {/if}
         {#if isModified}
@@ -814,9 +798,6 @@
           onUpdate(field.path, field.nullable && v === '' ? null : v, 'debounced');
         }}
       />
-      {#if field.description && showDescriptions}
-        <p class="text-[11px] opacity-60 mt-1 leading-snug break-words">{field.description}</p>
-      {/if}
     </div>
   {/if}
 {/if}

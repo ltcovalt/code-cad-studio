@@ -1,16 +1,66 @@
 <script lang="ts">
   import { studio } from '../lib/studioState.svelte';
+  import {
+    formatVerificationTooltip,
+    getPresetVerification,
+    getVerificationMeta,
+  } from '../lib/verification';
   import PresetPicker from './PresetPicker.svelte';
-  import PresetVerificationPopover from './PresetVerificationPopover.svelte';
+  import VerificationIcon from './VerificationIcon.svelte';
 
   const selectedPreset = $derived(studio.selectedPreset);
+  const current = $derived(getPresetVerification(selectedPreset));
+  const currentMeta = $derived(getVerificationMeta(current.status));
+  const modified = $derived(studio.paramsModified);
+  const hasNoteOnly = $derived(current.status === 'unverified' && current.note !== '');
+
+  const statusTooltip = $derived.by(() => {
+    if (!selectedPreset) return 'Preset details & print status';
+    return [
+      selectedPreset.label,
+      selectedPreset.description,
+      formatVerificationTooltip(current.status, current.note, modified),
+      'Click to view details & print status',
+    ]
+      .filter(Boolean)
+      .join('\n');
+  });
 </script>
 
 <div class="space-y-1 min-w-0">
   <div class="flex items-center justify-between gap-2">
     <span class="text-[11px] font-medium opacity-60 select-none">Preset</span>
     <div class="flex items-center gap-0.5 shrink-0">
-      <PresetVerificationPopover />
+      <button
+        type="button"
+        disabled={!selectedPreset}
+        aria-label={selectedPreset
+          ? `Preset details and print status: ${currentMeta.label}${modified ? ' (parameters modified)' : ''}`
+          : 'Preset details and print status'}
+        title={statusTooltip}
+        class="relative btn btn-ghost btn-xs btn-square h-6 w-6 min-h-6 shrink-0 {current.status ===
+          'unverified' && !hasNoteOnly
+          ? 'opacity-70 hover:opacity-100'
+          : modified
+            ? 'opacity-55 hover:opacity-90'
+            : 'opacity-95 hover:opacity-100'}"
+        onclick={() => {
+          studio.presetDetailsModalOpen = true;
+        }}
+      >
+        <VerificationIcon status={current.status} class="h-3.5 w-3.5" />
+        {#if modified && current.status !== 'unverified'}
+          <span
+            class="absolute top-0.5 right-0.5 h-1.5 w-1.5 rounded-full bg-warning ring-1 ring-base-100"
+            aria-hidden="true"
+          ></span>
+        {:else if hasNoteOnly}
+          <span
+            class="absolute top-0.5 right-0.5 h-1.5 w-1.5 rounded-full bg-info ring-1 ring-base-100"
+            aria-hidden="true"
+          ></span>
+        {/if}
+      </button>
 
       <button
         type="button"

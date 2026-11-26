@@ -986,11 +986,25 @@
               {#if studio.hasDesktop}
                 <button
                   type="button"
-                  class="btn btn-xs btn-neutral"
+                  class="btn btn-xs btn-ghost border border-base-300 h-6 min-h-6 px-2 gap-1 text-[11px] shrink-0"
                   disabled={busy}
                   onclick={handleAddFolder}
                 >
-                  + Add Library…
+                  <svg
+                    xmlns="http://www.w3.org/2000/svg"
+                    class="h-3 w-3"
+                    viewBox="0 0 24 24"
+                    fill="none"
+                    stroke="currentColor"
+                    stroke-width="2.4"
+                    stroke-linecap="round"
+                    stroke-linejoin="round"
+                    aria-hidden="true"
+                  >
+                    <path d="M12 5v14" />
+                    <path d="M5 12h14" />
+                  </svg>
+                  <span>Add Library</span>
                 </button>
               {/if}
             </div>
@@ -998,7 +1012,7 @@
             {#if libraries.length > 0}
               <div class="space-y-1.5">
                 {#each libraries as lib (lib.uid)}
-                  <div class="rounded-field border border-base-300 bg-base-200/40 px-2.5 py-2 flex items-center gap-2">
+                  <div class="rounded-field border border-base-300 bg-base-200/40 px-2.5 py-1.5 flex items-center gap-2">
                     <input
                       type="text"
                       bind:value={lib.name}
@@ -1019,7 +1033,7 @@
                     {/if}
                     <button
                       type="button"
-                      class="btn btn-ghost btn-xs btn-square hover:text-error shrink-0"
+                      class="btn btn-ghost btn-xs btn-square h-6 w-6 min-h-0 opacity-70 hover:opacity-100 hover:text-error shrink-0"
                       title="Remove library"
                       aria-label="Remove library"
                       disabled={busy}

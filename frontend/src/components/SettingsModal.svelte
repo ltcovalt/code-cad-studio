@@ -7,8 +7,6 @@
     ExportQuality,
     HealthResponse,
     Library,
-    ProjectDirInfo,
-    SetupDefaultsResponse,
   } from '../lib/types';
   import Alert from './Alert.svelte';
 
@@ -17,6 +15,7 @@
     id: string;
     name: string;
     path: string;
+    modelCount?: number;
   }
 
   let uidCounter = 0;
@@ -25,16 +24,16 @@
     return `lib-draft-${uidCounter}`;
   }
 
-  function formatBytes(bytes: number): string {
-    if (bytes < 1024) return `${bytes} B`;
-    if (bytes < 1024 * 1024) return `${(bytes / 1024).toFixed(1)} KB`;
-    return `${(bytes / (1024 * 1024)).toFixed(1)} MB`;
+  function countModelsForLibrary(libId: string): number | undefined {
+    if (!libId || Boolean(studio.libraryErrors[libId])) return undefined;
+    return studio.models.filter((m) => m.library_id === libId).length;
   }
 
   let dialogEl: HTMLDialogElement | undefined = $state();
   let pressedOutside = false;
 
   let libraries = $state<LibraryDraft[]>([]);
+  let manualPathInput = $state('');
   let pythonPath = $state('');
   let exportDir = $state('');
   let editorCommand = $state('');
@@ -49,55 +48,18 @@
   let healthError = $state('');
   let healthLoading = $state(false);
   let saving = $state(false);
-  let scaffoldingDemo = $state(false);
   let savedBanner = $state(false);
   let savedMessage = $state('');
   let formError = $state('');
 
-  // Inline starter library downloader state
-  let starterOpen = $state(false);
-  let setupDefaults = $state<SetupDefaultsResponse | null>(null);
-  let starterDir = $state('');
-  let starterDirInfo = $state<ProjectDirInfo | null>(null);
-  let starterAllowOverwrite = $state(false);
-  let downloadingStarter = $state(false);
-  let starterError = $state('');
-
   let pollTimer: ReturnType<typeof setTimeout> | null = null;
-  let starterInspectTimer: ReturnType<typeof setTimeout> | null = null;
 
-  let busy = $derived(downloadingStarter || saving || scaffoldingDemo);
-
-  let downloadProgressPct = $derived.by<number | null>(() => {
-    const p = studio.setupProgress;
-    if (!p || p.task !== 'download') return null;
-    if (
-      p.stage === 'downloading' &&
-      p.total_bytes &&
-      p.total_bytes > 0 &&
-      p.bytes_downloaded !== undefined
-    ) {
-      return Math.min(100, Math.round((p.bytes_downloaded / p.total_bytes) * 100));
-    }
-    if (
-      p.stage === 'extracting' &&
-      p.total_files &&
-      p.total_files > 0 &&
-      p.files_extracted !== undefined
-    ) {
-      return Math.min(100, Math.round((p.files_extracted / p.total_files) * 100));
-    }
-    return null;
-  });
+  let busy = $derived(saving);
 
   function clearPoll() {
     if (pollTimer !== null) {
       clearTimeout(pollTimer);
       pollTimer = null;
-    }
-    if (starterInspectTimer !== null) {
-      clearTimeout(starterInspectTimer);
-      starterInspectTimer = null;
     }
   }
 
@@ -107,7 +69,9 @@
       id: lib.id,
       name: lib.name,
       path: lib.path,
+      modelCount: countModelsForLibrary(lib.id),
     }));
+    manualPathInput = '';
     pythonPath = studio.config.python_path;
     exportDir = studio.config.export_dir ?? '';
     editorCommand = studio.config.editor_command ?? '';
@@ -120,9 +84,6 @@
     savedBanner = false;
     savedMessage = '';
     formError = '';
-    starterOpen = false;
-    starterError = '';
-    starterAllowOverwrite = false;
     void fetchHealth();
   }
 
@@ -170,23 +131,22 @@
     }
   }
 
-  function addManualLibraryRow() {
-    libraries = [...libraries, { uid: nextUid(), id: '', name: '', path: '' }];
-    savedBanner = false;
-  }
-
   async function handleAddFolder() {
     formError = '';
-    if (!studio.hasDesktop) {
-      addManualLibraryRow();
-      return;
-    }
     try {
       const lastPath = libraries[libraries.length - 1]?.path ?? '';
       const resp = await api.browseProject(lastPath);
       if (!resp.cancelled && resp.path) {
         const clean = resp.path.trim();
-        if (libraries.some((l) => pathsEqual(l.path, clean, studio.os))) {
+        const inspect = await api.inspectSetupDir(clean).catch(() => null);
+        const resolvedPath = inspect?.ok && inspect.info.path ? inspect.info.path : clean;
+        if (
+          libraries.some(
+            (l) =>
+              pathsEqual(l.path, clean, studio.os) ||
+              pathsEqual(l.path, resolvedPath, studio.os)
+          )
+        ) {
           formError = 'That library is already in your libraries list.';
           return;
         }
@@ -196,10 +156,11 @@
             uid: nextUid(),
             id: '',
             name: suggestLibraryName(
-              clean,
+              resolvedPath,
               libraries.map((l) => l.name)
             ),
-            path: clean,
+            path: resolvedPath,
+            modelCount: inspect?.ok ? inspect.info.model_count : undefined,
           },
         ];
         savedBanner = false;
@@ -209,37 +170,37 @@
     }
   }
 
-  async function handleBrowseLibraryRow(index: number) {
+  async function handleAddManualPath() {
+    const clean = manualPathInput.trim();
+    if (!clean) return;
     formError = '';
-    try {
-      const current = libraries[index]?.path ?? '';
-      const resp = await api.browseProject(current);
-      if (!resp.cancelled && resp.path) {
-        const clean = resp.path.trim();
-        if (libraries.some((l, idx) => idx !== index && pathsEqual(l.path, clean, studio.os))) {
-          formError = 'That library is already in your libraries list.';
-          return;
-        }
-        const next = [...libraries];
-        const prev = next[index];
-        const prevBase = pathBasename(prev.path);
-        const shouldAutoName = !prev.name.trim() || prev.name.trim() === prevBase;
-        next[index] = {
-          ...prev,
-          path: clean,
-          name: shouldAutoName
-            ? suggestLibraryName(
-                clean,
-                next.filter((_, idx) => idx !== index).map((l) => l.name)
-              )
-            : prev.name,
-        };
-        libraries = next;
-        savedBanner = false;
-      }
-    } catch (err) {
-      formError = err instanceof Error ? err.message : String(err);
+    const inspect = await api.inspectSetupDir(clean).catch(() => null);
+    const resolvedPath = inspect?.ok && inspect.info.path ? inspect.info.path : clean;
+    if (
+      libraries.some(
+        (l) =>
+          pathsEqual(l.path, clean, studio.os) ||
+          pathsEqual(l.path, resolvedPath, studio.os)
+      )
+    ) {
+      formError = 'That library is already in your libraries list.';
+      return;
     }
+    libraries = [
+      ...libraries,
+      {
+        uid: nextUid(),
+        id: '',
+        name: suggestLibraryName(
+          resolvedPath,
+          libraries.map((l) => l.name)
+        ),
+        path: resolvedPath,
+        modelCount: inspect?.ok ? inspect.info.model_count : undefined,
+      },
+    ];
+    manualPathInput = '';
+    savedBanner = false;
   }
 
   function moveLibrary(index: number, delta: -1 | 1) {
@@ -255,62 +216,6 @@
   function removeLibrary(index: number) {
     libraries = libraries.filter((_, i) => i !== index);
     savedBanner = false;
-  }
-
-  async function toggleStarterPanel() {
-    starterOpen = !starterOpen;
-    starterError = '';
-    starterAllowOverwrite = false;
-    if (starterOpen) {
-      if (!setupDefaults) {
-        try {
-          setupDefaults = await api.getSetupDefaults();
-        } catch {
-          // ignore
-        }
-      }
-      if (!starterDir && setupDefaults?.default_download_dir) {
-        starterDir = setupDefaults.default_download_dir;
-      }
-      if (starterDir) {
-        void inspectStarterDir(starterDir);
-      }
-    }
-  }
-
-  async function inspectStarterDir(path: string) {
-    const trimmed = path.trim();
-    if (!trimmed) {
-      starterDirInfo = null;
-      return;
-    }
-    try {
-      const resp = await api.inspectSetupDir(trimmed);
-      if (resp.ok) {
-        starterDirInfo = resp.info;
-      }
-    } catch {
-      starterDirInfo = null;
-    }
-  }
-
-  function handleStarterDirInput(val: string) {
-    starterDir = val;
-    starterError = '';
-    starterAllowOverwrite = false;
-    if (starterInspectTimer !== null) clearTimeout(starterInspectTimer);
-    starterInspectTimer = setTimeout(() => void inspectStarterDir(val), 180);
-  }
-
-  async function handleBrowseStarterDir() {
-    try {
-      const resp = await api.browseProject(starterDir);
-      if (!resp.cancelled && resp.path) {
-        handleStarterDirInput(resp.path);
-      }
-    } catch (err) {
-      starterError = err instanceof Error ? err.message : String(err);
-    }
   }
 
   function buildPayloadLibraries(): Library[] {
@@ -330,12 +235,6 @@
       slicer_command: slicerCommand.trim(),
       export_quality: exportQuality,
     });
-    libraries = (resp.config.libraries ?? []).map((lib) => ({
-      uid: nextUid(),
-      id: lib.id,
-      name: lib.name,
-      path: lib.path,
-    }));
     pythonPath = resp.config.python_path;
     exportDir = resp.config.export_dir ?? '';
     editorCommand = resp.config.editor_command ?? '';
@@ -349,6 +248,13 @@
     health = resp.health ?? null;
     healthError = resp.health_error ?? '';
     await studio.applySavedConfig(resp);
+    libraries = (resp.config.libraries ?? []).map((lib) => ({
+      uid: nextUid(),
+      id: lib.id,
+      name: lib.name,
+      path: lib.path,
+      modelCount: countModelsForLibrary(lib.id),
+    }));
   }
 
   function hasUnsavedDraftChanges(): boolean {
@@ -371,96 +277,6 @@
       slicerCommand.trim() !== (studio.config.slicer_command ?? '') ||
       exportQuality !== (studio.config.export_quality ?? 'standard')
     );
-  }
-
-  async function handleDownloadStarter() {
-    const target = starterDir.trim();
-    if (!target) {
-      starterError = 'Please choose a destination folder.';
-      return;
-    }
-    downloadingStarter = true;
-    starterError = '';
-    studio.clearSetupStream();
-    try {
-      const resp = await api.downloadStarterProject(
-        target,
-        setupDefaults?.default_archive_url ?? '',
-        starterAllowOverwrite
-      );
-      if (!resp.ok) {
-        if (!resp.cancelled) {
-          starterError = resp.error || 'Failed to download starter library.';
-        }
-        return;
-      }
-      const resolvedPath = resp.project_info?.path || target;
-      if (!libraries.some((l) => pathsEqual(l.path, resolvedPath, studio.os))) {
-        const defaultName = libraries.some((l) => l.name.trim().toLowerCase() === 'code-cad')
-          ? 'Starter Library'
-          : 'code-cad';
-        libraries = [
-          ...libraries,
-          {
-            uid: nextUid(),
-            id: '',
-            name: defaultName,
-            path: resolvedPath,
-          },
-        ];
-      }
-      starterOpen = false;
-      starterDirInfo = resp.project_info ?? null;
-      await persistCurrentConfig();
-      savedMessage = 'Starter library downloaded and settings saved.';
-      savedBanner = true;
-    } catch (err) {
-      starterError = err instanceof Error ? err.message : String(err);
-    } finally {
-      downloadingStarter = false;
-    }
-  }
-
-  async function handleAddOfflineDemo() {
-    if (busy) return;
-    formError = '';
-    savedBanner = false;
-    const hadUnsavedDrafts = hasUnsavedDraftChanges();
-    scaffoldingDemo = true;
-    try {
-      const resp = await studio.scaffoldDemo(undefined, { selectModel: false });
-      const targetDir = resp.target_dir?.trim() ?? '';
-      if (targetDir && !libraries.some((l) => pathsEqual(l.path, targetDir, studio.os))) {
-        const addedLib = resp.config?.config.libraries?.find((l) =>
-          pathsEqual(l.path, targetDir, studio.os)
-        );
-        libraries = [
-          ...libraries,
-          {
-            uid: nextUid(),
-            id: addedLib?.id || resp.library_id || '',
-            name: addedLib?.name || pathBasename(targetDir) || 'demo',
-            path: addedLib?.path || targetDir,
-          },
-        ];
-      }
-      savedMessage = hadUnsavedDrafts
-        ? 'Offline demo library added. Click Save & Reload to apply your other changes.'
-        : 'Offline demo library added.';
-      savedBanner = true;
-    } catch (err) {
-      formError = err instanceof Error ? err.message : String(err);
-    } finally {
-      scaffoldingDemo = false;
-    }
-  }
-
-  async function handleCancelStarterDownload() {
-    try {
-      await api.cancelSetupTask();
-    } catch {
-      // ignore
-    }
   }
 
   async function handleBrowsePython() {
@@ -561,13 +377,6 @@
     }
     pressedOutside = false;
   }
-
-  let starterBlocked = $derived(
-    downloadingStarter ||
-      !starterDir.trim() ||
-      Boolean(starterDirInfo?.exists && !starterDirInfo.is_dir) ||
-      Boolean(starterDirInfo?.exists && !starterDirInfo.is_empty && !starterAllowOverwrite)
-  );
 </script>
 
 <dialog
@@ -615,62 +424,105 @@
     <form class="space-y-4" onsubmit={handleSubmit}>
         <!-- Model Libraries Section -->
         <div class="space-y-2">
-          <div class="flex items-center justify-between gap-2">
+          <div class="flex items-start justify-between gap-2">
             <div>
-              <span class="label-text text-xs font-semibold">Model Libraries</span>
+              <span class="label-text text-xs font-semibold">
+                Model Libraries ({libraries.length})
+              </span>
               <p class="text-[11px] opacity-60">
-                Add one or more library folders containing <code>models/</code>, nested category folders, or standalone <code>.py</code> scripts.
+                Folders containing <code>models/</code>, nested category folders, or standalone <code>.py</code> scripts.
               </p>
             </div>
+            {#if studio.hasDesktop}
+              <button
+                type="button"
+                class="btn btn-xs btn-ghost border border-base-300 h-6 min-h-6 px-2 gap-1 text-[11px] shrink-0"
+                disabled={busy}
+                onclick={handleAddFolder}
+              >
+                <svg
+                  xmlns="http://www.w3.org/2000/svg"
+                  class="h-3 w-3"
+                  viewBox="0 0 24 24"
+                  fill="none"
+                  stroke="currentColor"
+                  stroke-width="2.4"
+                  stroke-linecap="round"
+                  stroke-linejoin="round"
+                  aria-hidden="true"
+                >
+                  <path d="M12 5v14" />
+                  <path d="M5 12h14" />
+                </svg>
+                <span>Add Library</span>
+              </button>
+            {/if}
           </div>
 
           {#if libraries.length === 0}
             <div class="rounded-box border border-dashed border-base-300 p-3 text-xs opacity-70 text-center">
-              No libraries configured yet. Add a local library, try the offline demo, or download the starter library below.
+              No libraries configured yet. {studio.hasDesktop
+                ? 'Click Add Library above'
+                : 'Enter a folder path below'}, or run the Setup Wizard to try the offline demo or starter library.
             </div>
           {:else}
-            <div class="space-y-2">
+            <div class="space-y-1.5">
               {#each libraries as lib, idx (lib.uid)}
                 {@const libErr = lib.id ? studio.libraryErrors[lib.id] : ''}
-                <div class="rounded-box border border-base-300 bg-base-200/40 p-2.5 space-y-1.5">
-                  <div class="flex items-center gap-1.5">
+                <div class="rounded-field border border-base-300 bg-base-200/40 px-2.5 py-1.5 space-y-1">
+                  <div class="flex items-center gap-2 min-w-0">
                     <input
                       type="text"
                       bind:value={lib.name}
+                      disabled={busy}
                       placeholder={pathBasename(lib.path) || 'Library name'}
                       aria-label="Library display name"
-                      class="input input-bordered input-xs flex-1 font-medium text-xs"
+                      class="input input-bordered input-xs w-36 font-medium text-xs shrink-0"
                     />
+                    <span class="font-mono text-[11px] opacity-75 truncate flex-1 min-w-0" title={lib.path}>
+                      {lib.path}
+                    </span>
+                    {#if lib.modelCount !== undefined && !libErr}
+                      <span
+                        class="rounded-full bg-base-content/10 text-base-content/70 px-1.5 py-0.5 text-[10px] font-medium tabular-nums shrink-0"
+                        title="{lib.modelCount} model{lib.modelCount === 1 ? '' : 's'}"
+                      >
+                        {lib.modelCount}
+                      </span>
+                    {/if}
                     <div class="flex items-center gap-0.5 shrink-0">
+                      {#if libraries.length > 1}
+                        <button
+                          type="button"
+                          class="btn btn-ghost btn-xs btn-square h-6 w-6 min-h-0 opacity-60 hover:opacity-100 disabled:opacity-25"
+                          title="Move up"
+                          aria-label="Move library up"
+                          disabled={busy || idx === 0}
+                          onclick={() => moveLibrary(idx, -1)}
+                        >
+                          <svg xmlns="http://www.w3.org/2000/svg" class="h-3 w-3" fill="none" viewBox="0 0 24 24" stroke="currentColor" stroke-width="2.2">
+                            <polyline points="18 15 12 9 6 15" />
+                          </svg>
+                        </button>
+                        <button
+                          type="button"
+                          class="btn btn-ghost btn-xs btn-square h-6 w-6 min-h-0 opacity-60 hover:opacity-100 disabled:opacity-25"
+                          title="Move down"
+                          aria-label="Move library down"
+                          disabled={busy || idx === libraries.length - 1}
+                          onclick={() => moveLibrary(idx, 1)}
+                        >
+                          <svg xmlns="http://www.w3.org/2000/svg" class="h-3 w-3" fill="none" viewBox="0 0 24 24" stroke="currentColor" stroke-width="2.2">
+                            <polyline points="6 9 12 15 18 9" />
+                          </svg>
+                        </button>
+                      {/if}
                       <button
                         type="button"
-                        class="btn btn-ghost btn-xs btn-square"
-                        title="Move up"
-                        aria-label="Move library up"
-                        disabled={idx === 0}
-                        onclick={() => moveLibrary(idx, -1)}
-                      >
-                        <svg xmlns="http://www.w3.org/2000/svg" class="h-3 w-3" fill="none" viewBox="0 0 24 24" stroke="currentColor" stroke-width="2.2">
-                          <polyline points="18 15 12 9 6 15" />
-                        </svg>
-                      </button>
-                      <button
-                        type="button"
-                        class="btn btn-ghost btn-xs btn-square"
-                        title="Move down"
-                        aria-label="Move library down"
-                        disabled={idx === libraries.length - 1}
-                        onclick={() => moveLibrary(idx, 1)}
-                      >
-                        <svg xmlns="http://www.w3.org/2000/svg" class="h-3 w-3" fill="none" viewBox="0 0 24 24" stroke="currentColor" stroke-width="2.2">
-                          <polyline points="6 9 12 15 18 9" />
-                        </svg>
-                      </button>
-                      <button
-                        type="button"
-                        class="btn btn-ghost btn-xs btn-square hover:text-error"
+                        class="btn btn-ghost btn-xs btn-square h-6 w-6 min-h-0 opacity-70 hover:opacity-100 hover:text-error"
                         title="Remove library"
                         aria-label="Remove library"
+                        disabled={busy}
                         onclick={() => removeLibrary(idx)}
                       >
                         <svg xmlns="http://www.w3.org/2000/svg" class="h-3.5 w-3.5" fill="none" viewBox="0 0 24 24" stroke="currentColor" stroke-width="2">
@@ -680,24 +532,6 @@
                       </button>
                     </div>
                   </div>
-                  <div class="join w-full">
-                    <input
-                      type="text"
-                      bind:value={lib.path}
-                      placeholder="/path/to/code-cad"
-                      aria-label="Library folder path"
-                      class="input input-bordered input-xs join-item w-full font-mono text-[11px]"
-                    />
-                    {#if studio.hasDesktop}
-                      <button
-                        type="button"
-                        class="btn btn-xs btn-neutral join-item"
-                        onclick={() => handleBrowseLibraryRow(idx)}
-                      >
-                        Browse
-                      </button>
-                    {/if}
-                  </div>
                   {#if libErr}
                     <div class="text-[11px] text-warning">{libErr}</div>
                   {/if}
@@ -706,133 +540,31 @@
             </div>
           {/if}
 
-          <div class="flex flex-wrap items-center gap-2 pt-0.5">
-            <button
-              type="button"
-              class="btn btn-xs btn-neutral"
-              disabled={busy}
-              onclick={handleAddFolder}
-            >
-              + Add Library
-            </button>
-            <div class="flex flex-wrap items-center gap-1.5 ml-auto">
+          {#if !studio.hasDesktop}
+            <!-- Fallback text entry for standalone browser mode without native folder dialogs -->
+            <div class="join w-full">
+              <input
+                type="text"
+                bind:value={manualPathInput}
+                disabled={busy}
+                onkeydown={(e) => {
+                  if (e.key === 'Enter') {
+                    e.preventDefault();
+                    void handleAddManualPath();
+                  }
+                }}
+                placeholder="Enter library folder path (e.g. ~/Documents/my-cad-models)..."
+                aria-label="Library folder path"
+                class="input input-bordered input-xs join-item w-full font-mono text-[11px]"
+              />
               <button
                 type="button"
-                class="btn btn-xs btn-ghost"
-                disabled={busy}
-                onclick={handleAddOfflineDemo}
+                class="btn btn-xs btn-neutral join-item"
+                disabled={busy || !manualPathInput.trim()}
+                onclick={handleAddManualPath}
               >
-                {#if scaffoldingDemo}
-                  <span class="loading loading-spinner loading-xs"></span>
-                  Adding Demo…
-                {:else}
-                  Add Offline Demo
-                {/if}
+                Add
               </button>
-              <button
-                type="button"
-                class="btn btn-xs btn-ghost"
-                disabled={busy}
-                onclick={toggleStarterPanel}
-              >
-                {starterOpen ? 'Cancel Download' : 'Download Starter Library…'}
-              </button>
-            </div>
-          </div>
-
-          <!-- Inline Starter Library Download Panel -->
-          {#if starterOpen}
-            <div class="rounded-box border border-primary/40 bg-base-200/60 p-3 space-y-2 text-xs">
-              <div class="font-semibold">Download <code>code-cad</code> Starter Library</div>
-              <p class="text-[11px] opacity-75">
-                Download the official starter models from GitHub into a new library folder alongside your existing libraries.
-              </p>
-              <div class="join w-full">
-                <input
-                  type="text"
-                  value={starterDir}
-                  oninput={(e) => handleStarterDirInput((e.currentTarget as HTMLInputElement).value)}
-                  disabled={downloadingStarter}
-                  placeholder="/path/to/code-cad-starter"
-                  class="input input-bordered input-xs join-item w-full font-mono text-[11px]"
-                />
-                {#if studio.hasDesktop}
-                  <button
-                    type="button"
-                    class="btn btn-xs btn-neutral join-item"
-                    disabled={downloadingStarter}
-                    onclick={handleBrowseStarterDir}
-                  >
-                    Browse
-                  </button>
-                {/if}
-              </div>
-
-              {#if starterDirInfo?.exists && !starterDirInfo.is_dir}
-                <div class="text-[11px] text-error">Path exists and is a file, not a folder.</div>
-              {:else if starterDirInfo?.exists && !starterDirInfo.is_empty}
-                <Alert variant="warning" compact>
-                  <div class="space-y-1">
-                    <div>
-                      This folder is not empty. Downloading here will overwrite matching files in <code>models/</code> and <code>utils/</code>.
-                    </div>
-                    <label class="flex items-center gap-1.5 cursor-pointer">
-                      <input
-                        type="checkbox"
-                        class="checkbox checkbox-xs checkbox-warning"
-                        disabled={downloadingStarter}
-                        bind:checked={starterAllowOverwrite}
-                      />
-                      <span>Allow overwriting matching files</span>
-                    </label>
-                  </div>
-                </Alert>
-              {/if}
-
-              {#if downloadingStarter}
-                <div class="space-y-1.5">
-                  <div class="flex items-center justify-between gap-2 text-[11px]">
-                    <span class="truncate">
-                      {studio.setupProgress?.message || 'Downloading starter library…'}
-                    </span>
-                    <button
-                      type="button"
-                      class="btn btn-xs btn-ghost text-error"
-                      onclick={handleCancelStarterDownload}
-                    >
-                      Cancel
-                    </button>
-                  </div>
-                  {#if downloadProgressPct !== null}
-                    <progress class="progress progress-primary w-full" value={downloadProgressPct} max="100"></progress>
-                  {:else}
-                    <progress class="progress progress-primary w-full"></progress>
-                  {/if}
-                  {#if studio.setupProgress?.bytes_downloaded}
-                    <div class="text-[10px] opacity-70 font-mono">
-                      {formatBytes(studio.setupProgress.bytes_downloaded)}
-                      {#if studio.setupProgress.total_bytes && studio.setupProgress.total_bytes > 0}
-                        / {formatBytes(studio.setupProgress.total_bytes)}
-                      {/if}
-                    </div>
-                  {/if}
-                </div>
-              {:else}
-                <div class="flex justify-end">
-                  <button
-                    type="button"
-                    class="btn btn-xs btn-primary"
-                    disabled={starterBlocked}
-                    onclick={handleDownloadStarter}
-                  >
-                    Download & Add Library
-                  </button>
-                </div>
-              {/if}
-
-              {#if starterError}
-                <Alert variant="error" compact>{starterError}</Alert>
-              {/if}
             </div>
           {/if}
         </div>
