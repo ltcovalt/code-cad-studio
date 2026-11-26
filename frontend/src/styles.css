@@ -60,6 +60,26 @@ html body input[type="radio"] {
 
 #cad-viewer-root .tcv_cad_toolbar {
   margin: 0 0 2px 0 !important;
+  overflow: visible !important;
+  z-index: 200;
+}
+
+#cad-viewer-root .tcv_cad_toolbar > [data-tooltip]:before {
+  top: calc(100% + 4px);
+  margin-top: 0;
+}
+
+#cad-viewer-root [data-tooltip]:before {
+  padding: 3px 6px;
+  border-radius: 4px;
+  line-height: 1.25;
+  box-shadow: 0 2px 6px rgb(0 0 0 / 0.25);
+}
+
+#cad-viewer-root .tcv_cad_toolbar > :last-child[data-tooltip]:before,
+#cad-viewer-root .tcv_cad_toolbar > .tcv_align_right[data-tooltip]:before {
+  right: 2px;
+  left: auto;
 }
 
 #cad-viewer-root .tcv_cad_view {
