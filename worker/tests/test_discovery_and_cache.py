@@ -454,3 +454,44 @@ def test_component_discovery_and_schema_linking(tmp_path: Path, monkeypatch: pyt
         assert unsupported_by_path["spacer"]["reason_code"] == "nullable_group_toggle"
     finally:
         state._evict_project_modules()
+
+
+def test_model_name_discovery_and_rename(tmp_path: Path) -> None:
+    lib_dir = tmp_path / "lib"
+    (lib_dir / "models" / "battery_caddy").mkdir(parents=True)
+    py_path = lib_dir / "models" / "battery_caddy" / "battery_caddy.py"
+    py_path.write_text(
+        '"""Battery caddy."""\n'
+        "from dataclasses import dataclass\n\n"
+        "EXPORT_STL: bool = False\n"
+        "@dataclass\n"
+        "class BatteryCaddyParams:\n"
+        "    slots: int = 4\n"
+        "def create_battery_caddy(params: BatteryCaddyParams):\n"
+        "    return None\n",
+        encoding="utf-8",
+    )
+
+    state = worker.WorkerState([{"id": "lib", "name": "Lib", "path": str(lib_dir)}])
+    try:
+        models, _ = state.discover_models()
+        assert models[0]["name"] == "Battery Caddy"
+
+        # 1. Rename display name only -> writes MODEL_NAME before EXPORT_STL
+        res1 = state.rename_model("lib/battery_caddy", name="RC Battery Caddy")
+        assert res1["ok"] is True
+        assert res1["model_id"] == "lib/battery_caddy"
+        assert res1["name"] == "RC Battery Caddy"
+        assert 'MODEL_NAME: str = "RC Battery Caddy"' in py_path.read_text(encoding="utf-8")
+
+        # 2. Rename both file stem and display name -> moves directory + updates MODEL_NAME
+        res2 = state.rename_model("lib/battery_caddy", name="2S RC Battery Caddy", file_stem="rc_battery_caddy")
+        assert res2["ok"] is True
+        assert res2["model_id"] == "lib/rc_battery_caddy"
+        assert res2["name"] == "2S RC Battery Caddy"
+        new_py = lib_dir / "models" / "rc_battery_caddy" / "rc_battery_caddy.py"
+        assert new_py.exists()
+        assert not py_path.exists()
+        assert 'MODEL_NAME: str = "2S RC Battery Caddy"' in new_py.read_text(encoding="utf-8")
+    finally:
+        state._evict_project_modules()

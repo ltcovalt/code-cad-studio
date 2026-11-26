@@ -235,8 +235,8 @@ func TestConfigV1DefaultsOnboardingAndPersistence(t *testing.T) {
 	if cfg.ExportQuality != "standard" {
 		t.Fatalf("ExportQuality = %q, want standard", cfg.ExportQuality)
 	}
-	if cfg.Theme != "dark" {
-		t.Fatalf("Theme = %q, want dark", cfg.Theme)
+	if cfg.Theme != DefaultTheme {
+		t.Fatalf("Theme = %q, want %q", cfg.Theme, DefaultTheme)
 	}
 	if !cfg.NeedsOnboarding() {
 		t.Fatalf("expected fresh config to require onboarding")

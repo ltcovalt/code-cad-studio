@@ -189,8 +189,8 @@ func TestConfigAndThemeHandlers(t *testing.T) {
 	if cfgResp.Config.SchemaVersion != config.SchemaVersion {
 		t.Fatalf("expected schema_version=%d, got %d", config.SchemaVersion, cfgResp.Config.SchemaVersion)
 	}
-	if cfgResp.Config.Theme != "dark" {
-		t.Fatalf("expected default theme 'dark', got %q", cfgResp.Config.Theme)
+	if cfgResp.Config.Theme != config.DefaultTheme {
+		t.Fatalf("expected default theme %q, got %q", config.DefaultTheme, cfgResp.Config.Theme)
 	}
 
 	// POST /api/config/theme

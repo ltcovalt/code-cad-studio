@@ -396,6 +396,23 @@ export interface UpdateDefaultsResponse {
   traceback?: string;
 }
 
+export interface RenameModelRequest {
+  name?: string;
+  file_stem?: string;
+}
+
+export interface RenameModelResponse {
+  ok: boolean;
+  old_model_id?: string;
+  model_id?: string;
+  name?: string;
+  rel_path?: string;
+  path?: string;
+  changed?: boolean;
+  error?: string;
+  code?: string;
+}
+
 export type LayoutMode = 'stacked' | 'side-by-side' | 'right';
 
 export interface LayoutState {

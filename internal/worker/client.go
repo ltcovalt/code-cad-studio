@@ -727,6 +727,22 @@ func (m *Manager) UpdateDefaults(ctx context.Context, modelID string, params map
 	return &out, nil
 }
 
+func (m *Manager) RenameModel(ctx context.Context, modelID string, name, fileStem *string) (*RenameModelResponse, error) {
+	var out RenameModelResponse
+	p := "/models/" + url.PathEscape(modelID) + "/rename"
+	payload := map[string]any{}
+	if name != nil {
+		payload["name"] = *name
+	}
+	if fileStem != nil {
+		payload["file_stem"] = *fileStem
+	}
+	if err := m.doJSON(ctx, http.MethodPost, p, payload, &out); err != nil {
+		return nil, err
+	}
+	return &out, nil
+}
+
 func buildExportPayload(params map[string]any, opts ExportOptions) map[string]any {
 	if params == nil {
 		params = map[string]any{}

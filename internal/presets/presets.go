@@ -265,6 +265,33 @@ func userPresetPath(modelID string) (string, error) {
 	return filepath.Join(libDir, fmt.Sprintf("%s--%s.json", safeSlug, hex8)), nil
 }
 
+// MoveUserPresets migrates a model's user-scope preset file when its canonical model ID changes.
+func MoveUserPresets(oldModelID, newModelID string) error {
+	oldID := strings.TrimSpace(oldModelID)
+	newID := strings.TrimSpace(newModelID)
+	if oldID == "" || newID == "" || oldID == newID {
+		return nil
+	}
+	oldPath, err := userPresetPath(oldID)
+	if err != nil {
+		return err
+	}
+	if _, err := os.Stat(oldPath); err != nil {
+		if os.IsNotExist(err) {
+			return nil
+		}
+		return err
+	}
+	newPath, err := userPresetPath(newID)
+	if err != nil {
+		return err
+	}
+	if _, err := os.Stat(newPath); err == nil {
+		return nil
+	}
+	return os.Rename(oldPath, newPath)
+}
+
 func readPresetFile(path string) (PresetFile, error) {
 	empty := PresetFile{
 		SchemaVersion: SchemaVersion,

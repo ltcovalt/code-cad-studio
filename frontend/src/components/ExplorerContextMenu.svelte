@@ -18,9 +18,10 @@
     target: ExplorerContextTarget | null;
     onClose: () => void;
     onNewModel?: (libraryId: string) => void;
+    onRenameModel?: (model: ModelInfo) => void;
   }
 
-  let { open, x, y, target, onClose, onNewModel }: Props = $props();
+  let { open, x, y, target, onClose, onNewModel, onRenameModel }: Props = $props();
 
   const VIEWPORT_MARGIN = 8;
 
@@ -160,6 +161,11 @@
     void copyText(relPath);
   }
 
+  function handleRenameModel(model: ModelInfo) {
+    onClose();
+    onRenameModel?.(model);
+  }
+
   async function handleExportModel(model: ModelInfo) {
     onClose();
     if (model.kind === 'error') return;
@@ -273,6 +279,29 @@
           <path d="M4 16c-1.1 0-2-.9-2-2V4c0-1.1.9-2 2-2h10c1.1 0 2 .9 2 2" />
         </svg>
         <span>Copy Relative Path</span>
+      </button>
+
+      <button
+        type="button"
+        role="menuitem"
+        class="w-full flex items-center gap-2 px-2 py-1.5 rounded-field text-left text-base-content hover:bg-base-content/10 transition-colors cursor-pointer"
+        onclick={() => handleRenameModel(model)}
+      >
+        <svg
+          xmlns="http://www.w3.org/2000/svg"
+          class="h-3.5 w-3.5 shrink-0 opacity-75"
+          fill="none"
+          viewBox="0 0 24 24"
+          stroke="currentColor"
+          stroke-width="2"
+          stroke-linecap="round"
+          stroke-linejoin="round"
+          aria-hidden="true"
+        >
+          <path d="M12 20h9" />
+          <path d="M16.376 3.622a1 1 0 0 1 3.002 3.002L7.368 18.635a2 2 0 0 1-.855.506l-2.872.838a.5.5 0 0 1-.62-.62l.838-2.872a2 2 0 0 1 .506-.854z" />
+        </svg>
+        <span>Rename…</span>
       </button>
 
       <div class="my-1 border-t border-base-300" role="separator"></div>

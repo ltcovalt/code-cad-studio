@@ -6,6 +6,7 @@
   import ExplorerContextMenu, { type ExplorerContextTarget } from './ExplorerContextMenu.svelte';
   import ModelTreeNodes from './ModelTreeNodes.svelte';
   import NewModelModal from './NewModelModal.svelte';
+  import RenameModelModal from './RenameModelModal.svelte';
 
   interface Props {
     style?: string;
@@ -15,6 +16,7 @@
 
   let newModelOpen = $state(false);
   let newModelLibraryId = $state<string | undefined>(undefined);
+  let renameModelTarget = $state<ModelInfo | null>(null);
   let contextMenu = $state<{
     open: boolean;
     x: number;
@@ -177,7 +179,7 @@
           class="btn btn-ghost btn-xs btn-square"
           title="Manage libraries"
           aria-label="Manage libraries"
-          onclick={() => (studio.settingsOpen = true)}
+          onclick={() => (studio.librariesOpen = true)}
         >
           <svg
             xmlns="http://www.w3.org/2000/svg"
@@ -231,7 +233,7 @@
             type="button"
             class="btn btn-xs btn-ghost border border-base-300"
             disabled={scaffoldingDemo}
-            onclick={() => studio.openOnboarding(1)}
+            onclick={() => studio.openOnboarding()}
           >
             Setup Wizard
           </button>
@@ -239,9 +241,9 @@
             type="button"
             class="link link-hover text-xs opacity-75"
             disabled={scaffoldingDemo}
-            onclick={() => (studio.settingsOpen = true)}
+            onclick={() => (studio.librariesOpen = true)}
           >
-            Settings
+            Manage Libraries
           </button>
         </div>
         {#if demoError}
@@ -284,10 +286,17 @@
   target={contextMenu.target}
   onClose={closeContextMenu}
   onNewModel={(libId) => openNewModel(libId)}
+  onRenameModel={(model) => (renameModelTarget = model)}
 />
 
 <NewModelModal
   open={newModelOpen}
   initialLibraryId={newModelLibraryId}
   onClose={closeNewModel}
+/>
+
+<RenameModelModal
+  open={renameModelTarget !== null}
+  model={renameModelTarget}
+  onClose={() => (renameModelTarget = null)}
 />

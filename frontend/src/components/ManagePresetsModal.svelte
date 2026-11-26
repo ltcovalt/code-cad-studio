@@ -1,5 +1,6 @@
 <script lang="ts">
   import { untrack } from 'svelte';
+  import { pathBasename } from '../lib/paths';
   import { studio } from '../lib/studioState.svelte';
   import type { Preset, UpdateDefaultsResponse, VerificationStatus } from '../lib/types';
   import { groupUnsupportedDefaults } from '../lib/updateDefaults';
@@ -830,13 +831,10 @@
       {:else}
         <!-- Update Source File Tab -->
         <div class="space-y-3">
-          <Alert variant="warning" title="Advanced: modifies source script">
-            <p>
-              Overwrites the default values in
-              <code class="font-mono text-[11px]">{studio.activeModel.rel_path}</code>
-              using your current parameters.
-            </p>
-          </Alert>
+          <p class="text-[11px] text-error">
+            For advanced users only. Updates the base model values in
+            <code class="font-mono" title={studio.activeModel.rel_path}>{pathBasename(studio.activeModel.rel_path)}</code>.
+          </p>
 
           {#if previewLoading}
             <div class="flex items-center gap-2 text-xs opacity-70 py-4 justify-center">

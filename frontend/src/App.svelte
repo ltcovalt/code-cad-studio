@@ -4,6 +4,7 @@
   import CadViewport from './components/CadViewport.svelte';
   import ExportModal from './components/ExportModal.svelte';
   import Header from './components/Header.svelte';
+  import ManageLibrariesModal from './components/ManageLibrariesModal.svelte';
   import ManagePresetsModal from './components/ManagePresetsModal.svelte';
   import ModelSidebar from './components/ModelSidebar.svelte';
   import ModelWorkspace from './components/ModelWorkspace.svelte';
@@ -245,6 +246,7 @@
     if (
       studio.onboardingOpen ||
       studio.settingsOpen ||
+      studio.librariesOpen ||
       studio.presetDetailsModalOpen ||
       studio.savePresetModalOpen ||
       studio.managePresetsModalOpen ||
@@ -338,16 +340,9 @@
         <button
           type="button"
           class="btn btn-xs btn-ghost h-6 min-h-0 px-2"
-          onclick={() => studio.openOnboarding(2)}
-        >
-          Configure Python
-        </button>
-        <button
-          type="button"
-          class="btn btn-xs btn-ghost h-6 min-h-0 px-2"
           onclick={() => (studio.settingsOpen = true)}
         >
-          Settings
+          Configure Python
         </button>
       {/snippet}
       <span class="font-mono break-words">{studio.workerError}</span>
@@ -405,6 +400,7 @@
 
 <OnboardingModal />
 <SettingsModal />
+<ManageLibrariesModal />
 <PresetDetailsModal />
 <SavePresetModal />
 <ManagePresetsModal />

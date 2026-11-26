@@ -49,7 +49,7 @@ type configResponse struct {
 
 func (s *Server) buildConfigResponse(cfg config.Config, health *worker.HealthResponse, workerErr, healthErr error) configResponse {
 	if cfg.Theme == "" {
-		cfg.Theme = "dark"
+		cfg.Theme = config.DefaultTheme
 	}
 	running, lastErr := s.worker.Status()
 	if workerErr != nil {
@@ -271,7 +271,7 @@ func (s *Server) handleSaveConfig(w http.ResponseWriter, r *http.Request) {
 		if req.Theme != nil {
 			t := strings.TrimSpace(*req.Theme)
 			if t == "" {
-				t = "dark"
+				t = config.DefaultTheme
 			}
 			c.Theme = t
 		}
@@ -344,7 +344,7 @@ func (s *Server) handleSaveTheme(w http.ResponseWriter, r *http.Request) {
 	}
 	theme := strings.TrimSpace(req.Theme)
 	if theme == "" {
-		theme = "dark"
+		theme = config.DefaultTheme
 	}
 	if _, err := s.cfgStore.Update(func(c *config.Config) {
 		c.Theme = theme
@@ -2103,6 +2103,56 @@ func (s *Server) handleUpdateModelDefaults(w http.ResponseWriter, r *http.Reques
 			writeError(w, http.StatusUnprocessableEntity, "update_defaults_failed", resp.Error, resp.Traceback)
 			return
 		}
+	}
+	writeJSON(w, http.StatusOK, resp)
+}
+
+func (s *Server) handleRenameModel(w http.ResponseWriter, r *http.Request) {
+	modelID, ok := extractModelID(w, r)
+	if !ok {
+		return
+	}
+	var req struct {
+		Name     *string `json:"name"`
+		FileStem *string `json:"file_stem"`
+	}
+	if !decodeJSON(w, r, &req, false) {
+		return
+	}
+	if req.Name == nil && req.FileStem == nil {
+		writeError(w, http.StatusBadRequest, "invalid_request", "name or file_stem is required")
+		return
+	}
+
+	if err := s.ensureWorkerRunning(r.Context()); err != nil {
+		writeError(w, http.StatusServiceUnavailable, "worker_unavailable", err.Error())
+		return
+	}
+
+	resp, err := s.worker.RenameModel(r.Context(), modelID, req.Name, req.FileStem)
+	if err != nil {
+		writeError(w, http.StatusBadGateway, "worker_error", err.Error())
+		return
+	}
+	if !resp.OK {
+		status := http.StatusBadRequest
+		code := "invalid_name"
+		switch {
+		case strings.HasPrefix(resp.Error, "Unknown model:"):
+			status = http.StatusNotFound
+			code = "model_not_found"
+		case strings.Contains(resp.Error, "already exists"):
+			status = http.StatusConflict
+			code = "already_exists"
+		case strings.Contains(resp.Error, "outside its configured library"):
+			status = http.StatusForbidden
+			code = "forbidden_path"
+		}
+		writeError(w, status, code, resp.Error, resp.Traceback)
+		return
+	}
+	if resp.ModelID != "" && resp.ModelID != modelID {
+		_ = presets.MoveUserPresets(modelID, resp.ModelID)
 	}
 	writeJSON(w, http.StatusOK, resp)
 }

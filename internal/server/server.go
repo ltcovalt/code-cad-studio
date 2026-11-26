@@ -256,6 +256,7 @@ func (s *Server) registerRoutes() {
 	s.mux.HandleFunc("DELETE /api/models/{id}/presets/{key}", s.handleDeletePreset)
 	s.mux.HandleFunc("POST /api/models/{id}/presets/default", s.handleSetDefaultPreset)
 	s.mux.HandleFunc("POST /api/models/{id}/update-defaults", s.handleUpdateModelDefaults)
+	s.mux.HandleFunc("POST /api/models/{id}/rename", s.handleRenameModel)
 
 	// SSE for hot-reload
 	s.mux.HandleFunc("GET /events", s.handleSSE)

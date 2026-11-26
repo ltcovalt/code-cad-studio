@@ -2,6 +2,7 @@ import * as api from './api';
 import { ApiRequestError } from './api';
 import type { CadViewportController } from './cadViewer';
 import { buildModelTree, collectFolderKeys, type TreeNode } from './modelTree';
+import { DEFAULT_THEME } from './themes';
 import {
   deepClone,
   extractComponentPresetSelections,
@@ -93,7 +94,7 @@ function shouldReloadActiveModel(
 
 export class StudioState {
   // Config & environment
-  config = $state<Config>({ libraries: [], python_path: '', export_dir: '', theme: 'dark' });
+  config = $state<Config>({ libraries: [], python_path: '', export_dir: '', theme: DEFAULT_THEME });
   hasLibraries = $derived((this.config.libraries?.length ?? 0) > 0);
   resolvedPython = $state('');
   resolvedExportDir = $state('');
@@ -102,13 +103,13 @@ export class StudioState {
   windowMaximized = $state(false);
   workerRunning = $state(false);
   workerError = $state('');
-  theme = $state('dark');
+  theme = $state(DEFAULT_THEME);
   needsOnboarding = $state(false);
   onboardingOpen = $state(false);
-  onboardingInitialStep = $state<1 | 2>(1);
   setupProgress = $state<SetupProgressEvent | null>(null);
   setupLogs = $state<string[]>([]);
   settingsOpen = $state(false);
+  librariesOpen = $state(false);
   presetDetailsModalOpen = $state(false);
   savePresetModalOpen = $state(false);
   managePresetsModalOpen = $state(false);
@@ -344,7 +345,7 @@ export class StudioState {
   }
 
   private applyThemeDom(themeName: string): void {
-    const t = themeName || 'dark';
+    const t = themeName || DEFAULT_THEME;
     this.theme = t;
     document.documentElement.setAttribute('data-theme', t);
     document.body.removeAttribute('data-theme');
@@ -405,10 +406,10 @@ export class StudioState {
     this.setupLogs = [];
   }
 
-  openOnboarding(initialStep: 1 | 2 = 1): void {
+  openOnboarding(): void {
     this.settingsOpen = false;
+    this.librariesOpen = false;
     this.clearSetupStream();
-    this.onboardingInitialStep = initialStep;
     this.onboardingOpen = true;
   }
 
@@ -432,7 +433,6 @@ export class StudioState {
   async finishOnboarding(resp: ConfigResponse): Promise<void> {
     this.needsOnboarding = Boolean(resp.needs_onboarding);
     this.onboardingOpen = false;
-    this.onboardingInitialStep = 1;
     this.clearSetupStream();
     await this.applySavedConfig(resp);
     if (!this.activeModelId && this.models.length > 0) {
@@ -1226,6 +1226,22 @@ export class StudioState {
       await this.refreshModels();
     }
     if (resp.model_id) {
+      await this.selectModel(resp.model_id);
+    }
+    return resp;
+  }
+
+  async renameModel(
+    modelId: string,
+    payload: { name?: string; file_stem?: string }
+  ): Promise<{ ok: boolean; model_id?: string; name?: string; rel_path?: string }> {
+    const resp = await api.renameModel(modelId, payload);
+    if (!resp.ok) {
+      throw new Error(resp.error || 'Failed to rename model');
+    }
+    const wasActive = this.activeModelId === modelId;
+    await this.refreshModels();
+    if (wasActive && resp.model_id) {
       await this.selectModel(resp.model_id);
     }
     return resp;

@@ -165,3 +165,15 @@ type UpdateDefaultsResponse struct {
 	Error       string                     `json:"error,omitempty"`
 	Traceback   string                     `json:"traceback,omitempty"`
 }
+
+type RenameModelResponse struct {
+	OK         bool   `json:"ok"`
+	OldModelID string `json:"old_model_id,omitempty"`
+	ModelID    string `json:"model_id,omitempty"`
+	Name       string `json:"name,omitempty"`
+	RelPath    string `json:"rel_path,omitempty"`
+	Path       string `json:"path,omitempty"`
+	Changed    bool   `json:"changed"`
+	Error      string `json:"error,omitempty"`
+	Traceback  string `json:"traceback,omitempty"`
+}

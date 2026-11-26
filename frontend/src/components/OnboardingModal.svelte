@@ -11,27 +11,16 @@
     DetectedProject,
     Library,
     ProjectDirInfo,
-    PythonCandidate,
     SetupDefaultsResponse,
-    SetupProbeResponse,
   } from '../lib/types';
   import Alert from './Alert.svelte';
+  import LibraryListEditor, {
+    nextLibraryDraftUid,
+    type LibraryDraft,
+  } from './LibraryListEditor.svelte';
+  import PythonEnvPanel from './PythonEnvPanel.svelte';
 
   type Step = 1 | 2;
-
-  interface LibraryItem {
-    uid: string;
-    id: string;
-    name: string;
-    path: string;
-    modelCount?: number;
-  }
-
-  let uidCounter = 0;
-  function nextUid(): string {
-    uidCounter += 1;
-    return `onb-lib-${uidCounter}`;
-  }
 
   let dialogEl: HTMLDialogElement | undefined = $state();
   let dialogBodyEl: HTMLDivElement | undefined = $state();
@@ -41,8 +30,7 @@
   let defaults = $state<SetupDefaultsResponse | null>(null);
 
   // Step 1: libraries + optional starter library download + optional global export override
-  let libraries = $state<LibraryItem[]>([]);
-  let manualPathInput = $state('');
+  let libraries = $state<LibraryDraft[]>([]);
   let includeStarter = $state(false);
   let starterDir = $state('');
   let starterDirInfo = $state<ProjectDirInfo | null>(null);
@@ -55,15 +43,10 @@
 
   let exportDir = $state('');
 
-  // Step 2: shared Python environment
-  let probing = $state(false);
-  let probe = $state<SetupProbeResponse | null>(null);
-  let probeError = $state('');
+  // Step 2: Python environment
   let selectedPythonPath = $state('');
-
+  let envReady = $state(false);
   let installing = $state(false);
-  let installError = $state('');
-  let showInstallLogs = $state(true);
 
   let completing = $state(false);
   let scaffoldingDemo = $state(false);
@@ -71,12 +54,11 @@
   let busyNotice = $state('');
 
   let inspectTimer: ReturnType<typeof setTimeout> | null = null;
-  let logContainerEl: HTMLPreElement | undefined = $state();
   let pressedOutside = false;
 
   let currentOs = $derived(studio.os || defaults?.os || '');
   let busy = $derived(downloading || installing || completing || scaffoldingDemo);
-  let showSkipButton = $derived(studio.onboardingInitialStep !== 2 && studio.needsOnboarding);
+  let showSkipButton = $derived(studio.needsOnboarding);
   let detectedProjects = $derived<DetectedProject[]>(defaults?.detected_projects ?? []);
   let unaddedDetectedProjects = $derived(
     detectedProjects.filter(
@@ -100,28 +82,6 @@
       (Boolean(defaultDemoDir) &&
         libraries.some((l) => pathsEqual(l.path, defaultDemoDir, currentOs)))
   );
-
-  let selectedCandidate = $derived.by<PythonCandidate | null>(() => {
-    if (!probe || probe.candidates.length === 0) return null;
-    if (selectedPythonPath) {
-      const exact = probe.candidates.find((c) => pathsEqual(c.path, selectedPythonPath, currentOs));
-      if (exact) return exact;
-    }
-    return probe.recommended ?? probe.candidates[0] ?? null;
-  });
-
-  let managedPythonVersion = $derived(probe?.managed_python_version || '3.14');
-
-  let envReady = $derived(
-    Boolean(
-      selectedCandidate &&
-        !selectedCandidate.error &&
-        selectedCandidate.version_ok &&
-        selectedCandidate.has_build123d
-    )
-  );
-
-  let canInstallEnv = $derived(!envReady);
 
   let downloadProgressPct = $derived.by<number | null>(() => {
     const p = studio.setupProgress;
@@ -169,27 +129,6 @@
     if (bytes < 1024) return `${bytes} B`;
     if (bytes < 1024 * 1024) return `${(bytes / 1024).toFixed(1)} KB`;
     return `${(bytes / (1024 * 1024)).toFixed(1)} MB`;
-  }
-
-  function sourceLabel(cand: PythonCandidate): string {
-    switch (cand.source) {
-      case 'studio_venv':
-        return 'Studio venv';
-      case 'library_venv':
-        return cand.source_detail ? `Library .venv (${cand.source_detail})` : 'Library .venv';
-      case 'configured':
-        return 'Selected';
-      case 'path':
-        return 'System PATH';
-      case 'conda':
-        return 'Conda';
-      case 'pyenv':
-        return 'pyenv';
-      case 'system':
-        return 'System';
-      default:
-        return cand.source || 'Python';
-    }
   }
 
   function effectiveLibraryRoots(): string[] {
@@ -261,27 +200,15 @@
     }
   });
 
-  // Auto-scroll live install log box as new SSE lines arrive
-  $effect(() => {
-    const _len = studio.setupLogs.length;
-    if (logContainerEl && showInstallLogs && _len > 0) {
-      logContainerEl.scrollTop = logContainerEl.scrollHeight;
-    }
-  });
-
   async function initializeWizard() {
-    step = studio.onboardingInitialStep;
+    step = 1;
     step1Error = '';
     starterDownloadedPath = '';
     allowOverwriteStarter = false;
     demoTargetDir = '';
-    probeError = '';
-    installError = '';
     completeError = '';
     busyNotice = '';
-    probe = null;
     starterDirInfo = null;
-    manualPathInput = '';
     studio.clearSetupStream();
 
     loadingDefaults = true;
@@ -298,7 +225,7 @@
           persisted.map((lib) => api.inspectSetupDir(lib.path).catch(() => null))
         );
         libraries = persisted.map((lib, idx) => ({
-          uid: nextUid(),
+          uid: nextLibraryDraftUid(),
           id: lib.id,
           name: lib.name,
           path: lib.path,
@@ -307,7 +234,7 @@
         includeStarter = false;
       } else if (def.detected_projects.length > 0) {
         libraries = def.detected_projects.map((p) => ({
-          uid: nextUid(),
+          uid: nextLibraryDraftUid(),
           id: '',
           name: p.name,
           path: p.path,
@@ -321,10 +248,6 @@
 
       if (includeStarter && starterDir) {
         void runInspectStarterDir(starterDir);
-      }
-
-      if (step === 2) {
-        await runProbe(selectedPythonPath);
       }
     } catch (err) {
       step1Error = err instanceof Error ? err.message : String(err);
@@ -387,7 +310,7 @@
     libraries = [
       ...libraries,
       {
-        uid: nextUid(),
+        uid: nextLibraryDraftUid(),
         id: '',
         name: suggestLibraryName(
           proj.path,
@@ -397,80 +320,6 @@
         modelCount: proj.model_count,
       },
     ];
-  }
-
-  async function handleAddFolder() {
-    step1Error = '';
-    try {
-      const start = libraries[libraries.length - 1]?.path ?? '';
-      const resp = await api.browseProject(start);
-      if (!resp.cancelled && resp.path) {
-        const clean = resp.path.trim();
-        const inspect = await api.inspectSetupDir(clean).catch(() => null);
-        const resolvedPath = inspect?.ok && inspect.info.path ? inspect.info.path : clean;
-        if (
-          libraries.some(
-            (l) =>
-              pathsEqual(l.path, clean, currentOs) ||
-              pathsEqual(l.path, resolvedPath, currentOs)
-          )
-        ) {
-          step1Error = 'That library is already added.';
-          return;
-        }
-        libraries = [
-          ...libraries,
-          {
-            uid: nextUid(),
-            id: '',
-            name: suggestLibraryName(
-              resolvedPath,
-              libraries.map((l) => l.name)
-            ),
-            path: resolvedPath,
-            modelCount: inspect?.ok ? inspect.info.model_count : undefined,
-          },
-        ];
-      }
-    } catch (err) {
-      step1Error = err instanceof Error ? err.message : String(err);
-    }
-  }
-
-  async function handleAddManualPath() {
-    const clean = manualPathInput.trim();
-    if (!clean) return;
-    step1Error = '';
-    const inspect = await api.inspectSetupDir(clean).catch(() => null);
-    const resolvedPath = inspect?.ok && inspect.info.path ? inspect.info.path : clean;
-    if (
-      libraries.some(
-        (l) =>
-          pathsEqual(l.path, clean, currentOs) ||
-          pathsEqual(l.path, resolvedPath, currentOs)
-      )
-    ) {
-      step1Error = 'That library is already added.';
-      return;
-    }
-    libraries = [
-      ...libraries,
-      {
-        uid: nextUid(),
-        id: '',
-        name: suggestLibraryName(
-          resolvedPath,
-          libraries.map((l) => l.name)
-        ),
-        path: resolvedPath,
-        modelCount: inspect?.ok ? inspect.info.model_count : undefined,
-      },
-    ];
-    manualPathInput = '';
-  }
-
-  function removeLibrary(uid: string) {
-    libraries = libraries.filter((l) => l.uid !== uid);
   }
 
   async function handleBrowseStarterDir() {
@@ -530,65 +379,6 @@
     }
 
     step = 2;
-    await runProbe(selectedPythonPath);
-  }
-
-  async function runProbe(explicitPython = '') {
-    probing = true;
-    probeError = '';
-    try {
-      const resp = await api.probeSetup(effectiveLibraryRoots(), explicitPython);
-      probe = resp;
-      if (resp.recommended) {
-        selectedPythonPath = resp.recommended.path;
-      } else if (resp.candidates.length > 0) {
-        selectedPythonPath = resp.candidates[0].path;
-      }
-    } catch (err) {
-      probeError = err instanceof Error ? err.message : String(err);
-    } finally {
-      probing = false;
-    }
-  }
-
-  async function handleBrowsePython() {
-    try {
-      const resp = await api.browsePython(selectedPythonPath || effectiveLibraryRoots()[0] || '');
-      if (!resp.cancelled && resp.path) {
-        selectedPythonPath = resp.path;
-        await runProbe(resp.path);
-      }
-    } catch (err) {
-      probeError = err instanceof Error ? err.message : String(err);
-    }
-  }
-
-  async function handleInstallEnv() {
-    installError = '';
-    completeError = '';
-    installing = true;
-    showInstallLogs = true;
-    studio.clearSetupStream();
-
-    try {
-      const resp = await api.installSetupEnv({
-        library_roots: effectiveLibraryRoots(),
-      });
-      if (!resp.ok) {
-        if (!resp.cancelled) {
-          installError = resp.error || 'Failed to set up Python environment.';
-        }
-        return;
-      }
-      if (resp.python_path) {
-        selectedPythonPath = resp.python_path;
-      }
-      await runProbe(resp.python_path || '');
-    } catch (err) {
-      installError = err instanceof Error ? err.message : String(err);
-    } finally {
-      installing = false;
-    }
   }
 
   async function handleCancelActiveTask() {
@@ -606,7 +396,7 @@
       const resp = await api.completeSetup({
         libraries: finalLibrariesPayload(),
         export_dir: exportDir.trim(),
-        python_path: selectedCandidate?.path ?? selectedPythonPath.trim(),
+        python_path: selectedPythonPath.trim(),
       });
       await studio.finishOnboarding(resp);
     } catch (err) {
@@ -629,7 +419,7 @@
           libraries = [
             ...libraries,
             {
-              uid: nextUid(),
+              uid: nextLibraryDraftUid(),
               id: resp.library_id || '',
               name: pathBasename(targetDir) || 'demo',
               path: targetDir,
@@ -732,7 +522,7 @@
           Welcome to Code CAD Studio
         </h2>
         <p class="text-xs opacity-70">
-          Choose your build123d model libraries and configure the shared Python CAD environment.
+          Choose your build123d model libraries and configure the Python CAD environment.
         </p>
       </div>
       <button
@@ -808,7 +598,7 @@
             2
           {/if}
         </span>
-        <span class="font-semibold">Shared Python & build123d</span>
+        <span class="font-semibold">Python &amp; build123d</span>
       </li>
     </ol>
 
@@ -978,104 +768,13 @@
           </div>
 
           <!-- Selected Local Libraries List -->
-          <div class="space-y-2">
-            <div class="flex items-center justify-between gap-2">
-              <span class="text-xs font-semibold">
-                Your Local Libraries ({libraries.length})
-              </span>
-              {#if studio.hasDesktop}
-                <button
-                  type="button"
-                  class="btn btn-xs btn-ghost border border-base-300 h-6 min-h-6 px-2 gap-1 text-[11px] shrink-0"
-                  disabled={busy}
-                  onclick={handleAddFolder}
-                >
-                  <svg
-                    xmlns="http://www.w3.org/2000/svg"
-                    class="h-3 w-3"
-                    viewBox="0 0 24 24"
-                    fill="none"
-                    stroke="currentColor"
-                    stroke-width="2.4"
-                    stroke-linecap="round"
-                    stroke-linejoin="round"
-                    aria-hidden="true"
-                  >
-                    <path d="M12 5v14" />
-                    <path d="M5 12h14" />
-                  </svg>
-                  <span>Add Library</span>
-                </button>
-              {/if}
-            </div>
-
-            {#if libraries.length > 0}
-              <div class="space-y-1.5">
-                {#each libraries as lib (lib.uid)}
-                  <div class="rounded-field border border-base-300 bg-base-200/40 px-2.5 py-1.5 flex items-center gap-2">
-                    <input
-                      type="text"
-                      bind:value={lib.name}
-                      disabled={busy}
-                      aria-label="Library name"
-                      class="input input-bordered input-xs w-36 font-medium text-xs shrink-0"
-                    />
-                    <span class="font-mono text-[11px] opacity-75 truncate flex-1" title={lib.path}>
-                      {lib.path}
-                    </span>
-                    {#if lib.modelCount !== undefined}
-                      <span
-                        class="rounded-full bg-base-content/10 text-base-content/70 px-1.5 py-0.5 text-[10px] font-medium tabular-nums shrink-0"
-                        title="{lib.modelCount} model{lib.modelCount === 1 ? '' : 's'}"
-                      >
-                        {lib.modelCount}
-                      </span>
-                    {/if}
-                    <button
-                      type="button"
-                      class="btn btn-ghost btn-xs btn-square h-6 w-6 min-h-0 opacity-70 hover:opacity-100 hover:text-error shrink-0"
-                      title="Remove library"
-                      aria-label="Remove library"
-                      disabled={busy}
-                      onclick={() => removeLibrary(lib.uid)}
-                    >
-                      <svg xmlns="http://www.w3.org/2000/svg" class="h-3.5 w-3.5" fill="none" viewBox="0 0 24 24" stroke="currentColor" stroke-width="2">
-                        <line x1="6" y1="6" x2="18" y2="18" />
-                        <line x1="18" y1="6" x2="6" y2="18" />
-                      </svg>
-                    </button>
-                  </div>
-                {/each}
-              </div>
-            {/if}
-
-            {#if !studio.hasDesktop}
-              <!-- Fallback text entry for standalone browser mode without native folder dialogs -->
-              <div class="join w-full">
-                <input
-                  type="text"
-                  bind:value={manualPathInput}
-                  disabled={busy}
-                  onkeydown={(e) => {
-                    if (e.key === 'Enter') {
-                      e.preventDefault();
-                      void handleAddManualPath();
-                    }
-                  }}
-                  placeholder="Enter library folder path (e.g. ~/Documents/my-cad-models)..."
-                  class="input input-bordered input-xs join-item w-full font-mono text-[11px]"
-                />
-                <button
-                  type="button"
-                  class="btn btn-xs btn-neutral join-item"
-                  disabled={busy || !manualPathInput.trim()}
-                  onclick={handleAddManualPath}
-                >
-                  Add
-                </button>
-              </div>
-            {/if}
-          </div>
+          <LibraryListEditor
+            bind:libraries
+            title="Your Local Libraries"
+            os={currentOs}
+            {busy}
+            onError={(msg) => (step1Error = msg)}
+          />
 
           <!-- Optional Global Export Folder -->
           <div class="form-control">
@@ -1102,9 +801,6 @@
                 </button>
               {/if}
             </div>
-            <span class="text-[11px] opacity-60 mt-1">
-              Leave blank to default each export to its library's <code>exports/</code> folder.
-            </span>
           </div>
 
           <!-- Download Progress -->
@@ -1179,328 +875,24 @@
         </button>
       </div>
     {:else}
-      <!-- STEP 2: Shared Python & build123d Environment -->
+      <!-- STEP 2: Python & build123d Environment -->
       <div class="space-y-4">
-        <div class="rounded-box bg-base-200 border border-base-300 p-4 space-y-3">
-          <div class="flex items-center justify-between gap-2">
-            <span class="text-xs font-semibold uppercase tracking-wider opacity-75">
-              Shared Python Environment Check
-            </span>
-            <div class="flex items-center gap-1.5">
-              <button
-                type="button"
-                class="btn btn-xs btn-ghost"
-                disabled={probing || installing}
-                onclick={() => void runProbe(selectedPythonPath)}
-              >
-                {probing ? 'Checking…' : 'Re-check'}
-              </button>
-              {#if studio.hasDesktop}
-                <button
-                  type="button"
-                  class="btn btn-xs btn-neutral"
-                  title="Choose a specific Python executable file on your computer"
-                  disabled={probing || installing}
-                  onclick={handleBrowsePython}
-                >
-                  Select Python…
-                </button>
-              {/if}
-            </div>
-          </div>
-
-          {#if !studio.hasDesktop}
-            <div class="join w-full">
-              <input
-                id="onboarding-manual-python"
-                type="text"
-                bind:value={selectedPythonPath}
-                disabled={probing || installing}
-                placeholder="/path/to/python3 (or venv/bin/python)"
-                aria-label="Python executable path"
-                class="input input-bordered input-xs join-item w-full font-mono text-[11px]"
-                onkeydown={(e) => {
-                  if (e.key === 'Enter') {
-                    e.preventDefault();
-                    void runProbe(selectedPythonPath);
-                  }
-                }}
-              />
-              <button
-                type="button"
-                class="btn btn-xs btn-neutral join-item"
-                disabled={probing || installing || !selectedPythonPath.trim()}
-                onclick={() => void runProbe(selectedPythonPath)}
-              >
-                Check
-              </button>
-            </div>
-          {/if}
-
-          {#if probing && !probe}
-            <div class="flex items-center gap-2 text-xs opacity-75 py-2">
-              <span class="loading loading-spinner loading-xs"></span>
-              <span>Scanning for Python and build123d…</span>
-            </div>
-          {:else}
-            <!-- Check 1: Python interpreter -->
-            {@const pythonOk = Boolean(selectedCandidate && !selectedCandidate.error && selectedCandidate.version_ok)}
-            <div class="flex items-start gap-2.5 text-xs">
-              <span
-                class="w-4 h-4 rounded-full flex items-center justify-center shrink-0 mt-0.5"
-                class:bg-success={pythonOk}
-                class:text-success-content={pythonOk}
-                class:bg-base-300={!pythonOk && !selectedCandidate?.error}
-                class:text-base-content={!pythonOk && !selectedCandidate?.error}
-                class:bg-error={!pythonOk && Boolean(selectedCandidate?.error)}
-                class:text-error-content={!pythonOk && Boolean(selectedCandidate?.error)}
-                aria-hidden="true"
-              >
-                {#if pythonOk}
-                  <svg xmlns="http://www.w3.org/2000/svg" class="w-2.5 h-2.5" fill="none" viewBox="0 0 24 24" stroke="currentColor" stroke-width="3.2">
-                    <path stroke-linecap="round" stroke-linejoin="round" d="M5 13l4 4L19 7" />
-                  </svg>
-                {:else if selectedCandidate?.error}
-                  <svg xmlns="http://www.w3.org/2000/svg" class="w-2.5 h-2.5" fill="none" viewBox="0 0 24 24" stroke="currentColor" stroke-width="3.2">
-                    <line x1="6" y1="6" x2="18" y2="18" />
-                    <line x1="18" y1="6" x2="6" y2="18" />
-                  </svg>
-                {:else}
-                  <span class="w-1.5 h-1.5 rounded-full bg-current opacity-50"></span>
-                {/if}
-              </span>
-              <div class="min-w-0 flex-1 space-y-0.5">
-                <div class="flex flex-wrap items-center gap-2">
-                  {#if selectedCandidate && !selectedCandidate.error}
-                    <span class="font-semibold">Python {selectedCandidate.version}</span>
-                    <span class="badge badge-xs badge-outline">
-                      {sourceLabel(selectedCandidate)}
-                    </span>
-                  {:else if selectedCandidate?.error}
-                    <span class="font-semibold">Python</span>
-                    <span class="text-error">Selected interpreter failed check</span>
-                  {:else}
-                    <span class="font-semibold">Python</span>
-                    <span class="opacity-70">Not detected — Studio will install Python {managedPythonVersion} automatically</span>
-                  {/if}
-                </div>
-                {#if selectedCandidate && !selectedCandidate.error}
-                  <div class="font-mono text-[11px] opacity-70 break-all">
-                    {selectedCandidate.path}
-                  </div>
-                  {#if !selectedCandidate.version_ok}
-                    <div class="text-error text-[11px]">
-                      Python 3.10 or newer is required by build123d.
-                    </div>
-                  {/if}
-                {:else if selectedCandidate?.error}
-                  <div class="text-error text-[11px] font-mono break-all">
-                    {selectedCandidate.error}
-                  </div>
-                {/if}
-              </div>
-            </div>
-
-            <!-- Check 2: build123d -->
-            <div class="flex items-start gap-2.5 text-xs">
-              <span
-                class="w-4 h-4 rounded-full flex items-center justify-center shrink-0 mt-0.5"
-                class:bg-success={envReady}
-                class:text-success-content={envReady}
-                class:bg-warning={!envReady && pythonOk}
-                class:text-warning-content={!envReady && pythonOk}
-                class:bg-base-300={!envReady && !pythonOk}
-                class:text-base-content={!envReady && !pythonOk}
-                aria-hidden="true"
-              >
-                {#if envReady}
-                  <svg xmlns="http://www.w3.org/2000/svg" class="w-2.5 h-2.5" fill="none" viewBox="0 0 24 24" stroke="currentColor" stroke-width="3.2">
-                    <path stroke-linecap="round" stroke-linejoin="round" d="M5 13l4 4L19 7" />
-                  </svg>
-                {:else if pythonOk}
-                  <span class="text-[10px] font-bold leading-none">!</span>
-                {:else}
-                  <span class="w-1.5 h-1.5 rounded-full bg-current opacity-50"></span>
-                {/if}
-              </span>
-              <div class="min-w-0 flex-1 space-y-0.5">
-                <div class="flex flex-wrap items-center gap-2">
-                  <span class="font-semibold">build123d CAD Engine</span>
-                  {#if envReady && selectedCandidate}
-                    <span class="badge badge-xs badge-success badge-soft font-mono">
-                      {selectedCandidate.build123d_version
-                        ? `v${selectedCandidate.build123d_version}`
-                        : 'Installed'}
-                    </span>
-                  {:else if pythonOk}
-                    <span class="text-warning">Not installed in this Python environment</span>
-                  {:else}
-                    <span class="opacity-60">Will be installed automatically</span>
-                  {/if}
-                </div>
-                {#if envReady}
-                  <div class="text-[11px] opacity-75">
-                    Ready — this single Python environment will be shared across all of your libraries.
-                  </div>
-                {:else}
-                  <div class="text-[11px] opacity-75">
-                    Studio can create a shared managed Python {managedPythonVersion} virtual environment and install
-                    <code>build123d</code> + <code>ocp_tessellate</code> automatically.
-                  </div>
-                {/if}
-              </div>
-            </div>
-
-            <!-- Check 3: Fast 3D Preview (ocp_tessellate — optional) -->
-            {@const hasTessellate = Boolean(selectedCandidate && !selectedCandidate.error && selectedCandidate.has_ocp_tessellate)}
-            <div class="flex items-start gap-2.5 text-xs">
-              <span
-                class="w-4 h-4 rounded-full flex items-center justify-center shrink-0 mt-0.5"
-                class:bg-success={hasTessellate}
-                class:text-success-content={hasTessellate}
-                class:bg-base-300={!hasTessellate}
-                class:text-base-content={!hasTessellate}
-                aria-hidden="true"
-              >
-                {#if hasTessellate}
-                  <svg xmlns="http://www.w3.org/2000/svg" class="w-2.5 h-2.5" fill="none" viewBox="0 0 24 24" stroke="currentColor" stroke-width="3.2">
-                    <path stroke-linecap="round" stroke-linejoin="round" d="M5 13l4 4L19 7" />
-                  </svg>
-                {:else}
-                  <span class="w-1.5 h-1.5 rounded-full bg-current opacity-50"></span>
-                {/if}
-              </span>
-              <div class="min-w-0 flex-1 space-y-0.5">
-                <div class="flex flex-wrap items-center gap-2">
-                  <span class="font-semibold">Fast 3D Tessellation</span>
-                  <code class="text-[11px] opacity-75">ocp_tessellate</code>
-                  <span class="badge badge-xs badge-ghost">Optional</span>
-                </div>
-                {#if hasTessellate}
-                  <div class="text-[11px] opacity-75">
-                    Installed — speeds up 3D viewport mesh generation using NumPy.
-                  </div>
-                {:else if envReady}
-                  <div class="text-[11px] opacity-75">
-                    Not installed — Studio will use the built-in OpenCASCADE fallback. You can optionally run
-                    <code>pip install ocp_tessellate</code> later for faster previews.
-                  </div>
-                {:else if pythonOk}
-                  <div class="text-[11px] opacity-75">
-                    Included automatically when Studio installs <code>build123d</code>.
-                  </div>
-                {:else}
-                  <div class="text-[11px] opacity-60">
-                    Optional speedup for 3D viewport rendering.
-                  </div>
-                {/if}
-              </div>
-            </div>
-
-            <!-- Interpreter switcher if multiple candidates discovered -->
-            {#if probe && probe.candidates.length > 1}
-              <div class="pt-2 border-t border-base-300/70 form-control">
-                <label class="label py-0.5" for="onboarding-python-select">
-                  <span class="label-text text-[11px] opacity-75">Detected Python environments</span>
-                </label>
-                <select
-                  id="onboarding-python-select"
-                  class="select select-bordered select-xs w-full font-mono text-[11px]"
-                  disabled={installing}
-                  bind:value={selectedPythonPath}
-                >
-                  {#each probe.candidates as cand (cand.path)}
-                    <option value={cand.path}>
-                      {sourceLabel(cand)} — Python {cand.version || '?'}
-                      {cand.has_build123d ? ' ✓ build123d' : ''} ({cand.path})
-                    </option>
-                  {/each}
-                </select>
-              </div>
-            {/if}
-          {/if}
-        </div>
+        <PythonEnvPanel
+          bind:selectedPythonPath
+          bind:envReady
+          bind:installing
+          libraryRoots={effectiveLibraryRoots()}
+          os={currentOs}
+          studioVenvDirFallback={defaults?.studio_venv_dir ?? ''}
+          disabled={completing}
+          autoProbe={true}
+        />
 
         <!-- Ready Banner -->
         {#if envReady && !installing}
           <Alert variant="success">
-            Everything is ready! Click <strong>Finish &amp; Launch Studio</strong> to load your libraries.
+            Everything is ready! Click <strong>Finish</strong> to save and apply.
           </Alert>
-        {/if}
-
-        <!-- One-click Shared Studio Venv Installer -->
-        {#if !envReady && canInstallEnv}
-          <div class="rounded-box border border-primary/40 bg-base-200/50 p-3.5 space-y-2.5">
-            <div class="flex items-start justify-between gap-3">
-              <div class="space-y-0.5 text-xs">
-                <div class="font-semibold">Automatic Shared Python Setup</div>
-                <p class="text-[11px] opacity-75">
-                  Creates <code class="font-mono break-all">{probe?.studio_venv_dir || defaults?.studio_venv_dir || 'Studio venv'}</code>
-                  with managed <strong>Python {managedPythonVersion}</strong>
-                  and installs <code>build123d</code> &amp; <code>ocp_tessellate</code> via <code>uv</code>{#if !probe?.has_uv}
-                    (downloads <code>uv</code> automatically){/if}.
-                  {#if (probe?.requirements_files?.length ?? 0) > 0}
-                    Also installs dependencies from {probe?.requirements_files.length} <code>requirements.txt</code> file{(probe?.requirements_files.length ?? 0) === 1 ? '' : 's'}.
-                  {/if}
-                </p>
-              </div>
-              {#if installing}
-                <button
-                  type="button"
-                  class="btn btn-xs btn-ghost text-error shrink-0"
-                  onclick={handleCancelActiveTask}
-                >
-                  Cancel
-                </button>
-              {:else}
-                <button
-                  type="button"
-                  class="btn btn-sm btn-primary shrink-0"
-                  onclick={handleInstallEnv}
-                >
-                  Install build123d
-                </button>
-              {/if}
-            </div>
-
-            {#if installing}
-              <div class="space-y-1.5">
-                <div class="flex items-center gap-2 text-xs">
-                  <span class="loading loading-spinner loading-xs"></span>
-                  <span class="truncate">
-                    {studio.setupProgress?.message || 'Setting up Python environment…'}
-                  </span>
-                </div>
-                <progress class="progress progress-primary w-full"></progress>
-              </div>
-            {/if}
-
-            {#if studio.setupLogs.length > 0}
-              <div class="space-y-1">
-                <button
-                  type="button"
-                  class="link text-[11px] opacity-75"
-                  onclick={() => (showInstallLogs = !showInstallLogs)}
-                >
-                  {showInstallLogs ? 'Hide installer logs' : `Show installer logs (${studio.setupLogs.length} lines)`}
-                </button>
-                {#if showInstallLogs}
-                  <pre
-                    bind:this={logContainerEl}
-                    class="bg-base-300/70 rounded p-2 text-[10px] font-mono max-h-36 overflow-y-auto whitespace-pre-wrap break-all leading-relaxed"
-                  >{studio.setupLogs.join('\n')}</pre>
-                {/if}
-              </div>
-            {/if}
-          </div>
-        {/if}
-
-        {#if probeError}
-          <Alert variant="error">{probeError}</Alert>
-        {/if}
-
-        {#if installError}
-          <Alert variant="error">{installError}</Alert>
         {/if}
 
         {#if completeError}
@@ -1517,7 +909,6 @@
             disabled={busy}
             onclick={() => {
               step = 1;
-              installError = '';
               completeError = '';
             }}
           >
@@ -1543,9 +934,9 @@
         >
           {#if completing}
             <span class="loading loading-spinner loading-xs"></span>
-            Launching…
+            Saving…
           {:else}
-            Finish &amp; Launch Studio
+            Finish
           {/if}
         </button>
       </div>

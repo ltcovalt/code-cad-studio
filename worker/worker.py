@@ -236,6 +236,7 @@ def _inspect_script_ast(py_file: Path) -> dict[str, Any] | None:
             "kind": "error",
             "parse_error": f"Encoding error: {exc}",
             "description": "",
+            "model_name": "",
             "params_class": "",
             "entrypoint": "",
         }
@@ -247,6 +248,7 @@ def _inspect_script_ast(py_file: Path) -> dict[str, Any] | None:
             "kind": "error",
             "parse_error": f"SyntaxError (line {exc.lineno or '?'}): {exc.msg}",
             "description": "",
+            "model_name": "",
             "params_class": "",
             "entrypoint": "",
         }
@@ -254,6 +256,7 @@ def _inspect_script_ast(py_file: Path) -> dict[str, Any] | None:
     params_classes: list[str] = []
     create_funcs: list[str] = []
     fallback_funcs: list[str] = []
+    model_name = ""
 
     for node in tree.body:
         if isinstance(node, ast.ClassDef):
@@ -264,6 +267,23 @@ def _inspect_script_ast(py_file: Path) -> dict[str, Any] | None:
                 create_funcs.append(node.name)
             elif node.name in ("build", "generate", "create"):
                 fallback_funcs.append(node.name)
+        elif isinstance(node, ast.Assign):
+            if (
+                len(node.targets) == 1
+                and isinstance(node.targets[0], ast.Name)
+                and node.targets[0].id == "MODEL_NAME"
+                and isinstance(node.value, ast.Constant)
+                and isinstance(node.value.value, str)
+            ):
+                model_name = node.value.value.strip()
+        elif isinstance(node, ast.AnnAssign):
+            if (
+                isinstance(node.target, ast.Name)
+                and node.target.id == "MODEL_NAME"
+                and isinstance(node.value, ast.Constant)
+                and isinstance(node.value.value, str)
+            ):
+                model_name = node.value.value.strip()
 
     # Skip actual Python test suites named test_*.py (imports pytest/unittest or defines def test_*/class Test*),
     # while still discovering maker CAD models like test_bracket.py or test_parametric_model.py.
@@ -315,6 +335,7 @@ def _inspect_script_ast(py_file: Path) -> dict[str, Any] | None:
             "kind": "parametric",
             "parse_error": "",
             "description": first_line,
+            "model_name": model_name,
             "params_class": params_class,
             "entrypoint": entrypoint,
         }
@@ -324,6 +345,7 @@ def _inspect_script_ast(py_file: Path) -> dict[str, Any] | None:
             "kind": "script",
             "parse_error": "",
             "description": first_line,
+            "model_name": model_name,
             "params_class": "",
             "entrypoint": "",
         }
@@ -374,7 +396,7 @@ def _build_model_info(
         "category": "component" if is_component else "model",
         "folders": category_folders,
         "folder_labels": [humanize_name(seg) for seg in category_folders],
-        "name": humanize_name(stem),
+        "name": ast_info.get("model_name") or humanize_name(stem),
         "path": str(py_file),
         "rel_path": rel.as_posix(),
         "presets_path": str(presets_path),
@@ -2073,6 +2095,90 @@ def _extract_script_geometry(module: Any, captured: list[Any]) -> Any:
     )
 
 
+_VALID_MODEL_STEM_RE = re.compile(r"^[a-zA-Z_][a-zA-Z0-9_]*$")
+
+
+def _line_col_to_offset(lines: list[str], lineno: int, col: int) -> int:
+    return sum(len(lines[i]) for i in range(lineno - 1)) + col
+
+
+def _update_model_name_in_source(source: str, display_name: str, target_stem: str) -> str:
+    """Set or insert top-level ``MODEL_NAME`` in a model script."""
+    tree = ast.parse(source)
+    lines = source.splitlines(keepends=True)
+    nl = "\r\n" if "\r\n" in source else "\n"
+    literal = json.dumps(display_name)
+
+    for node in tree.body:
+        target_name = ""
+        val_node: ast.AST | None = None
+        if isinstance(node, ast.Assign) and len(node.targets) == 1 and isinstance(node.targets[0], ast.Name):
+            target_name = node.targets[0].id
+            val_node = node.value
+        elif isinstance(node, ast.AnnAssign) and isinstance(node.target, ast.Name):
+            target_name = node.target.id
+            val_node = node.value
+        if target_name == "MODEL_NAME" and val_node is not None and val_node.end_lineno is not None and val_node.end_col_offset is not None:
+            start = _line_col_to_offset(lines, val_node.lineno, val_node.col_offset)
+            end = _line_col_to_offset(lines, val_node.end_lineno, val_node.end_col_offset)
+            return source[:start] + literal + source[end:]
+
+    if display_name == humanize_name(target_stem):
+        return source
+
+    stmt = f"MODEL_NAME: str = {literal}{nl}"
+
+    # Insert right before EXPORT_STL if present, otherwise after imports / module docstring.
+    for node in tree.body:
+        name = ""
+        if isinstance(node, ast.Assign) and len(node.targets) == 1 and isinstance(node.targets[0], ast.Name):
+            name = node.targets[0].id
+        elif isinstance(node, ast.AnnAssign) and isinstance(node.target, ast.Name):
+            name = node.target.id
+        if name == "EXPORT_STL":
+            offset = _line_col_to_offset(lines, node.lineno, 0)
+            return source[:offset] + stmt + source[offset:]
+
+    insert_after_line = 0
+    for idx, node in enumerate(tree.body):
+        if idx == 0 and isinstance(node, ast.Expr) and isinstance(node.value, ast.Constant) and isinstance(node.value.value, str):
+            insert_after_line = max(insert_after_line, node.end_lineno or node.lineno)
+        elif isinstance(node, (ast.Import, ast.ImportFrom)):
+            insert_after_line = max(insert_after_line, node.end_lineno or node.lineno)
+        elif isinstance(node, ast.Try) and insert_after_line >= 0:
+            # Handle standard `try: from utils.params ... except ImportError: ...` header block
+            has_import = any(isinstance(sub, (ast.Import, ast.ImportFrom)) for sub in node.body)
+            if has_import:
+                insert_after_line = max(insert_after_line, node.end_lineno or node.lineno)
+            else:
+                break
+        else:
+            break
+
+    if insert_after_line <= 0:
+        return stmt + nl + source
+
+    offset = sum(len(lines[i]) for i in range(insert_after_line))
+    prefix = source[:offset]
+    suffix = source[offset:]
+    if prefix and not prefix.endswith(("\n", "\r\n")):
+        prefix += nl
+    return prefix + nl + stmt + suffix
+
+
+def _atomic_write_text(path: Path, content: str) -> None:
+    tmp_path = path.with_name(f".{path.name}.tmp.{os.getpid()}")
+    try:
+        tmp_path.write_text(content, encoding="utf-8")
+        os.replace(tmp_path, path)
+    finally:
+        if tmp_path.exists():
+            try:
+                tmp_path.unlink()
+            except OSError:
+                pass
+
+
 class WorkerState:
     def __init__(self, libraries: list[dict[str, Any]] | None = None) -> None:
         self.lock = threading.RLock()
@@ -2542,6 +2648,115 @@ class WorkerState:
             if default_preset is not None:
                 resp["default_preset"] = default_preset
             return resp
+
+    def rename_model(
+        self,
+        model_id: str,
+        name: str | None = None,
+        file_stem: str | None = None,
+    ) -> dict[str, Any]:
+        with self.lock:
+            meta = self._get_model_meta(model_id)
+            py_file = Path(meta["path"]).resolve()
+            lib_entry = self.libraries_by_id.get(meta.get("library_id", ""))
+            lib_root = lib_entry["root"].resolve() if isinstance(lib_entry, dict) else None
+            if lib_root is not None:
+                try:
+                    py_file.relative_to(lib_root)
+                except ValueError as exc:
+                    raise _HttpError(403, "Model path is outside its configured library root") from exc
+
+            clean_name: str | None = None
+            if name is not None:
+                clean_name = name.strip()
+                if not clean_name:
+                    raise _HttpError(400, "Model name cannot be empty")
+                if len(clean_name) > 120:
+                    raise _HttpError(400, "Model name must be 120 characters or fewer")
+
+            clean_stem: str | None = None
+            if file_stem is not None:
+                raw_stem = file_stem.strip()
+                if raw_stem.lower().endswith(".py"):
+                    raw_stem = raw_stem[:-3].strip()
+                if not raw_stem:
+                    raise _HttpError(400, "File name cannot be empty")
+                if not _VALID_MODEL_STEM_RE.match(raw_stem) or raw_stem in ("__init__", "params"):
+                    raise _HttpError(
+                        400,
+                        "File name must be a valid Python identifier (letters, digits, underscores; cannot start with a digit)",
+                    )
+                clean_stem = raw_stem
+
+            old_stem = py_file.stem
+            target_stem = clean_stem or old_stem
+            name_changed = clean_name is not None and clean_name != meta["name"]
+            stem_changed = target_stem != old_stem
+
+            if not name_changed and not stem_changed:
+                return {
+                    "ok": True,
+                    "old_model_id": model_id,
+                    "model_id": model_id,
+                    "name": meta["name"],
+                    "rel_path": meta["rel_path"],
+                    "path": str(py_file),
+                    "changed": False,
+                }
+
+            new_py_file = py_file
+            if stem_changed:
+                if py_file.parent.name == old_stem:
+                    target_dir = py_file.parent.parent / target_stem
+                    if target_dir.exists() and target_dir.resolve() != py_file.parent.resolve():
+                        raise _HttpError(409, f"A model folder named '{target_stem}' already exists")
+                    renamed_py = py_file.parent / f"{target_stem}.py"
+                    os.replace(py_file, renamed_py)
+                    os.replace(py_file.parent, target_dir)
+                    new_py_file = target_dir / f"{target_stem}.py"
+                else:
+                    target_py = py_file.parent / f"{target_stem}.py"
+                    if target_py.exists() and target_py.resolve() != py_file.resolve():
+                        raise _HttpError(409, f"A model file named '{target_stem}.py' already exists")
+                    os.replace(py_file, target_py)
+                    old_sidecar = py_file.parent / f"{old_stem}.presets.json"
+                    new_sidecar = py_file.parent / f"{target_stem}.presets.json"
+                    if old_sidecar.exists() and not new_sidecar.exists():
+                        os.replace(old_sidecar, new_sidecar)
+                    new_py_file = target_py
+
+            if clean_name is not None and (name_changed or not stem_changed):
+                src = new_py_file.read_text(encoding="utf-8-sig")
+                updated_src = _update_model_name_in_source(src, clean_name, target_stem)
+                if updated_src != src:
+                    _atomic_write_text(new_py_file, updated_src)
+
+            self.loaded_modules.pop(model_id, None)
+            self._script_captures.pop(model_id, None)
+            self._ast_cache.clear()
+            self.models.clear()
+            self._render_cache.clear()
+            self._render_cache_bytes = 0
+            self.discover_models()
+
+            resolved_new = new_py_file.resolve()
+            new_meta: dict[str, Any] | None = None
+            for cand in self.models.values():
+                if Path(cand["path"]).resolve() == resolved_new:
+                    new_meta = cand
+                    break
+            if new_meta is None:
+                raise _HttpError(500, "Renamed model could not be re-discovered")
+
+            return {
+                "ok": True,
+                "old_model_id": model_id,
+                "model_id": new_meta["id"],
+                "name": new_meta["name"],
+                "rel_path": new_meta["rel_path"],
+                "path": new_meta["path"],
+                "changed": True,
+            }
 
     def update_defaults(
         self,
@@ -3119,6 +3334,24 @@ def make_handler(state: WorkerState, auth_token: str | None = None) -> type[Base
                             params,
                             dry_run=dry_run,
                             expected_sha256=expected_sha256,
+                        )
+                    )
+                    return
+
+                m_rename = re.match(r"^/models/(.+)/rename$", path)
+                if m_rename:
+                    model_id = unquote(m_rename.group(1))
+                    raw_name = body.get("name")
+                    raw_stem = body.get("file_stem")
+                    if raw_name is not None and not isinstance(raw_name, str):
+                        raise _HttpError(400, "name must be a string")
+                    if raw_stem is not None and not isinstance(raw_stem, str):
+                        raise _HttpError(400, "file_stem must be a string")
+                    self._send_json(
+                        state.rename_model(
+                            model_id,
+                            name=raw_name,
+                            file_stem=raw_stem,
                         )
                     )
                     return

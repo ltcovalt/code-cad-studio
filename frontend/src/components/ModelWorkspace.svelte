@@ -44,7 +44,7 @@
         <button
           type="button"
           class="btn btn-primary btn-sm mt-2"
-          onclick={() => (studio.settingsOpen = true)}
+          onclick={() => (studio.librariesOpen = true)}
         >
           Add Model Library
         </button>

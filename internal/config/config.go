@@ -18,6 +18,7 @@ import (
 const (
 	AppDirName    = "code-cad-studio"
 	SchemaVersion = 1
+	DefaultTheme  = "studio"
 )
 
 // Library represents a configured build123d project / model library folder.
@@ -58,7 +59,7 @@ func defaultConfig() Config {
 	return Config{
 		SchemaVersion: SchemaVersion,
 		Libraries:     []Library{},
-		Theme:         "dark",
+		Theme:         DefaultTheme,
 		ExportQuality: "standard",
 	}
 }
@@ -67,7 +68,7 @@ func normalizeConfig(c *Config) {
 	c.SchemaVersion = SchemaVersion
 	c.Libraries = NormalizeLibraries(c.Libraries)
 	if strings.TrimSpace(c.Theme) == "" {
-		c.Theme = "dark"
+		c.Theme = DefaultTheme
 	}
 	if strings.TrimSpace(c.ExportQuality) == "" {
 		c.ExportQuality = "standard"

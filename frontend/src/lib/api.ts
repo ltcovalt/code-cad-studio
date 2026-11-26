@@ -14,6 +14,8 @@ import type {
   ParamsRecord,
   PresetVerification,
   PresetsResponse,
+  RenameModelRequest,
+  RenameModelResponse,
   RenamePresetResponse,
   RenderResponse,
   SavePresetResponse,
@@ -452,6 +454,19 @@ export function updateModelDefaults(
 ): Promise<UpdateDefaultsResponse> {
   return fetchJSON<UpdateDefaultsResponse>(
     `/api/models/${encodeURIComponent(modelId)}/update-defaults`,
+    {
+      method: 'POST',
+      body: JSON.stringify(payload),
+    }
+  );
+}
+
+export function renameModel(
+  modelId: string,
+  payload: RenameModelRequest
+): Promise<RenameModelResponse> {
+  return fetchJSON<RenameModelResponse>(
+    `/api/models/${encodeURIComponent(modelId)}/rename`,
     {
       method: 'POST',
       body: JSON.stringify(payload),
