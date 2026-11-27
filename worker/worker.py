@@ -1417,6 +1417,366 @@ def _plan_dataclass_default_updates(
     return raw_bytes, file_sha256, changes_out, unsupported_out, spans
 
 
+def _has_utils_params_helper(py_path: Path, library_root: Path | None = None) -> bool:
+    """Return True if utils/params.py exists in py_path's ancestors up to library_root."""
+    resolved_py = py_path.resolve()
+    resolved_root = library_root.resolve() if library_root is not None else None
+    cur = resolved_py.parent
+    while True:
+        if (cur / "utils" / "params.py").is_file():
+            return True
+        if resolved_root is not None and cur == resolved_root:
+            return False
+        if resolved_root is None:
+            return False
+        parent = cur.parent
+        if parent == cur:
+            return False
+        cur = parent
+
+
+def _find_default_preset_decorators(class_node: ast.ClassDef) -> list[tuple[ast.Call, str]]:
+    """Return (decorator_call_node, callee_name) pairs for @default_preset decorators on class_node."""
+    matches: list[tuple[ast.Call, str]] = []
+    for dec in class_node.decorator_list:
+        if not isinstance(dec, ast.Call):
+            continue
+        if isinstance(dec.func, ast.Name) and dec.func.id == "default_preset":
+            matches.append((dec, "default_preset"))
+        elif isinstance(dec.func, ast.Attribute) and dec.func.attr == "default_preset":
+            matches.append((dec, ast.unparse(dec.func)))
+    return matches
+
+
+def _format_default_preset_decorator(
+    label: str,
+    description: str,
+    *,
+    callee: str = "default_preset",
+    indent: str = "",
+    nl: str = "\n",
+) -> str:
+    label_lit = _format_python_literal(label)
+    if description:
+        desc_lit = _format_python_literal(description)
+        single = f"@{callee}({label_lit}, desc={desc_lit})"
+        if len(indent) + len(single) <= 88 and "\n" not in label and "\n" not in description:
+            return single
+        return (
+            f"@{callee}({nl}"
+            f"{indent}    {label_lit},{nl}"
+            f"{indent}    desc={desc_lit},{nl}"
+            f"{indent})"
+        )
+    single = f"@{callee}({label_lit})"
+    if len(indent) + len(single) <= 88 and "\n" not in label:
+        return single
+    return f"@{callee}({nl}{indent}    {label_lit},{nl}{indent})"
+
+
+def _is_utils_params_import(node: ast.stmt) -> bool:
+    if not isinstance(node, ast.ImportFrom):
+        return False
+    return node.module == "utils.params" or (node.level > 0 and node.module == "params")
+
+
+def _collect_utils_params_imports(tree: ast.Module) -> tuple[bool, list[ast.ImportFrom]]:
+    """Inspect module-level imports (including try/except ImportError blocks) for utils.params."""
+    already_defined = False
+    imports: list[ast.ImportFrom] = []
+
+    def _visit_stmt(stmt: ast.stmt) -> None:
+        nonlocal already_defined
+        if isinstance(stmt, (ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef)):
+            if stmt.name == "default_preset":
+                already_defined = True
+        elif isinstance(stmt, ast.Assign):
+            for t in stmt.targets:
+                if isinstance(t, ast.Name) and t.id == "default_preset":
+                    already_defined = True
+        elif isinstance(stmt, ast.AnnAssign):
+            if isinstance(stmt.target, ast.Name) and stmt.target.id == "default_preset":
+                already_defined = True
+        elif _is_utils_params_import(stmt):
+            assert isinstance(stmt, ast.ImportFrom)
+            imports.append(stmt)
+            for alias in stmt.names:
+                if alias.name in ("default_preset", "*"):
+                    already_defined = True
+
+    for node in tree.body:
+        _visit_stmt(node)
+        if isinstance(node, ast.Try):
+            for sub in (*node.body, *(s for h in node.handlers for s in h.body), *node.orelse, *node.finalbody):
+                _visit_stmt(sub)
+
+    return already_defined, imports
+
+
+def _format_import_from(
+    node: ast.ImportFrom,
+    extra_name: str,
+    indent: str,
+    nl: str,
+    *,
+    was_multiline: bool,
+) -> str:
+    names: list[tuple[str, str | None]] = [(a.name, a.asname) for a in node.names]
+    if not any(n in (extra_name, "*") for n, _ in names):
+        names.append((extra_name, None))
+    names.sort(key=lambda item: (item[0].lower(), item[0]))
+    formatted = [f"{n} as {a}" if a else n for n, a in names]
+    prefix = f"{indent}from {'.' * node.level}{node.module or ''} import "
+    single = prefix + ", ".join(formatted)
+    if not was_multiline and len(single) <= 88:
+        return single
+    inner = f",{nl}".join(f"{indent}    {item}" for item in formatted)
+    return f"{prefix}({nl}{inner},{nl}{indent})"
+
+
+def _inspect_default_preset_info(
+    py_path: Path,
+    params_cls: type,
+    class_defs: dict[str, list[ast.ClassDef]],
+    tree: ast.Module,
+    library_root: Path | None,
+) -> dict[str, Any]:
+    raw_dp = getattr(params_cls, "__default_preset__", None)
+    cur_label = str(raw_dp.get("label") or "").strip() if isinstance(raw_dp, dict) else ""
+    cur_desc = str(raw_dp.get("description") or "").strip() if isinstance(raw_dp, dict) else ""
+
+    resolved_py = py_path.resolve()
+    try:
+        cls_file = inspect.getsourcefile(params_cls)
+    except Exception:
+        cls_file = None
+
+    if not cls_file or Path(cls_file).resolve() != resolved_py:
+        return {
+            "label": cur_label,
+            "description": cur_desc,
+            "can_edit": False,
+            "unsupported_reason": "Root Params dataclass is defined outside this model file",
+        }
+
+    matches = class_defs.get(params_cls.__name__, [])
+    if len(matches) != 1:
+        return {
+            "label": cur_label,
+            "description": cur_desc,
+            "can_edit": False,
+            "unsupported_reason": f"class {params_cls.__name__} not uniquely located",
+        }
+
+    class_node = matches[0]
+    decs = _find_default_preset_decorators(class_node)
+    if len(decs) > 1:
+        return {
+            "label": cur_label,
+            "description": cur_desc,
+            "can_edit": False,
+            "unsupported_reason": "Multiple @default_preset decorators found on root Params class",
+        }
+
+    if not decs:
+        already_defined, utils_imports = _collect_utils_params_imports(tree)
+        if not already_defined and not utils_imports and not _has_utils_params_helper(py_path, library_root):
+            return {
+                "label": cur_label,
+                "description": cur_desc,
+                "can_edit": False,
+                "unsupported_reason": "Library does not include utils/params.py (needed for @default_preset)",
+            }
+
+    return {
+        "label": cur_label,
+        "description": cur_desc,
+        "can_edit": True,
+    }
+
+
+def _plan_default_preset_updates(
+    py_path: Path,
+    raw_bytes: bytes,
+    params_cls: type,
+    library_root: Path | None,
+    default_preset_req: dict[str, Any] | None,
+) -> tuple[dict[str, Any], dict[str, Any] | None, list[tuple[int, int, bytes]], str | None]:
+    """Plan UTF-8 byte-span replacements for @default_preset metadata on params_cls."""
+    bom_len = 3 if raw_bytes.startswith(b"\xef\xbb\xbf") else 0
+    body_bytes = raw_bytes[bom_len:]
+    source = body_bytes.decode("utf-8")
+    tree = ast.parse(source, filename=str(py_path))
+
+    line_starts = [0]
+    for line_b in body_bytes.splitlines(keepends=True):
+        line_starts.append(line_starts[-1] + len(line_b))
+
+    class_defs: dict[str, list[ast.ClassDef]] = {}
+    for node in tree.body:
+        if isinstance(node, ast.ClassDef):
+            class_defs.setdefault(node.name, []).append(node)
+
+    dp_info = _inspect_default_preset_info(py_path, params_cls, class_defs, tree, library_root)
+    if default_preset_req is None:
+        return dp_info, None, [], None
+
+    new_label = str(default_preset_req.get("label") or "").strip()
+    new_desc = str(default_preset_req.get("description") or "").strip()
+    if new_desc and not new_label:
+        raise _HttpError(400, "Base preset name is required when a description is set.")
+
+    cur_label = dp_info["label"]
+    cur_desc = dp_info["description"]
+    if new_label == cur_label and new_desc == cur_desc:
+        return dp_info, None, [], None
+
+    if not dp_info["can_edit"]:
+        return dp_info, None, [], dp_info.get("unsupported_reason") or "Base preset metadata cannot be updated automatically"
+
+    nl = "\r\n" if b"\r\n" in body_bytes else "\n"
+    class_node = class_defs[params_cls.__name__][0]
+    decs = _find_default_preset_decorators(class_node)
+    spans: list[tuple[int, int, bytes]] = []
+
+    if decs:
+        dec, callee = decs[0]
+        if (
+            dec.lineno is None
+            or dec.col_offset is None
+            or dec.end_lineno is None
+            or dec.end_col_offset is None
+        ):
+            return dp_info, None, [], "@default_preset source span unavailable"
+
+        line_start_b = bom_len + line_starts[dec.lineno - 1]
+        call_start_b = bom_len + line_starts[dec.lineno - 1] + dec.col_offset
+        end_b = bom_len + line_starts[dec.end_lineno - 1] + dec.end_col_offset
+
+        prefix_slice = raw_bytes[line_start_b:call_start_b]
+        at_rel = prefix_slice.rfind(b"@")
+        if at_rel < 0 or prefix_slice[:at_rel].strip() != b"":
+            return dp_info, None, [], "Could not locate @default_preset decorator prefix"
+        at_b = line_start_b + at_rel
+        indent = prefix_slice[:at_rel].decode("utf-8")
+
+        if new_label == "" and new_desc == "":
+            line_end_b = bom_len + (line_starts[dec.end_lineno] if dec.end_lineno < len(line_starts) else len(body_bytes))
+            if raw_bytes[end_b:line_end_b].strip() == b"":
+                spans.append((line_start_b, line_end_b, b""))
+            else:
+                spans.append((at_b, end_b, b""))
+            action = "remove"
+        else:
+            formatted = _format_default_preset_decorator(
+                new_label,
+                new_desc,
+                callee=callee,
+                indent=indent,
+                nl=nl,
+            )
+            spans.append((at_b, end_b, formatted.encode("utf-8")))
+            action = "update"
+
+        dp_change = {
+            "action": action,
+            "line": dec.lineno,
+            "old_label": cur_label,
+            "new_label": new_label,
+            "old_description": cur_desc,
+            "new_description": new_desc,
+        }
+        return dp_info, dp_change, spans, None
+
+    # Adding @default_preset to a class that does not yet have one
+    first_line = min([d.lineno for d in class_node.decorator_list] + [class_node.lineno])
+    insert_b = bom_len + line_starts[first_line - 1]
+    line_end_first = bom_len + (line_starts[first_line] if first_line < len(line_starts) else len(body_bytes))
+    first_line_text = raw_bytes[insert_b:line_end_first].decode("utf-8")
+    indent = first_line_text[: len(first_line_text) - len(first_line_text.lstrip(" \t"))]
+
+    formatted = _format_default_preset_decorator(new_label, new_desc, indent=indent, nl=nl)
+    spans.append((insert_b, insert_b, f"{indent}{formatted}{nl}".encode("utf-8")))
+
+    already_defined, utils_imports = _collect_utils_params_imports(tree)
+    if not already_defined:
+        if utils_imports:
+            for imp in utils_imports:
+                if (
+                    imp.lineno is None
+                    or imp.col_offset is None
+                    or imp.end_lineno is None
+                    or imp.end_col_offset is None
+                ):
+                    continue
+                if any(a.name in ("default_preset", "*") for a in imp.names):
+                    continue
+                imp_line_start = bom_len + line_starts[imp.lineno - 1]
+                imp_start = imp_line_start + imp.col_offset
+                imp_end = bom_len + line_starts[imp.end_lineno - 1] + imp.end_col_offset
+                imp_indent = raw_bytes[imp_line_start:imp_start].decode("utf-8")
+                if imp_indent.strip():
+                    continue
+                was_multiline = imp.end_lineno > imp.lineno
+                new_imp = _format_import_from(
+                    imp,
+                    "default_preset",
+                    imp_indent,
+                    nl,
+                    was_multiline=was_multiline,
+                )
+                spans.append((imp_line_start, imp_end, new_imp.encode("utf-8")))
+        else:
+            insert_after_line = 0
+            for idx, node in enumerate(tree.body):
+                if (
+                    idx == 0
+                    and isinstance(node, ast.Expr)
+                    and isinstance(node.value, ast.Constant)
+                    and isinstance(node.value.value, str)
+                ):
+                    insert_after_line = max(insert_after_line, node.end_lineno or node.lineno)
+                elif isinstance(node, (ast.Import, ast.ImportFrom)):
+                    insert_after_line = max(insert_after_line, node.end_lineno or node.lineno)
+                elif isinstance(node, ast.Try) and any(
+                    isinstance(sub, (ast.Import, ast.ImportFrom)) for sub in node.body
+                ):
+                    insert_after_line = max(insert_after_line, node.end_lineno or node.lineno)
+                else:
+                    break
+
+            imp_insert_b = bom_len + line_starts[insert_after_line]
+            need_leading_nl = insert_after_line > 0
+            need_trailing_nl = imp_insert_b < insert_b
+            block = (
+                f"try:{nl}"
+                f"    from utils.params import default_preset{nl}"
+                f"except ImportError:{nl}"
+                f"    import sys as _sys{nl}"
+                f"    from pathlib import Path as _Path{nl}"
+                f"    for _p in _Path(__file__).resolve().parents:{nl}"
+                f"        if (_p / \"utils\").is_dir():{nl}"
+                f"            _sys.path.insert(0, str(_p)){nl}"
+                f"            break{nl}"
+                f"    from utils.params import default_preset{nl}"
+            )
+            if need_leading_nl:
+                block = nl + block
+            if need_trailing_nl and insert_after_line == 0:
+                block = block + nl
+            spans.append((imp_insert_b, imp_insert_b, block.encode("utf-8")))
+
+    dp_change = {
+        "action": "add",
+        "line": first_line,
+        "old_label": cur_label,
+        "new_label": new_label,
+        "old_description": cur_desc,
+        "new_description": new_desc,
+    }
+    return dp_info, dp_change, spans, None
+
+
 def _sanitize_filename_stem(raw: str, fallback: str) -> str:
     """Sanitize a candidate filename stem to safe lowercase snake_case without extension."""
     stem = Path(str(raw).strip()).name
@@ -2764,6 +3124,7 @@ class WorkerState:
         params_dict: dict[str, Any],
         dry_run: bool = True,
         expected_sha256: str = "",
+        default_preset: dict[str, Any] | None = None,
     ) -> dict[str, Any]:
         with self.lock:
             meta = self._get_model_meta(model_id)
@@ -2792,7 +3153,15 @@ class WorkerState:
                 params_dict if isinstance(params_dict, dict) else {},
                 library_root=lib_root,
             )
+            dp_info, dp_change, dp_spans, dp_error = _plan_default_preset_updates(
+                py_path,
+                raw_bytes,
+                params_cls,
+                lib_root,
+                default_preset,
+            )
 
+            all_spans = [*spans, *dp_spans]
             base_resp: dict[str, Any] = {
                 "ok": True,
                 "file": str(py_path),
@@ -2800,11 +3169,19 @@ class WorkerState:
                 "sha256": file_sha256,
                 "changes": changes,
                 "unsupported": unsupported,
+                "default_preset": dp_info,
             }
+            if dp_change is not None:
+                base_resp["default_preset_change"] = dp_change
             if dry_run:
+                if dp_error is not None and not changes:
+                    return {**base_resp, "ok": False, "error": dp_error}
                 return base_resp
 
-            if not changes and unsupported:
+            if dp_error is not None and not changes:
+                return {**base_resp, "ok": False, "error": dp_error}
+
+            if not changes and dp_change is None and unsupported:
                 return {
                     **base_resp,
                     "ok": False,
@@ -2824,11 +3201,11 @@ class WorkerState:
                     "ok": False,
                     "error": "File changed on disk since preview; please preview again before applying.",
                 }
-            if not spans:
-                return {**base_resp, "updated": 0}
+            if not all_spans:
+                return {**base_resp, "updated": 0, "default_preset_updated": False}
 
             # Verify non-overlapping spans and splice in descending byte order
-            sorted_spans = sorted(spans, key=lambda s: s[0], reverse=True)
+            sorted_spans = sorted(all_spans, key=lambda s: (s[0], s[1]), reverse=True)
             for i in range(len(sorted_spans) - 1):
                 if sorted_spans[i][0] < sorted_spans[i + 1][1]:
                     return {
@@ -2888,10 +3265,19 @@ class WorkerState:
             self._evict_project_modules()
             self.discover_models()
             new_sha256 = hashlib.sha256(new_bytes).hexdigest()
+            updated_dp_info = dict(dp_info)
+            if dp_change is not None:
+                updated_dp_info = {
+                    "label": dp_change["new_label"],
+                    "description": dp_change["new_description"],
+                    "can_edit": True,
+                }
             return {
                 **base_resp,
                 "sha256": new_sha256,
                 "updated": len(changes),
+                "default_preset": updated_dp_info,
+                "default_preset_updated": dp_change is not None,
             }
 
     def _resolve_export_filename(
@@ -3326,6 +3712,9 @@ def make_handler(state: WorkerState, auth_token: str | None = None) -> type[Base
                     params = body.get("params", {})
                     if not isinstance(params, dict):
                         raise _HttpError(400, "params must be a JSON object")
+                    default_preset = body.get("default_preset")
+                    if default_preset is not None and not isinstance(default_preset, dict):
+                        raise _HttpError(400, "default_preset must be a JSON object")
                     dry_run = bool(body.get("dry_run", True))
                     expected_sha256 = str(body.get("expected_sha256", "") or "")
                     self._send_json(
@@ -3334,6 +3723,7 @@ def make_handler(state: WorkerState, auth_token: str | None = None) -> type[Base
                             params,
                             dry_run=dry_run,
                             expected_sha256=expected_sha256,
+                            default_preset=default_preset,
                         )
                     )
                     return

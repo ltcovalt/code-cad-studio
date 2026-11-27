@@ -307,3 +307,186 @@ def test_update_defaults_partial_apply_with_external_component(tmp_path: Path) -
     assert "diameter: float = 54.0" in py_path.read_text(encoding="utf-8")
     # External shared component file must remain untouched
     assert comp_path.read_text(encoding="utf-8") == comp_src
+
+
+def _write_utils_params(lib_dir: Path) -> None:
+    utils_dir = lib_dir / "utils"
+    utils_dir.mkdir(parents=True, exist_ok=True)
+    src = Path(__file__).resolve().parents[1] / "params.py"
+    (utils_dir / "params.py").write_text(src.read_text(encoding="utf-8"), encoding="utf-8")
+
+
+def test_update_defaults_default_preset_add_update_remove_and_bom(tmp_path: Path) -> None:
+    lib_dir = tmp_path / "lib"
+    _write_utils_params(lib_dir)
+    model_dir = lib_dir / "models" / "caddy"
+    model_dir.mkdir(parents=True)
+    py_path = model_dir / "caddy.py"
+
+    # Model with try/except ImportError for utils.params, no @default_preset yet, and UTF-8 BOM
+    src = (
+        "from dataclasses import dataclass\n"
+        "try:\n"
+        "    from utils.params import group, param\n"
+        "except ImportError:\n"
+        "    import sys\n"
+        "    from utils.params import group, param\n"
+        "\n"
+        "@dataclass\n"
+        "class CaddyParams:\n"
+        "    slots: int = param(4, desc='Number of slots')\n"
+        "\n"
+        "def create_caddy(params: CaddyParams):\n"
+        "    return None\n"
+    )
+    py_path.write_bytes(b"\xef\xbb\xbf" + src.encode("utf-8"))
+
+    state = worker.WorkerState([{"id": "demo", "name": "Demo", "path": str(lib_dir)}])
+
+    # 1. Preview without default_preset returns empty raw metadata & can_edit=True
+    preview0 = state.update_defaults("demo/caddy", {}, dry_run=True)
+    assert preview0["ok"] is True
+    assert preview0["default_preset"] == {"label": "", "description": "", "can_edit": True}
+    assert "default_preset_change" not in preview0
+
+    # 2. Validation error when description is non-empty and label is empty
+    with pytest.raises(worker._HttpError) as exc_info:
+        state.update_defaults(
+            "demo/caddy",
+            {},
+            dry_run=True,
+            default_preset={"label": "   ", "description": "Some desc"},
+        )
+    assert exc_info.value.status == 400
+
+    # 3. Add @default_preset + update parameter default atomically (preserving BOM)
+    preview_add = state.update_defaults(
+        "demo/caddy",
+        {"slots": 6},
+        dry_run=True,
+        default_preset={"label": "2S Shorty 4×1", "description": "Upright pit caddy"},
+    )
+    assert preview_add["ok"] is True
+    assert preview_add["default_preset_change"]["action"] == "add"
+    assert len(preview_add["changes"]) == 1
+
+    applied_add = state.update_defaults(
+        "demo/caddy",
+        {"slots": 6},
+        dry_run=False,
+        expected_sha256=preview_add["sha256"],
+        default_preset={"label": "2S Shorty 4×1", "description": "Upright pit caddy"},
+    )
+    assert applied_add["ok"] is True
+    assert applied_add["updated"] == 1
+    assert applied_add["default_preset_updated"] is True
+    assert applied_add["default_preset"] == {
+        "label": "2S Shorty 4×1",
+        "description": "Upright pit caddy",
+        "can_edit": True,
+    }
+    raw_after_add = py_path.read_bytes()
+    assert raw_after_add.startswith(b"\xef\xbb\xbf")
+    text_after_add = raw_after_add.decode("utf-8-sig")
+    assert text_after_add.count("from utils.params import default_preset, group, param") == 2
+    assert '@default_preset("2S Shorty 4×1", desc="Upright pit caddy")' in text_after_add
+
+    # Schema reflects newly added @default_preset
+    schema = state.get_schema("demo/caddy")
+    assert schema["default_preset"] == {
+        "label": "2S Shorty 4×1",
+        "description": "Upright pit caddy",
+    }
+
+    # 4. Update existing @default_preset to multi-line (long label+desc) without changing params
+    long_desc = "4-pack pinwheel on a 2x2 Gridfinity base with a support-free center finger pull loop"
+    preview_upd = state.update_defaults(
+        "demo/caddy",
+        {},
+        dry_run=True,
+        default_preset={"label": "2S Shorty Pinwheel", "description": long_desc},
+    )
+    assert preview_upd["ok"] is True
+    assert preview_upd["default_preset_change"]["action"] == "update"
+    assert preview_upd["changes"] == []
+
+    applied_upd = state.update_defaults(
+        "demo/caddy",
+        {},
+        dry_run=False,
+        expected_sha256=preview_upd["sha256"],
+        default_preset={"label": "2S Shorty Pinwheel", "description": long_desc},
+    )
+    assert applied_upd["ok"] is True
+    assert applied_upd["updated"] == 0
+    assert applied_upd["default_preset_updated"] is True
+    schema2 = state.get_schema("demo/caddy")
+    assert schema2["default_preset"] == {
+        "label": "2S Shorty Pinwheel",
+        "description": long_desc,
+    }
+
+    # 5. Remove @default_preset by clearing both label and description
+    preview_rem = state.update_defaults(
+        "demo/caddy",
+        {},
+        dry_run=True,
+        default_preset={"label": "", "description": ""},
+    )
+    assert preview_rem["default_preset_change"]["action"] == "remove"
+    applied_rem = state.update_defaults(
+        "demo/caddy",
+        {},
+        dry_run=False,
+        expected_sha256=preview_rem["sha256"],
+        default_preset={"label": "", "description": ""},
+    )
+    assert applied_rem["ok"] is True
+    assert applied_rem["default_preset_updated"] is True
+    assert "@default_preset" not in py_path.read_text(encoding="utf-8-sig")
+    schema3 = state.get_schema("demo/caddy")
+    assert "default_preset" not in schema3
+
+
+def test_update_defaults_default_preset_without_utils_params_fails_closed(tmp_path: Path) -> None:
+    lib_dir = tmp_path / "lib"
+    model_dir = lib_dir / "models" / "bare"
+    model_dir.mkdir(parents=True)
+    py_path = model_dir / "bare.py"
+    py_path.write_text(
+        "from dataclasses import dataclass\n"
+        "@dataclass\n"
+        "class BareParams:\n"
+        "    width: float = 10.0\n"
+        "def create_bare(params: BareParams):\n"
+        "    return None\n",
+        encoding="utf-8",
+    )
+
+    state = worker.WorkerState([{"id": "demo", "name": "Demo", "path": str(lib_dir)}])
+    preview = state.update_defaults("demo/bare", {"width": 12.0}, dry_run=True)
+    assert preview["ok"] is True
+    assert preview["default_preset"]["can_edit"] is False
+    assert "utils/params.py" in preview["default_preset"]["unsupported_reason"]
+    assert len(preview["changes"]) == 1
+
+    # Adding utils/params.py enables adding @default_preset even on a bare @dataclass file
+    _write_utils_params(lib_dir)
+    preview2 = state.update_defaults(
+        "demo/bare",
+        {},
+        dry_run=True,
+        default_preset={"label": "Standard Bare", "description": ""},
+    )
+    assert preview2["ok"] is True
+    assert preview2["default_preset"]["can_edit"] is True
+    applied2 = state.update_defaults(
+        "demo/bare",
+        {},
+        dry_run=False,
+        expected_sha256=preview2["sha256"],
+        default_preset={"label": "Standard Bare", "description": ""},
+    )
+    assert applied2["ok"] is True
+    assert applied2["default_preset_updated"] is True
+    assert state.get_schema("demo/bare")["default_preset"] == {"label": "Standard Bare"}

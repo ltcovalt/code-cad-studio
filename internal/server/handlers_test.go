@@ -997,19 +997,31 @@ func TestPresetVerificationHandlers(t *testing.T) {
 	pyExe := findTestPython(t)
 	projectDir := t.TempDir()
 	modelDir := filepath.Join(projectDir, "models", "ver_demo")
+	utilsDir := filepath.Join(projectDir, "utils")
 	if err := os.MkdirAll(modelDir, 0o755); err != nil {
 		t.Fatalf("mkdir: %v", err)
 	}
+	if err := os.MkdirAll(utilsDir, 0o755); err != nil {
+		t.Fatalf("mkdir utils: %v", err)
+	}
+	paramsSrc, err := os.ReadFile(filepath.Join("..", "..", "worker", "params.py"))
+	if err != nil {
+		t.Fatalf("read worker/params.py: %v", err)
+	}
+	if err := os.WriteFile(filepath.Join(utilsDir, "params.py"), paramsSrc, 0o644); err != nil {
+		t.Fatalf("write utils/params.py: %v", err)
+	}
 
 	modelSrc := `from dataclasses import dataclass, field
+from utils.params import default_preset
 
 @dataclass
 class CoreParams:
     width: float = 40.0
 
+@default_preset("Standard Block", desc="40mm block")
 @dataclass
 class VerDemoParams:
-    __default_preset__ = {"label": "Standard Block", "description": "40mm block"}
     core: CoreParams = field(default_factory=CoreParams)
 
 def create_ver_demo(params: VerDemoParams):
@@ -1033,6 +1045,7 @@ def create_ver_demo(params: VerDemoParams):
 	type presetWire struct {
 		Key          string `json:"key"`
 		Label        string `json:"label"`
+		Description  string `json:"description"`
 		Source       string `json:"source"`
 		Verification *struct {
 			Status string `json:"status"`
@@ -1104,7 +1117,51 @@ def create_ver_demo(params: VerDemoParams):
 		t.Fatalf("PUT project verification status = %d, body = %s", rec.Code, rec.Body.String())
 	}
 
-	// 5. Applying update-defaults must downgrade canonical "default" status to unverified while preserving note
+	// 5. Metadata-only update-defaults must update @default_preset without downgrading canonical "default" verification
+	rec = httptest.NewRecorder()
+	srv.Handler().ServeHTTP(rec, newAPIRequest(
+		http.MethodPost,
+		modelPath("test-lib/ver_demo", "/update-defaults"),
+		bytes.NewBufferString(`{"dry_run":true,"params":{},"default_preset":{"label":"Refined Block","description":"40mm updated note"}}`),
+	))
+	var metaPreview worker.UpdateDefaultsResponse
+	if err := json.Unmarshal(rec.Body.Bytes(), &metaPreview); err != nil || !metaPreview.OK || metaPreview.DefaultPresetChange == nil {
+		t.Fatalf("metadata preview update-defaults failed: %s", rec.Body.String())
+	}
+
+	metaApplyBody, _ := json.Marshal(map[string]any{
+		"dry_run":         false,
+		"expected_sha256": metaPreview.SHA256,
+		"params":          map[string]any{},
+		"default_preset":  map[string]any{"label": "Refined Block", "description": "40mm updated note"},
+	})
+	rec = httptest.NewRecorder()
+	srv.Handler().ServeHTTP(rec, newAPIRequest(http.MethodPost, modelPath("test-lib/ver_demo", "/update-defaults"), bytes.NewReader(metaApplyBody)))
+	if rec.Code != http.StatusOK {
+		t.Fatalf("apply metadata update-defaults status = %d, body = %s", rec.Code, rec.Body.String())
+	}
+	var metaApply worker.UpdateDefaultsResponse
+	if err := json.Unmarshal(rec.Body.Bytes(), &metaApply); err != nil || !metaApply.OK || !metaApply.DefaultPresetUpdated || metaApply.Updated != 0 {
+		t.Fatalf("unexpected metadata apply response: %+v", metaApply)
+	}
+
+	rec = httptest.NewRecorder()
+	srv.Handler().ServeHTTP(rec, newAPIRequest(http.MethodGet, modelPath("test-lib/ver_demo", "/presets"), nil))
+	var afterMeta struct {
+		OK      bool         `json:"ok"`
+		Presets []presetWire `json:"presets"`
+	}
+	if err := json.Unmarshal(rec.Body.Bytes(), &afterMeta); err != nil || !afterMeta.OK {
+		t.Fatalf("GET presets after metadata update failed: %s", rec.Body.String())
+	}
+	if afterMeta.Presets[0].Label != "Refined Block" || afterMeta.Presets[0].Description != "40mm updated note" {
+		t.Fatalf("expected updated Base label/description, got %+v", afterMeta.Presets[0])
+	}
+	if afterMeta.Presets[0].Verification == nil || afterMeta.Presets[0].Verification.Status != "verified" || afterMeta.Presets[0].Verification.Note != "Printed in PETG, exact fit" {
+		t.Fatalf("expected metadata-only update to preserve verified status, got %+v", afterMeta.Presets[0].Verification)
+	}
+
+	// 6. Applying parameter update-defaults must downgrade canonical "default" status to unverified while preserving note
 	rec = httptest.NewRecorder()
 	srv.Handler().ServeHTTP(rec, newAPIRequest(
 		http.MethodPost,

@@ -139,10 +139,11 @@ Project-level presets use an explicit versioned JSON envelope (`schema_version: 
 
 ## 7. Safe Source Default Updates (`update-defaults`)
 
-Studio can write modified parameter defaults back into `<model>.py` via `POST /models/<id>/update-defaults`:
+Studio can write modified parameter defaults and Base preset metadata (`@default_preset`) back into `<model>.py` via `POST /models/<id>/update-defaults`:
 
 - **UTF-8 & BOM safe**: Preserves UTF-8 BOM (`\xef\xbb\xbf`) if present and computes AST byte spans accurately.
-- **Literal-only local edits with partial apply**: Only simple literal expressions (constants, signed ints/floats, flat literal lists/tuples) defined inside the model's own `.py` file are eligible. External shared component dataclasses, computed expressions (`a + b`), `Enum` defaults, and `param_list` factories are reported under `unsupported` with structured metadata (`reason_code`, `owner_class`, `in_library`, and optional `source_rel_path` / `source_file` for in-library components). When both local and unsupported fields are changed, applying updates writes only the local literals and leaves external/unsupported fields untouched; when zero local fields can be updated, apply fails closed without touching disk.
+- **Literal-only local edits with partial apply**: Only simple literal expressions (constants, signed ints/floats, flat literal lists/tuples) defined inside the model's own `.py` file are eligible. External shared component dataclasses, computed expressions (`a + b`), `Enum` defaults, and `param_list` factories are reported under `unsupported` with structured metadata (`reason_code`, `owner_class`, `in_library`, and optional `source_rel_path` / `source_file` for in-library components). When both local and unsupported fields are changed, applying updates writes only the local literals and leaves external/unsupported fields untouched; when zero local fields (and no `@default_preset` change) can be updated, apply fails closed without touching disk.
+- **Optional `@default_preset` metadata**: Passing `default_preset: { "label": "...", "description": "..." }` safely adds, updates, or removes `@default_preset(...)` on the root `<Model>Params` dataclass (inserting `default_preset` into `utils.params` imports when needed). Metadata-only updates (`updated == 0`) preserve Base's print verification status.
 - **Optimistic locking**: Non-dry-run applies (`dry_run: false`) require a non-empty `expected_sha256` matching the current file SHA-256 on disk; otherwise HTTP `400` or stale-file conflict is returned.
 - **In-memory syntax verification & atomic replace**: Re-parses the patched Python source in memory before writing via temporary file + `os.replace` retry.
 

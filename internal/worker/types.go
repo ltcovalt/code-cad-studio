@@ -154,16 +154,40 @@ type UnsupportedDefaultChange struct {
 	InLibrary     bool   `json:"in_library,omitempty"`
 }
 
+type DefaultPresetUpdate struct {
+	Label       string `json:"label"`
+	Description string `json:"description"`
+}
+
+type DefaultPresetInfo struct {
+	Label             string `json:"label"`
+	Description       string `json:"description"`
+	CanEdit           bool   `json:"can_edit"`
+	UnsupportedReason string `json:"unsupported_reason,omitempty"`
+}
+
+type DefaultPresetChange struct {
+	Action         string `json:"action"`
+	Line           int    `json:"line"`
+	OldLabel       string `json:"old_label"`
+	NewLabel       string `json:"new_label"`
+	OldDescription string `json:"old_description"`
+	NewDescription string `json:"new_description"`
+}
+
 type UpdateDefaultsResponse struct {
-	OK          bool                       `json:"ok"`
-	File        string                     `json:"file,omitempty"`
-	RelPath     string                     `json:"rel_path,omitempty"`
-	SHA256      string                     `json:"sha256,omitempty"`
-	Updated     int                        `json:"updated,omitempty"`
-	Changes     []DefaultChange            `json:"changes"`
-	Unsupported []UnsupportedDefaultChange `json:"unsupported"`
-	Error       string                     `json:"error,omitempty"`
-	Traceback   string                     `json:"traceback,omitempty"`
+	OK                   bool                       `json:"ok"`
+	File                 string                     `json:"file,omitempty"`
+	RelPath              string                     `json:"rel_path,omitempty"`
+	SHA256               string                     `json:"sha256,omitempty"`
+	Updated              int                        `json:"updated,omitempty"`
+	DefaultPreset        *DefaultPresetInfo         `json:"default_preset,omitempty"`
+	DefaultPresetChange  *DefaultPresetChange       `json:"default_preset_change,omitempty"`
+	DefaultPresetUpdated bool                       `json:"default_preset_updated,omitempty"`
+	Changes              []DefaultChange            `json:"changes"`
+	Unsupported          []UnsupportedDefaultChange `json:"unsupported"`
+	Error                string                     `json:"error,omitempty"`
+	Traceback            string                     `json:"traceback,omitempty"`
 }
 
 type RenameModelResponse struct {

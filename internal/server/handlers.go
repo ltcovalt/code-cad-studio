@@ -2060,9 +2060,10 @@ func (s *Server) handleUpdateModelDefaults(w http.ResponseWriter, r *http.Reques
 		return
 	}
 	var req struct {
-		Params         map[string]any `json:"params"`
-		DryRun         bool           `json:"dry_run"`
-		ExpectedSHA256 string         `json:"expected_sha256"`
+		Params         map[string]any              `json:"params"`
+		DefaultPreset  *worker.DefaultPresetUpdate `json:"default_preset"`
+		DryRun         bool                        `json:"dry_run"`
+		ExpectedSHA256 string                      `json:"expected_sha256"`
 	}
 	if !decodeJSON(w, r, &req, false) {
 		return
@@ -2076,7 +2077,7 @@ func (s *Server) handleUpdateModelDefaults(w http.ResponseWriter, r *http.Reques
 		return
 	}
 
-	resp, err := s.worker.UpdateDefaults(r.Context(), modelID, req.Params, req.DryRun, strings.TrimSpace(req.ExpectedSHA256))
+	resp, err := s.worker.UpdateDefaults(r.Context(), modelID, req.Params, req.DefaultPreset, req.DryRun, strings.TrimSpace(req.ExpectedSHA256))
 	if err != nil {
 		writeError(w, http.StatusBadGateway, "worker_error", err.Error())
 		return
@@ -2099,7 +2100,11 @@ func (s *Server) handleUpdateModelDefaults(w http.ResponseWriter, r *http.Reques
 			writeError(w, http.StatusBadRequest, "missing_sha256", resp.Error)
 			return
 		}
-		if len(resp.Unsupported) == 0 && len(resp.Changes) == 0 && resp.SHA256 == "" {
+		if strings.Contains(resp.Error, "Base preset name is required") {
+			writeError(w, http.StatusBadRequest, "invalid_default_preset", resp.Error)
+			return
+		}
+		if len(resp.Unsupported) == 0 && len(resp.Changes) == 0 && resp.DefaultPresetChange == nil && resp.SHA256 == "" {
 			writeError(w, http.StatusUnprocessableEntity, "update_defaults_failed", resp.Error, resp.Traceback)
 			return
 		}
