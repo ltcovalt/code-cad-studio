@@ -1092,6 +1092,7 @@ export class StudioState {
     }
     return api.updateModelDefaults(modelId, {
       params: this.params,
+      component_presets: this.selectedComponentPresets,
       dry_run: true,
     });
   }
@@ -1110,6 +1111,7 @@ export class StudioState {
     const includeParams = options?.includeParams !== false;
     const resp = await api.updateModelDefaults(modelId, {
       params: includeParams ? this.params : {},
+      ...(includeParams ? { component_presets: this.selectedComponentPresets } : {}),
       ...(options?.defaultPreset ? { default_preset: options.defaultPreset } : {}),
       dry_run: false,
       expected_sha256: expectedSha256,

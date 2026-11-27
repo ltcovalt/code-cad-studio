@@ -257,7 +257,7 @@ export function extractComponentPresetSelections(
   const refs = preset?.component_presets;
   for (const f of compFields) {
     const refKey = refs && hasOwn(refs, f.path) ? String(refs[f.path] ?? '').trim() : '';
-    result[f.path] = refKey || 'default';
+    result[f.path] = refKey || f.component_preset || 'default';
   }
   return result;
 }
@@ -280,8 +280,9 @@ export function normalizeComponentPresetsForSave(
     }
     const defVal = getParamByPath(modelDefaults, f.path);
     const defaultIsNull = defVal === null;
+    const baseKey = f.component_preset || 'default';
     const key = (selected[f.path] ?? '').trim() || 'default';
-    if (key === 'default' && !defaultIsNull) {
+    if (key === baseKey && !defaultIsNull) {
       continue;
     }
     out[f.path] = key;

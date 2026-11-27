@@ -453,6 +453,7 @@ export function updateModelDefaults(
   modelId: string,
   payload: {
     params: ParamsRecord;
+    component_presets?: Record<string, string>;
     default_preset?: DefaultPresetUpdate;
     dry_run: boolean;
     expected_sha256?: string;

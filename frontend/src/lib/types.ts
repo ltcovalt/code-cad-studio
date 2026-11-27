@@ -195,6 +195,7 @@ export interface ParamField {
   group_defaults?: ParamsRecord;
   component_id?: string;
   component_name?: string;
+  component_preset?: string;
   description: string;
   unit?: string;
   nullable?: boolean;

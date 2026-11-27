@@ -92,6 +92,7 @@ describe('api client', () => {
     await openInSlicer('/tmp/a.stl');
     await updateModelDefaults('code-cad/enclosures/lid', {
       params: { w: 10 },
+      component_presets: { pull_tab: 'heavy_duty' },
       default_preset: { label: 'Lid Base', description: 'Standard lid' },
       dry_run: true,
     });

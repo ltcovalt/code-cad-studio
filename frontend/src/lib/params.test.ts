@@ -336,6 +336,33 @@ describe('params helpers', () => {
       )
     ).toEqual({ gridfinity: 'default' });
 
+    // Base model with component_preset set in Python defaults to that preset and omits it on save unless reverted to 'default'
+    const fieldsWithBasePreset: ParamField[] = [
+      fields[0],
+      { ...fields[1], component_preset: 'heavy_duty' },
+      fields[2],
+    ];
+    expect(extractComponentPresetSelections(null, fieldsWithBasePreset)).toEqual({
+      pull_tab: 'heavy_duty',
+      gridfinity: 'default',
+    });
+    expect(
+      normalizeComponentPresetsForSave(
+        { pull_tab: 'heavy_duty' },
+        { pull_tab: { length: 8 } },
+        defaults,
+        fieldsWithBasePreset
+      )
+    ).toEqual({});
+    expect(
+      normalizeComponentPresetsForSave(
+        { pull_tab: 'default' },
+        { pull_tab: { length: 6 } },
+        defaults,
+        fieldsWithBasePreset
+      )
+    ).toEqual({ pull_tab: 'default' });
+
     // evaluateWhen supports checking top-level nullable groups from sibling groups (e.g. when={"gridfinity": null})
     expect(evaluateWhen({ gridfinity: null }, { gridfinity: null, structure: { wall: 3 } }, { wall: 3 })).toBe(true);
     expect(evaluateWhen({ gridfinity: null }, { gridfinity: { magnets: true }, structure: { wall: 3 } }, { wall: 3 })).toBe(false);
