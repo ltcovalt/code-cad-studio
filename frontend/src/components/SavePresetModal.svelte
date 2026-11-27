@@ -481,7 +481,7 @@
             aria-describedby={nameDescribedBy || undefined}
             placeholder="e.g. Gridfinity Bin - 2x2x6u"
             class="input input-bordered input-sm w-full"
-            class:input-error={Boolean(formError || overwriteNotice)}
+            class:input-error={Boolean(formError)}
           />
           {#if overwriteNotice}
             <Alert
