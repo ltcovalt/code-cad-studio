@@ -1,10 +1,10 @@
 <?xml version="1.0" encoding="UTF-8" standalone="no"?>
 <svg width="1024" height="1024" viewBox="0 0 1024 1024" fill="none" xmlns="http://www.w3.org/2000/svg">
   <g stroke="#6eb5ff" stroke-linecap="round" stroke-linejoin="round">
-    <path d="M235 380L95 512L235 644" stroke-width="49"/>
-    <path d="M789 380L929 512L789 644" stroke-width="49"/>
-    <polygon points="512,296 699,404 512,512 325,404" fill="#6eb5ff" fill-opacity="0.22" stroke="none"/>
-    <polygon points="512,296 699,404 699,620 512,728 325,620 325,404" stroke-width="45"/>
-    <path d="M325 404L512 512L699 404M512 512V728" stroke-width="45"/>
+    <path d="M196 400L80 512L196 624" stroke-width="52"/>
+    <path d="M828 400L944 512L828 624" stroke-width="52"/>
+    <polygon points="512,280 713,396 512,512 311,396" fill="#6eb5ff" fill-opacity="0.22" stroke="none"/>
+    <polygon points="512,280 713,396 713,628 512,744 311,628 311,396" stroke-width="50"/>
+    <path d="M311 396L512 512L713 396M512 512V744" stroke-width="50"/>
   </g>
 </svg>
