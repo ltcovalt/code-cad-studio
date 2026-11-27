@@ -1,9 +1,7 @@
 <script lang="ts">
   import { untrack } from 'svelte';
-  import { pathBasename } from '../lib/paths';
   import { studio } from '../lib/studioState.svelte';
-  import type { Preset, UpdateDefaultsResponse, VerificationStatus } from '../lib/types';
-  import { groupUnsupportedDefaults } from '../lib/updateDefaults';
+  import type { Preset, VerificationStatus } from '../lib/types';
   import {
     VERIFICATION_STATUSES,
     formatVerificationTooltip,
@@ -13,12 +11,9 @@
   import Alert from './Alert.svelte';
   import VerificationIcon from './VerificationIcon.svelte';
 
-  type ManageTab = 'presets' | 'source';
-
   let dialogEl: HTMLDialogElement | undefined = $state();
   let pressedOutside = false;
 
-  let activeTab = $state<ManageTab>('presets');
   let actionBusy = $state(false);
   let manageError = $state('');
   let manageSuccess = $state('');
@@ -36,13 +31,6 @@
   // Inline delete confirm state
   let deletingKey = $state<string | null>(null);
 
-  // Update source file state
-  let previewLoading = $state(false);
-  let previewData = $state<UpdateDefaultsResponse | null>(null);
-  let previewError = $state('');
-  let applyingDefaults = $state(false);
-  let defaultsSuccess = $state('');
-
   const savedPresets = $derived(
     studio.presets.filter((p) => p.key !== 'default' && (p.source === 'user' || p.source === 'project'))
   );
@@ -51,30 +39,12 @@
     studio.presets.find((p) => p.key === 'default') ?? null
   );
 
-  const canonicalDefaultVer = $derived(getPresetVerification(canonicalDefault));
-
-  const unsupportedGroups = $derived(
-    previewData ? groupUnsupportedDefaults(previewData.unsupported) : []
-  );
-
-  const hasPartialChanges = $derived(
-    Boolean(previewData && previewData.changes.length > 0 && previewData.unsupported.length > 0)
-  );
-
-  const onlyUnsupportedChanges = $derived(
-    Boolean(previewData && previewData.changes.length === 0 && previewData.unsupported.length > 0)
-  );
-
   function initializeState() {
-    activeTab = 'presets';
     editingKey = null;
     verifyingKey = null;
     deletingKey = null;
     manageError = '';
     manageSuccess = '';
-    previewData = null;
-    previewError = '';
-    defaultsSuccess = '';
   }
 
   let dialogBodyEl: HTMLDivElement | undefined = $state();
@@ -99,7 +69,7 @@
   });
 
   function closeModal() {
-    if (actionBusy || applyingDefaults) return;
+    if (actionBusy) return;
     studio.managePresetsModalOpen = false;
   }
 
@@ -126,7 +96,7 @@
   }
 
   function handleDialogCancel(e: Event) {
-    if (actionBusy || applyingDefaults) {
+    if (actionBusy) {
       e.preventDefault();
       return;
     }
@@ -173,33 +143,6 @@
       closeModal();
     }
     pressedOutside = false;
-  }
-
-  async function loadDefaultsPreview() {
-    previewLoading = true;
-    previewError = '';
-    defaultsSuccess = '';
-    try {
-      const resp = await studio.previewUpdateDefaults();
-      if (!resp.ok) {
-        previewData = null;
-        previewError = resp.error || 'Failed to inspect model defaults';
-      } else {
-        previewData = resp;
-      }
-    } catch (err) {
-      previewData = null;
-      previewError = err instanceof Error ? err.message : String(err);
-    } finally {
-      previewLoading = false;
-    }
-  }
-
-  function switchTab(tab: ManageTab) {
-    activeTab = tab;
-    if (tab === 'source') {
-      void loadDefaultsPreview();
-    }
   }
 
   function startRename(preset: Preset) {
@@ -301,42 +244,13 @@
       actionBusy = false;
     }
   }
-
-  async function handleApplyDefaults() {
-    if (!previewData || previewData.changes.length === 0) {
-      return;
-    }
-    applyingDefaults = true;
-    previewError = '';
-    defaultsSuccess = '';
-    try {
-      const resp = await studio.applyUpdateDefaults(previewData.sha256 ?? '');
-      const updatedCount = resp.updated ?? previewData.changes.length;
-      const targetRel = resp.rel_path || previewData.rel_path || 'source file';
-      const skippedCount = resp.unsupported?.length ?? previewData.unsupported.length;
-      defaultsSuccess =
-        skippedCount > 0
-          ? `Updated ${updatedCount} local default(s) in ${targetRel}. ${skippedCount} external/unsupported parameter(s) were skipped.`
-          : `Updated ${updatedCount} default(s) in ${targetRel}.`;
-      previewData = {
-        ...resp,
-        changes: [],
-        unsupported: [],
-      };
-    } catch (err) {
-      previewError = err instanceof Error ? err.message : String(err);
-      void loadDefaultsPreview();
-    } finally {
-      applyingDefaults = false;
-    }
-  }
 </script>
 
 <dialog
   bind:this={dialogEl}
   class="studio-dialog"
   aria-labelledby="manage-presets-modal-title"
-  {...({ closedby: actionBusy || applyingDefaults ? 'none' : 'any' } as Record<string, unknown>)}
+  {...({ closedby: actionBusy ? 'none' : 'any' } as Record<string, unknown>)}
   onkeydown={handleDialogKeydown}
   oncancel={handleDialogCancel}
   onclose={handleDialogClose}
@@ -378,33 +292,8 @@
         </button>
       </div>
 
-      <!-- Tabs -->
-      <div role="tablist" class="tabs tabs-box tabs-sm">
-        <button
-          type="button"
-          role="tab"
-          aria-selected={activeTab === 'presets'}
-          class="tab flex-1"
-          class:tab-active={activeTab === 'presets'}
-          onclick={() => switchTab('presets')}
-        >
-          Presets
-        </button>
-        <button
-          type="button"
-          role="tab"
-          aria-selected={activeTab === 'source'}
-          class="tab flex-1"
-          class:tab-active={activeTab === 'source'}
-          onclick={() => switchTab('source')}
-        >
-          Update Source File
-        </button>
-      </div>
-
-      {#if activeTab === 'presets'}
-        <div class="space-y-2.5">
-          {#if canonicalDefault}
+      <div class="space-y-2.5">
+        {#if canonicalDefault}
             {@const isDefaultActive = studio.defaultPresetKey === ''}
             {@const defaultVer = getPresetVerification(canonicalDefault)}
             {@const defaultVerLabel = getVerificationMeta(defaultVer.status).label}
@@ -828,144 +717,6 @@
             <button type="button" class="btn btn-sm btn-ghost" onclick={closeModal}>Close</button>
           </div>
         </div>
-      {:else}
-        <!-- Update Source File Tab -->
-        <div class="space-y-3">
-          <p class="text-[11px] text-error">
-            For advanced users only. Updates the base model values in
-            <code class="font-mono" title={studio.activeModel.rel_path}>{pathBasename(studio.activeModel.rel_path)}</code>.
-          </p>
-
-          {#if previewLoading}
-            <div class="flex items-center gap-2 text-xs opacity-70 py-4 justify-center">
-              <span class="loading loading-spinner loading-xs"></span>
-              <span>Checking for changes...</span>
-            </div>
-          {:else if previewData}
-            {#if previewData.unsupported.length > 0}
-              <Alert
-                variant={onlyUnsupportedChanges ? 'error' : 'warning'}
-                title={onlyUnsupportedChanges
-                  ? "Changed parameters can't be updated in this model file"
-                  : 'Some changed parameters will be skipped'}
-              >
-                <div class="space-y-2 text-[11px]">
-                  {#each unsupportedGroups as group (group.key)}
-                    {#if group.kind === 'external'}
-                      <div class="space-y-1">
-                        <div class="flex items-center justify-between gap-2 flex-wrap">
-                          <div class="font-medium">
-                            <code class="font-mono">{group.ownerClass}</code>
-                            {#if group.sourceRelPath}
-                              <span class="opacity-75">in</span>
-                              <code class="font-mono">{group.sourceRelPath}</code>
-                            {/if}
-                          </div>
-                          {#if studio.hasDesktop && group.inLibrary && group.sourceFile}
-                            <button
-                              type="button"
-                              class="btn btn-xs btn-outline"
-                              onclick={() => void studio.openModelInEditor(group.sourceFile)}
-                            >
-                              Open in Editor
-                            </button>
-                          {/if}
-                        </div>
-                        <p class="opacity-80">
-                          Defined in a shared component outside this model file; skipped to avoid
-                          changing defaults for other models.
-                        </p>
-                        <ul class="list-disc pl-4 space-y-0.5">
-                          {#each group.items as item (item.path)}
-                            <li><code class="font-mono">{item.path}</code></li>
-                          {/each}
-                        </ul>
-                      </div>
-                    {:else}
-                      <ul class="list-disc pl-4 space-y-0.5">
-                        {#each group.items as item (item.path)}
-                          <li>
-                            <code class="font-mono">{item.path}</code>: {item.reason}
-                          </li>
-                        {/each}
-                      </ul>
-                    {/if}
-                  {/each}
-                </div>
-              </Alert>
-            {/if}
-
-            {#if previewData.changes.length > 0}
-              {#if canonicalDefaultVer.status !== 'unverified'}
-                <Alert variant="info">
-                  Applying these changes will reset the base preset's verification status to
-                  <strong>Unverified</strong> (any print note will be preserved).
-                </Alert>
-              {/if}
-              <div class="rounded-box border border-base-300 overflow-hidden">
-                <table class="table table-xs w-full">
-                  <thead>
-                    <tr class="bg-base-200/70">
-                      <th>Parameter</th>
-                      <th>Line</th>
-                      <th>Change</th>
-                    </tr>
-                  </thead>
-                  <tbody class="font-mono text-[11px]">
-                    {#each previewData.changes as ch (ch.path)}
-                      <tr>
-                        <td class="break-all">{ch.path}</td>
-                        <td class="opacity-60">{ch.line}</td>
-                        <td>
-                          <span class="opacity-60 line-through">{ch.old_literal}</span>
-                          <span class="mx-1 opacity-50">→</span>
-                          <span class="text-primary font-semibold">{ch.new_literal}</span>
-                        </td>
-                      </tr>
-                    {/each}
-                  </tbody>
-                </table>
-              </div>
-            {:else if previewData.unsupported.length === 0 && !defaultsSuccess}
-              <div class="rounded-box bg-base-200/70 p-3 text-xs opacity-75">
-                Current parameters already match the defaults in
-                <code class="font-mono">{previewData.rel_path}</code>.
-              </div>
-            {/if}
-          {/if}
-
-          {#if previewError}
-            <Alert variant="error">{previewError}</Alert>
-          {/if}
-
-          {#if defaultsSuccess}
-            <Alert variant="success">{defaultsSuccess}</Alert>
-          {/if}
-
-          <div class="flex justify-end gap-2 pt-2">
-            <button type="button" class="btn btn-sm btn-ghost" onclick={closeModal}>Close</button>
-            <button
-              type="button"
-              class="btn btn-sm btn-primary"
-              disabled={previewLoading ||
-                applyingDefaults ||
-                !previewData ||
-                previewData.changes.length === 0}
-              onclick={handleApplyDefaults}
-            >
-              {#if applyingDefaults}
-                <span class="loading loading-spinner loading-xs"></span>
-              {:else if hasPartialChanges && previewData}
-                Update {previewData.changes.length} Local Default{previewData.changes.length === 1
-                  ? ''
-                  : 's'}
-              {:else}
-                Update Source File
-              {/if}
-            </button>
-          </div>
-        </div>
-      {/if}
     </div>
   {/if}
 </dialog>
