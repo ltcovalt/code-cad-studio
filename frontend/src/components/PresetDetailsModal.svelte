@@ -51,13 +51,6 @@
   const defaultDirty = $derived(draftIsDefault !== isStartupDefault);
   const isDirty = $derived(metaDirty || verDirty || defaultDirty);
 
-  const showModelDescription = $derived.by(() => {
-    const mDesc = studio.modelDescription.trim();
-    if (!mDesc) return false;
-    const pDesc = (preset?.description ?? '').trim();
-    return mDesc !== pDesc;
-  });
-
   function initializeForm() {
     draftLabel = preset?.label ?? '';
     draftDescription = preset?.description ?? '';
@@ -227,20 +220,14 @@
           </button>
         </div>
 
-        <div class="text-[11px] opacity-60 flex flex-wrap items-center gap-x-1.5 gap-y-0.5">
-          <span class="font-medium text-base-content/90">{model.name}</span>
+        <div class="text-[11px] opacity-60 space-y-0.5">
+          <div class="font-medium text-base-content/90">{model.name}</div>
           {#if model.rel_path}
-            <span aria-hidden="true">·</span>
-            <span class="font-mono break-all">
+            <div class="font-mono break-all">
               {model.library_name ? `${model.library_name}/${model.rel_path}` : model.rel_path}
-            </span>
+            </div>
           {/if}
         </div>
-        {#if showModelDescription}
-          <p class="text-[11px] opacity-55 leading-snug break-words">
-            {studio.modelDescription.trim()}
-          </p>
-        {/if}
       </div>
 
       {#if modified}

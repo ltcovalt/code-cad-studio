@@ -17,10 +17,8 @@
   const statusTooltip = $derived.by(() => {
     if (!selectedPreset) return 'Preset details & print status';
     return [
-      selectedPreset.label,
-      selectedPreset.description,
       formatVerificationTooltip(current.status, current.note, modified),
-      'Click to view details & print status',
+      'Click to view preset details',
     ]
       .filter(Boolean)
       .join('\n');
@@ -92,8 +90,8 @@
       <button
         type="button"
         class="btn btn-ghost btn-xs btn-square h-6 w-6 min-h-6 shrink-0 opacity-75 hover:opacity-100"
-        aria-label="Save preset"
-        title="Save current parameters as a preset"
+        aria-label="Save preset or update source file"
+        title="Save preset or update source file"
         onclick={() => {
           studio.savePresetModalOpen = true;
         }}
@@ -119,7 +117,7 @@
         type="button"
         class="btn btn-ghost btn-xs btn-square h-6 w-6 min-h-6 shrink-0 opacity-75 hover:opacity-100"
         aria-label="Manage presets"
-        title="Manage presets & source file defaults"
+        title="Manage presets"
         onclick={() => {
           studio.managePresetsModalOpen = true;
         }}

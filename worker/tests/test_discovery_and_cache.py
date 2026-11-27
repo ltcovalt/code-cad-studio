@@ -495,3 +495,27 @@ def test_model_name_discovery_and_rename(tmp_path: Path) -> None:
         assert 'MODEL_NAME: str = "2S RC Battery Caddy"' in new_py.read_text(encoding="utf-8")
     finally:
         state._evict_project_modules()
+
+
+def test_get_schema_prefers_module_docstring_over_function_docstring(tmp_path: Path) -> None:
+    lib_dir = tmp_path / "lib"
+    model_dir = lib_dir / "models" / "box"
+    model_dir.mkdir(parents=True)
+    (model_dir / "box.py").write_text(
+        '"""Storage box for small hardware."""\n\n'
+        "from dataclasses import dataclass\n\n"
+        "@dataclass\n"
+        "class BoxParams:\n"
+        "    width: float = 40.0\n\n"
+        "def create_box(params: BoxParams):\n"
+        '    """Decoupled generator function returning CAD geometry."""\n'
+        "    return None\n",
+        encoding="utf-8",
+    )
+
+    state = worker.WorkerState([{"id": "lib", "name": "Lib", "path": str(lib_dir)}])
+    try:
+        schema = state.get_schema("lib/box")
+        assert schema["description"] == "Storage box for small hardware."
+    finally:
+        state._evict_project_modules()

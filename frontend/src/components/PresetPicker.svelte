@@ -317,21 +317,13 @@
       {@const isHighlighted = index === highlightedIndex}
       {@const ver = getPresetVerification(preset)}
       {@const verMeta = getVerificationMeta(ver.status)}
-      {@const optionTooltip = [
-        preset.description,
-        ver.status !== 'unverified' || ver.note
-          ? formatVerificationTooltip(ver.status, ver.note)
-          : '',
-      ]
-        .filter(Boolean)
-        .join('\n')}
       <!-- svelte-ignore a11y_click_events_have_key_events -->
       <div
         id={optionId(preset.key)}
         role="option"
         tabindex="-1"
         aria-selected={isSelected}
-        title={optionTooltip || undefined}
+        title={preset.description || undefined}
         class="flex items-start gap-2 rounded-field pl-2 pr-3 py-1.5 cursor-pointer select-none {isHighlighted
           ? 'bg-base-200'
           : ''}"
@@ -366,11 +358,6 @@
           {#if preset.description}
             <p class="text-[10px] opacity-55 truncate leading-tight mt-0.5">
               {preset.description}
-            </p>
-          {/if}
-          {#if ver.note}
-            <p class="text-[10px] opacity-65 italic truncate leading-tight mt-0.5">
-              {ver.note}
             </p>
           {/if}
         </div>

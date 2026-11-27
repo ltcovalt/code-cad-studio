@@ -2637,7 +2637,7 @@ class WorkerState:
                         if dp_desc:
                             default_preset["description"] = dp_desc
 
-            doc = inspect.getdoc(func) or inspect.getdoc(module) or meta.get("description", "")
+            doc = meta.get("description") or inspect.getdoc(module) or inspect.getdoc(func) or ""
             resp: dict[str, Any] = {
                 "ok": True,
                 "model": meta,
