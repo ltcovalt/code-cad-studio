@@ -183,7 +183,7 @@
   }
 
   async function submitRename(preset: Preset) {
-    const trimmed = editLabel.trim();
+    const trimmed = editLabel.replace(/\s+/g, ' ').trim();
     if (!trimmed) {
       manageError = 'Preset name is required.';
       return;
@@ -459,18 +459,24 @@
                         void submitRename(preset);
                       }}
                     >
-                      <input
-                        type="text"
+                      <textarea
                         bind:value={editLabel}
+                        rows="2"
                         placeholder="Preset name"
-                        class="input input-bordered input-xs w-full"
-                      />
-                      <input
-                        type="text"
+                        class="textarea textarea-bordered textarea-xs w-full text-xs leading-snug bg-base-100"
+                        onkeydown={(e) => {
+                          if (e.key === 'Enter' && !e.shiftKey) {
+                            e.preventDefault();
+                            void submitRename(preset);
+                          }
+                        }}
+                      ></textarea>
+                      <textarea
                         bind:value={editDescription}
+                        rows="2"
                         placeholder="Optional short note shown on hover"
-                        class="input input-bordered input-xs w-full"
-                      />
+                        class="textarea textarea-bordered textarea-xs w-full text-xs leading-snug bg-base-100"
+                      ></textarea>
                       <div class="flex justify-end gap-1.5">
                         <button
                           type="button"

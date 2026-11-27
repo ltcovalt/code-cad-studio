@@ -10,6 +10,7 @@ import {
   revealFile,
   scaffoldModel,
   subscribeEvents,
+  updateModelDefaults,
   windowClose,
   windowMinimize,
   windowToggleMaximize,
@@ -89,10 +90,18 @@ describe('api client', () => {
     await openInEditor('/tmp/a.py');
     await revealFile('/tmp/a.stl');
     await openInSlicer('/tmp/a.stl');
+    await updateModelDefaults('code-cad/enclosures/lid', {
+      params: { w: 10 },
+      default_preset: { label: 'Lid Base', description: 'Standard lid' },
+      dry_run: true,
+    });
     expect((fetchMock.mock.calls[1] as unknown as [string])[0]).toBe('/api/models/scaffold');
     expect((fetchMock.mock.calls[2] as unknown as [string])[0]).toBe('/api/desktop/open-editor');
     expect((fetchMock.mock.calls[3] as unknown as [string])[0]).toBe('/api/desktop/reveal-file');
     expect((fetchMock.mock.calls[4] as unknown as [string])[0]).toBe('/api/desktop/open-slicer');
+    expect((fetchMock.mock.calls[5] as unknown as [string])[0]).toBe(
+      '/api/models/code-cad%2Fenclosures%2Flid/update-defaults'
+    );
   });
 
   it('browser exportModel delays URL.revokeObjectURL and parses JSON error envelopes', async () => {

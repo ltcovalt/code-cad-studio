@@ -383,12 +383,36 @@ export interface UnsupportedDefaultChange {
   in_library?: boolean;
 }
 
+export interface DefaultPresetUpdate {
+  label: string;
+  description: string;
+}
+
+export interface DefaultPresetInfo {
+  label: string;
+  description: string;
+  can_edit: boolean;
+  unsupported_reason?: string;
+}
+
+export interface DefaultPresetChange {
+  action: 'add' | 'update' | 'remove';
+  line: number;
+  old_label: string;
+  new_label: string;
+  old_description: string;
+  new_description: string;
+}
+
 export interface UpdateDefaultsResponse {
   ok: boolean;
   file?: string;
   rel_path?: string;
   sha256?: string;
   updated?: number;
+  default_preset?: DefaultPresetInfo;
+  default_preset_change?: DefaultPresetChange;
+  default_preset_updated?: boolean;
   changes: DefaultChange[];
   unsupported: UnsupportedDefaultChange[];
   error?: string;

@@ -47,12 +47,7 @@
         }}
       >
         <VerificationIcon status={current.status} class="h-3.5 w-3.5" />
-        {#if modified && current.status !== 'unverified'}
-          <span
-            class="absolute top-0.5 right-0.5 h-1.5 w-1.5 rounded-full bg-warning ring-1 ring-base-100"
-            aria-hidden="true"
-          ></span>
-        {:else if hasNoteOnly}
+        {#if hasNoteOnly}
           <span
             class="absolute top-0.5 right-0.5 h-1.5 w-1.5 rounded-full bg-info ring-1 ring-base-100"
             aria-hidden="true"
@@ -90,8 +85,8 @@
       <button
         type="button"
         class="btn btn-ghost btn-xs btn-square h-6 w-6 min-h-6 shrink-0 opacity-75 hover:opacity-100"
-        aria-label="Save preset or update source file"
-        title="Save preset or update source file"
+        aria-label="Save preset"
+        title="Save preset"
         onclick={() => {
           studio.savePresetModalOpen = true;
         }}

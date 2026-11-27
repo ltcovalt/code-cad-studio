@@ -267,7 +267,7 @@ describe('StudioState', () => {
     expect(state.defaults).toEqual({ width: 75 });
   });
 
-  it('applyUpdateDefaults refreshes defaultPresetKey and clears param memory', async () => {
+  it('applyUpdateDefaults refreshes defaultPresetKey and clears param memory when params updated', async () => {
     state.attachViewport(fakeViewport as unknown as CadViewportController);
     const box = makeModel('lib/box', '/lib/box/box.py');
     mockApi.getModel
@@ -278,6 +278,7 @@ describe('StudioState', () => {
       .mockResolvedValueOnce({ ok: true, shapes: { id: '/box2' } });
     mockApi.updateModelDefaults.mockResolvedValueOnce({
       ok: true,
+      updated: 1,
       changes: [],
       unsupported: [],
     });
@@ -287,6 +288,61 @@ describe('StudioState', () => {
     await state.applyUpdateDefaults('abc123');
     expect(state.defaultPresetKey).toBe('new_key');
     expect(state.params).toEqual({ width: 80 });
+    expect(mockApi.renderModel).toHaveBeenCalledTimes(2);
+  });
+
+  it('applyUpdateDefaults metadata-only preserves live params and skips re-render', async () => {
+    state.attachViewport(fakeViewport as unknown as CadViewportController);
+    const box = makeModel('lib/box', '/lib/box/box.py');
+    const detail1 = makeDetail(box, 50);
+    const detail2 = {
+      ...makeDetail(box, 50),
+      presets: [
+        {
+          key: 'default',
+          label: 'Renamed Base',
+          description: 'Updated desc',
+          source: 'default' as const,
+          params: {},
+        },
+      ],
+    };
+    mockApi.getModel.mockResolvedValueOnce(detail1).mockResolvedValueOnce(detail2);
+    mockApi.renderModel.mockResolvedValueOnce({ ok: true, shapes: { id: '/box' } });
+    mockApi.updateModelDefaults.mockResolvedValueOnce({
+      ok: true,
+      updated: 0,
+      default_preset_updated: true,
+      changes: [],
+      unsupported: [],
+    });
+
+    await state.selectModel('lib/box');
+    state.updateParam('width', 77, 'preview');
+    await state.applyUpdateDefaults('abc123', {
+      includeParams: false,
+      defaultPreset: { label: 'Renamed Base', description: 'Updated desc' },
+    });
+
+    expect(mockApi.updateModelDefaults).toHaveBeenCalledWith('lib/box', {
+      params: {},
+      default_preset: { label: 'Renamed Base', description: 'Updated desc' },
+      dry_run: false,
+      expected_sha256: 'abc123',
+    });
+    expect(state.presets[0]?.label).toBe('Renamed Base');
+    expect(state.params).toEqual({ width: 77 });
+    expect(mockApi.renderModel).toHaveBeenCalledTimes(1);
+  });
+
+  it('openUpdateSourceModal closes preset modals and records intent', () => {
+    state.savePresetModalOpen = true;
+    state.presetDetailsModalOpen = true;
+    state.openUpdateSourceModal('metadata');
+    expect(state.savePresetModalOpen).toBe(false);
+    expect(state.presetDetailsModalOpen).toBe(false);
+    expect(state.updateSourceIntent).toBe('metadata');
+    expect(state.updateSourceModalOpen).toBe(true);
   });
 
   it('preserves unsaved param edits in paramMemory across model switches and supports cancelActiveBuild & skipOnboarding', async () => {

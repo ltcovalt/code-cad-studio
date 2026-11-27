@@ -230,12 +230,6 @@
         </div>
       </div>
 
-      {#if modified}
-        <Alert variant="warning" compact>
-          Live parameters differ from this preset. Reset or save your changes before verifying them.
-        </Alert>
-      {/if}
-
       <form class="space-y-3.5" onsubmit={handleSave} novalidate>
         {#if canEditMeta}
           <div>
@@ -282,35 +276,58 @@
             ></textarea>
           </div>
         {:else}
-          <div class="space-y-1">
-            <div class="flex flex-wrap items-center gap-1.5">
-              <h3 class="text-sm font-semibold break-words leading-snug">{preset.label}</h3>
-              <span
-                class="badge badge-xs badge-secondary badge-soft shrink-0"
-                title="Base defaults defined in the model's Python source file"
-              >
-                Base
-              </span>
-              {#if isStartupDefault}
-                <span class="badge badge-xs badge-primary badge-soft shrink-0">Default</span>
-              {/if}
-              {#if modified}
-                <span class="badge badge-xs badge-warning badge-soft shrink-0">Modified</span>
+          <div class="space-y-2">
+            <div class="rounded-box bg-base-200/50 border border-base-300/80 px-3.5 py-2.5 space-y-1.5">
+              <div class="flex flex-wrap items-center gap-1.5">
+                <h3 class="text-sm font-semibold break-words leading-snug">{preset.label}</h3>
+                <span
+                  class="badge badge-xs badge-secondary badge-soft shrink-0"
+                  title="Base defaults defined in the model's Python source file"
+                >
+                  Base
+                </span>
+                {#if isStartupDefault}
+                  <span class="badge badge-xs badge-primary badge-soft shrink-0">Default</span>
+                {/if}
+                {#if modified}
+                  <span class="badge badge-xs badge-warning badge-soft shrink-0">Modified</span>
+                {/if}
+              </div>
+              {#if preset.description}
+                <p class="text-xs opacity-80 whitespace-pre-wrap break-words leading-relaxed">
+                  {preset.description}
+                </p>
               {/if}
             </div>
-            {#if preset.description}
-              <p class="text-xs opacity-80 whitespace-pre-wrap break-words leading-relaxed">
-                {preset.description}
-              </p>
-            {/if}
-            <p class="text-[11px] opacity-50">
-              Name and description are defined in the model's Python source (@default_preset).
-            </p>
+
+            <div class="space-y-1">
+              <Alert
+                variant="info"
+                title="Base model metadata and parameters are defined in the source code"
+              />
+              {#if model.kind === 'parametric'}
+                <div class="flex justify-end">
+                  <button
+                    type="button"
+                    class="btn btn-ghost btn-xs h-6 min-h-0 px-2 text-[11px] font-normal opacity-70 hover:opacity-100"
+                    disabled={saving}
+                    onclick={() => studio.openUpdateSourceModal('metadata')}
+                  >
+                    Update source file…
+                  </button>
+                </div>
+              {/if}
+            </div>
           </div>
         {/if}
 
         <fieldset class="space-y-1.5">
           <legend class="text-xs font-semibold">Print Status</legend>
+          {#if modified}
+            <Alert variant="warning" title="Parameters modified from saved preset">
+              <p>Save or reset them before setting verification status.</p>
+            </Alert>
+          {/if}
           <div class="grid grid-cols-2 gap-2">
             {#each VERIFICATION_STATUSES as opt (opt.value)}
               {@const active = draftStatus === opt.value}

@@ -34,6 +34,7 @@ import type {
   SetupLogEvent,
   SetupProgressEvent,
   StatusState,
+  DefaultPresetUpdate,
   UpdateDefaultsResponse,
   VerificationStatus,
 } from './types';
@@ -112,6 +113,8 @@ export class StudioState {
   librariesOpen = $state(false);
   presetDetailsModalOpen = $state(false);
   savePresetModalOpen = $state(false);
+  updateSourceModalOpen = $state(false);
+  updateSourceIntent = $state<'params' | 'metadata'>('params');
   managePresetsModalOpen = $state(false);
   exportModalOpen = $state(false);
   reloadedVisible = $state(false);
@@ -1075,6 +1078,13 @@ export class StudioState {
     this.config = { ...this.config, default_presets: nextMap };
   }
 
+  openUpdateSourceModal(intent: 'params' | 'metadata' = 'params'): void {
+    this.savePresetModalOpen = false;
+    this.presetDetailsModalOpen = false;
+    this.updateSourceIntent = intent;
+    this.updateSourceModalOpen = true;
+  }
+
   async previewUpdateDefaults(): Promise<UpdateDefaultsResponse> {
     const modelId = this.activeModelId;
     if (!modelId) {
@@ -1086,13 +1096,21 @@ export class StudioState {
     });
   }
 
-  async applyUpdateDefaults(expectedSha256: string): Promise<UpdateDefaultsResponse> {
+  async applyUpdateDefaults(
+    expectedSha256: string,
+    options?: {
+      includeParams?: boolean;
+      defaultPreset?: DefaultPresetUpdate;
+    }
+  ): Promise<UpdateDefaultsResponse> {
     const modelId = this.activeModelId;
     if (!modelId) {
       throw new Error('No active model');
     }
+    const includeParams = options?.includeParams !== false;
     const resp = await api.updateModelDefaults(modelId, {
-      params: this.params,
+      params: includeParams ? this.params : {},
+      ...(options?.defaultPreset ? { default_preset: options.defaultPreset } : {}),
       dry_run: false,
       expected_sha256: expectedSha256,
     });
@@ -1109,12 +1127,15 @@ export class StudioState {
       this.components = schemaResp.components ?? {};
       this.presets = schemaResp.presets ?? [];
       this.defaultPresetKey = schemaResp.default_preset_key ?? '';
-      this.selectedPresetKey = 'default';
-      this.selectedComponentPresets = extractComponentPresetSelections(null, this.fields);
-      this.params = resolvePresetParams(this.defaults, this.fields, null, this.components);
-      this.lastRenderedKey = '';
-      this.paramMemory.delete(modelId);
-      void this.triggerRender(false, true);
+
+      if ((resp.updated ?? 0) > 0) {
+        this.selectedPresetKey = 'default';
+        this.selectedComponentPresets = extractComponentPresetSelections(null, this.fields);
+        this.params = resolvePresetParams(this.defaults, this.fields, null, this.components);
+        this.lastRenderedKey = '';
+        this.paramMemory.delete(modelId);
+        void this.triggerRender(false, true);
+      }
     }
     return resp;
   }

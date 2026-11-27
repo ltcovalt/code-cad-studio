@@ -12,6 +12,7 @@
   import PresetDetailsModal from './components/PresetDetailsModal.svelte';
   import SavePresetModal from './components/SavePresetModal.svelte';
   import SettingsModal from './components/SettingsModal.svelte';
+  import UpdateSourceModal from './components/UpdateSourceModal.svelte';
   import WindowResizeHandles from './components/WindowResizeHandles.svelte';
   import { studio } from './lib/studioState.svelte';
   import type { LayoutMode, LayoutState } from './lib/types';
@@ -249,6 +250,7 @@
       studio.librariesOpen ||
       studio.presetDetailsModalOpen ||
       studio.savePresetModalOpen ||
+      studio.updateSourceModalOpen ||
       studio.managePresetsModalOpen ||
       studio.exportModalOpen ||
       document.querySelector('dialog[open]')
@@ -403,6 +405,7 @@
 <ManageLibrariesModal />
 <PresetDetailsModal />
 <SavePresetModal />
+<UpdateSourceModal />
 <ManagePresetsModal />
 <ExportModal />
 <WindowResizeHandles />

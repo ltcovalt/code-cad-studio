@@ -30,6 +30,7 @@ import type {
   SetupLogEvent,
   SetupProbeResponse,
   SetupProgressEvent,
+  DefaultPresetUpdate,
   UpdateDefaultsResponse,
   VerificationStatus,
 } from './types';
@@ -450,7 +451,12 @@ export function setDefaultPreset(
 
 export function updateModelDefaults(
   modelId: string,
-  payload: { params: ParamsRecord; dry_run: boolean; expected_sha256?: string }
+  payload: {
+    params: ParamsRecord;
+    default_preset?: DefaultPresetUpdate;
+    dry_run: boolean;
+    expected_sha256?: string;
+  }
 ): Promise<UpdateDefaultsResponse> {
   return fetchJSON<UpdateDefaultsResponse>(
     `/api/models/${encodeURIComponent(modelId)}/update-defaults`,
