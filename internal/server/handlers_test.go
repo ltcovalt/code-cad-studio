@@ -709,8 +709,9 @@ def create_clip_demo(params: ClipDemoParams):
 
 	// 6. Apply with matching SHA-256 and verify surgical edits + preserved comments + reloaded defaults
 	applyPayload, _ := json.Marshal(map[string]any{
-		"dry_run":         false,
-		"expected_sha256": previewResp.SHA256,
+		"dry_run":           false,
+		"expected_sha256":   previewResp.SHA256,
+		"component_presets": map[string]string{"core": "default"},
 		"params": map[string]any{
 			"core": map[string]any{
 				"thickness":  10.5,

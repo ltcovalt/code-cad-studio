@@ -490,3 +490,205 @@ def test_update_defaults_default_preset_without_utils_params_fails_closed(tmp_pa
     assert applied2["ok"] is True
     assert applied2["default_preset_updated"] is True
     assert state.get_schema("demo/bare")["default_preset"] == {"label": "Standard Bare"}
+
+
+def test_update_defaults_local_nullable_group_toggle_and_subfield_edit(tmp_path: Path) -> None:
+    lib_dir = tmp_path / "lib"
+    _write_utils_params(lib_dir)
+    model_dir = lib_dir / "models" / "box"
+    model_dir.mkdir(parents=True)
+    py_path = model_dir / "box.py"
+    py_path.write_text(
+        "from dataclasses import dataclass, field\n"
+        "from utils.params import group, param\n"
+        "@dataclass\n"
+        "class LidParams:\n"
+        "    thickness: float = param(2.0, unit='mm')\n"
+        "@dataclass\n"
+        "class RimParams:\n"
+        "    height: float = param(4.0, unit='mm')\n"
+        "@dataclass\n"
+        "class BoxParams:\n"
+        "    lid: LidParams | None = group(LidParams, enabled=False)\n"
+        "    rim: RimParams | None = group(RimParams)\n"
+        "    raw_opt: LidParams | None = field(default=None)\n"
+        "def create_box(params: BoxParams):\n"
+        "    return None\n",
+        encoding="utf-8",
+    )
+
+    state = worker.WorkerState([{"id": "demo", "name": "Demo", "path": str(lib_dir)}])
+
+    # Toggle lid False->True + edit lid.thickness, toggle rim True->False (omitted enabled=),
+    # and verify non-group() raw_opt still reports nullable_group_toggle.
+    preview = state.update_defaults(
+        "demo/box",
+        {"lid": {"thickness": 3.5}, "rim": None, "raw_opt": {"thickness": 2.0}},
+        dry_run=True,
+    )
+    assert preview["ok"] is True
+    by_path = {c["path"]: c for c in preview["changes"]}
+    assert by_path["lid"]["old_literal"] == "enabled=False"
+    assert by_path["lid"]["new_literal"] == "enabled=True"
+    assert by_path["lid.thickness"]["new_literal"] == "3.5"
+    assert by_path["rim"]["old_literal"] == "enabled=True"
+    assert by_path["rim"]["new_literal"] == "enabled=False"
+    assert [u["path"] for u in preview["unsupported"]] == ["raw_opt"]
+    assert preview["unsupported"][0]["reason_code"] == "nullable_group_toggle"
+
+    applied = state.update_defaults(
+        "demo/box",
+        {"lid": {"thickness": 3.5}, "rim": None},
+        dry_run=False,
+        expected_sha256=preview["sha256"],
+    )
+    assert applied["ok"] is True
+    assert applied["updated"] == 3
+    text = py_path.read_text(encoding="utf-8")
+    assert "thickness: float = param(3.5, unit='mm')" in text
+    assert "lid: LidParams | None = group(LidParams, enabled=True)" in text
+    assert "rim: RimParams | None = group(RimParams, enabled=False)" in text
+
+
+def test_update_defaults_external_component_group_preset_and_params(tmp_path: Path) -> None:
+    lib_dir = tmp_path / "lib"
+    _write_utils_params(lib_dir)
+    comp_dir = lib_dir / "components" / "gridfinity_base"
+    comp_dir.mkdir(parents=True)
+    comp_py = comp_dir / "gridfinity_base.py"
+    comp_src = (
+        "from dataclasses import dataclass\n"
+        "from utils.params import param\n"
+        "@dataclass\n"
+        "class GridfinityBaseParams:\n"
+        "    magnets: bool = param(True)\n"
+        "    magnet_depth: float = param(2.2)\n"
+        "    units_x: int | None = param(None)\n"
+        "def create_gridfinity_base(params: GridfinityBaseParams):\n"
+        "    return None\n"
+    )
+    comp_py.write_text(comp_src, encoding="utf-8")
+    (comp_dir / "presets.json").write_text(
+        json.dumps(
+            {
+                "schema_version": 1,
+                "presets": {
+                    "no_magnets": {
+                        "label": "No Magnets",
+                        "params": {"magnets": False},
+                    }
+                },
+            }
+        ),
+        encoding="utf-8",
+    )
+
+    model_dir = lib_dir / "models" / "caddy"
+    model_dir.mkdir(parents=True)
+    py_path = model_dir / "caddy.py"
+    py_src = (
+        "from dataclasses import dataclass\n"
+        "from components.gridfinity_base.gridfinity_base import GridfinityBaseParams\n"
+        "from utils.params import group, param\n"
+        "@dataclass\n"
+        "class CaddyParams:\n"
+        "    slots: int = param(4)\n"
+        "    gridfinity: GridfinityBaseParams | None = group(\n"
+        "        GridfinityBaseParams,\n"
+        "        enabled=False,\n"
+        '        label="Gridfinity Base",\n'
+        "    )\n"
+        "def create_caddy(params: CaddyParams):\n"
+        "    return None\n"
+    )
+    py_path.write_bytes(b"\xef\xbb\xbf" + py_src.encode("utf-8"))
+
+    state = worker.WorkerState([{"id": "demo", "name": "Demo", "path": str(lib_dir)}])
+
+    # 1. Enable gridfinity + select preset "no_magnets" + override units_x=3
+    p1 = state.update_defaults(
+        "demo/caddy",
+        {
+            "slots": 4,
+            "gridfinity": {"magnets": False, "magnet_depth": 2.2, "units_x": 3},
+        },
+        dry_run=True,
+        component_presets={"gridfinity": "no_magnets"},
+    )
+    assert p1["ok"] is True
+    assert p1["unsupported"] == []
+    by_path1 = {c["path"]: c for c in p1["changes"]}
+    assert by_path1["gridfinity"]["new_literal"] == "enabled=True"
+    assert by_path1["gridfinity (preset)"]["new_literal"] == '"no_magnets"'
+    assert by_path1["gridfinity.units_x"]["new_literal"] == "3"
+    assert "gridfinity.magnets" not in by_path1
+
+    a1 = state.update_defaults(
+        "demo/caddy",
+        {
+            "slots": 4,
+            "gridfinity": {"magnets": False, "magnet_depth": 2.2, "units_x": 3},
+        },
+        dry_run=False,
+        expected_sha256=p1["sha256"],
+        component_presets={"gridfinity": "no_magnets"},
+    )
+    assert a1["ok"] is True
+    raw1 = py_path.read_bytes()
+    assert raw1.startswith(b"\xef\xbb\xbf")
+    text1 = raw1.decode("utf-8-sig")
+    assert "enabled=True," in text1
+    assert 'preset="no_magnets",' in text1
+    assert 'params={"units_x": 3},' in text1
+    assert 'label="Gridfinity Base",' in text1
+    assert comp_py.read_text(encoding="utf-8") == comp_src
+
+    # Schema reflects component_preset and overridden default
+    schema1 = state.get_schema("demo/caddy")
+    gf1 = next(f for f in schema1["fields"] if f["name"] == "gridfinity")
+    assert gf1["component_preset"] == "no_magnets"
+    assert schema1["defaults"]["gridfinity"]["units_x"] == 3
+    assert schema1["defaults"]["gridfinity"]["magnets"] is False
+
+    # 2. Revert to "default" preset with no overrides -> removes preset= and params=
+    p2 = state.update_defaults(
+        "demo/caddy",
+        {
+            "slots": 4,
+            "gridfinity": {"magnets": True, "magnet_depth": 2.2, "units_x": None},
+        },
+        dry_run=True,
+        component_presets={"gridfinity": "default"},
+    )
+    assert p2["ok"] is True
+    a2 = state.update_defaults(
+        "demo/caddy",
+        {
+            "slots": 4,
+            "gridfinity": {"magnets": True, "magnet_depth": 2.2, "units_x": None},
+        },
+        dry_run=False,
+        expected_sha256=p2["sha256"],
+        component_presets={"gridfinity": "default"},
+    )
+    assert a2["ok"] is True
+    text2 = py_path.read_text(encoding="utf-8-sig")
+    assert "preset=" not in text2
+    assert "params=" not in text2
+    assert "enabled=True," in text2
+
+    # 3. Disable gridfinity -> sets enabled=False
+    p3 = state.update_defaults(
+        "demo/caddy",
+        {"slots": 4, "gridfinity": None},
+        dry_run=True,
+    )
+    a3 = state.update_defaults(
+        "demo/caddy",
+        {"slots": 4, "gridfinity": None},
+        dry_run=False,
+        expected_sha256=p3["sha256"],
+    )
+    assert a3["ok"] is True
+    assert "enabled=False," in py_path.read_text(encoding="utf-8-sig")
+    assert comp_py.read_text(encoding="utf-8") == comp_src

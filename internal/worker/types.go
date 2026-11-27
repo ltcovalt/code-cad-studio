@@ -55,8 +55,9 @@ type ParamField struct {
 	Type          string         `json:"type"` // bool, int, float, str, enum, group, list
 	Default       any            `json:"default"`
 	GroupDefaults map[string]any `json:"group_defaults,omitempty"`
-	ComponentID   string         `json:"component_id,omitempty"`
-	ComponentName string         `json:"component_name,omitempty"`
+	ComponentID     string         `json:"component_id,omitempty"`
+	ComponentName   string         `json:"component_name,omitempty"`
+	ComponentPreset string         `json:"component_preset,omitempty"`
 	Description   string         `json:"description"`
 	Unit          string         `json:"unit,omitempty"`
 	Nullable      bool           `json:"nullable,omitempty"`

@@ -2060,10 +2060,11 @@ func (s *Server) handleUpdateModelDefaults(w http.ResponseWriter, r *http.Reques
 		return
 	}
 	var req struct {
-		Params         map[string]any              `json:"params"`
-		DefaultPreset  *worker.DefaultPresetUpdate `json:"default_preset"`
-		DryRun         bool                        `json:"dry_run"`
-		ExpectedSHA256 string                      `json:"expected_sha256"`
+		Params           map[string]any              `json:"params"`
+		ComponentPresets map[string]string           `json:"component_presets,omitempty"`
+		DefaultPreset    *worker.DefaultPresetUpdate `json:"default_preset"`
+		DryRun           bool                        `json:"dry_run"`
+		ExpectedSHA256   string                      `json:"expected_sha256"`
 	}
 	if !decodeJSON(w, r, &req, false) {
 		return
@@ -2077,7 +2078,7 @@ func (s *Server) handleUpdateModelDefaults(w http.ResponseWriter, r *http.Reques
 		return
 	}
 
-	resp, err := s.worker.UpdateDefaults(r.Context(), modelID, req.Params, req.DefaultPreset, req.DryRun, strings.TrimSpace(req.ExpectedSHA256))
+	resp, err := s.worker.UpdateDefaults(r.Context(), modelID, req.Params, req.ComponentPresets, req.DefaultPreset, req.DryRun, strings.TrimSpace(req.ExpectedSHA256))
 	if err != nil {
 		writeError(w, http.StatusBadGateway, "worker_error", err.Error())
 		return

@@ -750,6 +750,9 @@ def _introspect_dataclass(
                 group_info["component_id"] = comp_link[0]
                 group_info["component_name"] = comp_link[1]
                 group_info.setdefault("group_defaults", nested_defaults)
+            comp_preset = str(meta.get("component_preset") or "").strip()
+            if comp_preset and comp_preset != "default" and not (is_nullable and default_val is None):
+                group_info["component_preset"] = comp_preset
             if "when" in meta and isinstance(meta["when"], dict):
                 group_info["when"] = meta["when"]
             fields_schema.append(group_info)
@@ -1138,7 +1141,272 @@ def _format_python_literal(val: Any) -> str:
         return "(" + ", ".join(_format_python_literal(v) for v in val) + ")"
     if isinstance(val, list):
         return "[" + ", ".join(_format_python_literal(v) for v in val) + "]"
+    if isinstance(val, dict):
+        items = ", ".join(
+            f"{json.dumps(str(k), ensure_ascii=False)}: {_format_python_literal(v)}"
+            for k, v in val.items()
+        )
+        return "{" + items + "}"
     raise ValueError(f"unsupported literal type: {type(val).__name__}")
+
+
+def _is_group_call(node: ast.AST | None) -> bool:
+    if not isinstance(node, ast.Call):
+        return False
+    if isinstance(node.func, ast.Name):
+        return node.func.id == "group"
+    if isinstance(node.func, ast.Attribute):
+        return node.func.attr == "group"
+    return False
+
+
+def _ast_byte_span(
+    node: ast.AST,
+    bom_len: int,
+    line_starts: list[int],
+    raw_len: int,
+) -> tuple[int, int] | None:
+    lineno = getattr(node, "lineno", None)
+    col_offset = getattr(node, "col_offset", None)
+    end_lineno = getattr(node, "end_lineno", None)
+    end_col_offset = getattr(node, "end_col_offset", None)
+    if lineno is None or col_offset is None or end_lineno is None or end_col_offset is None:
+        return None
+    start_b = bom_len + line_starts[lineno - 1] + col_offset
+    end_b = bom_len + line_starts[end_lineno - 1] + end_col_offset
+    if start_b < bom_len or end_b <= start_b or end_b > raw_len:
+        return None
+    return start_b, end_b
+
+
+def _format_params_dict_literal(params_dict: dict[str, Any], indent: str) -> str:
+    """Format a sparse component params dict as a clean single- or multi-line Python dict literal."""
+    if not params_dict:
+        return "{}"
+    if len(params_dict) == 1:
+        k, v = next(iter(params_dict.items()))
+        if not isinstance(v, dict):
+            return "{" + f"{json.dumps(str(k), ensure_ascii=False)}: {_format_python_literal(v)}" + "}"
+    inner_indent = indent + "    "
+    lines = ["{"]
+    for k, v in params_dict.items():
+        if isinstance(v, dict):
+            val_str = _format_params_dict_literal(v, inner_indent)
+        else:
+            val_str = _format_python_literal(v)
+        lines.append(f"{inner_indent}{json.dumps(str(k), ensure_ascii=False)}: {val_str},")
+    lines.append(f"{indent}}}")
+    return "\n".join(lines)
+
+
+def _rewrite_group_call_source(
+    call: ast.Call,
+    raw_bytes: bytes,
+    bom_len: int,
+    line_starts: list[int],
+    stmt_indent: str,
+    *,
+    include_enabled: bool | None,
+    preset_key: str,
+    params_dict: dict[str, Any],
+) -> str | None:
+    """Rebuild a `group(...)` call preserving callee, factory, and non-managed kwargs."""
+    raw_len = len(raw_bytes)
+    func_span = _ast_byte_span(call.func, bom_len, line_starts, raw_len)
+    if func_span is None:
+        return None
+    callee_src = raw_bytes[func_span[0]:func_span[1]].decode("utf-8")
+
+    if len(call.args) > 1:
+        return None
+    factory_item: str | None = None
+    if len(call.args) == 1:
+        if isinstance(call.args[0], ast.Starred):
+            return None
+        arg0_span = _ast_byte_span(call.args[0], bom_len, line_starts, raw_len)
+        if arg0_span is None:
+            return None
+        factory_item = raw_bytes[arg0_span[0]:arg0_span[1]].decode("utf-8")
+
+    other_kwargs: list[str] = []
+    for kw in call.keywords:
+        if kw.arg is None:
+            return None
+        if kw.arg == "factory":
+            if factory_item is not None:
+                return None
+            kw_span = _ast_byte_span(kw, bom_len, line_starts, raw_len)
+            if kw_span is None:
+                return None
+            factory_item = raw_bytes[kw_span[0]:kw_span[1]].decode("utf-8")
+            continue
+        if kw.arg == "enabled":
+            if not (isinstance(kw.value, ast.Constant) and isinstance(kw.value.value, bool)):
+                return None
+            continue
+        if kw.arg in ("preset", "params"):
+            continue
+        kw_span = _ast_byte_span(kw, bom_len, line_starts, raw_len)
+        if kw_span is None:
+            return None
+        other_kwargs.append(raw_bytes[kw_span[0]:kw_span[1]].decode("utf-8"))
+
+    if factory_item is None:
+        return None
+
+    args_out: list[str] = [factory_item]
+    if include_enabled is not None:
+        args_out.append(f"enabled={'True' if include_enabled else 'False'}")
+    if preset_key:
+        args_out.append(f"preset={json.dumps(preset_key, ensure_ascii=False)}")
+    if params_dict:
+        arg_indent = stmt_indent + "    "
+        args_out.append(f"params={_format_params_dict_literal(params_dict, arg_indent)}")
+    args_out.extend(other_kwargs)
+
+    was_multiline = (call.lineno != call.end_lineno)
+    if not was_multiline and not params_dict:
+        return f"{callee_src}({', '.join(args_out)})"
+
+    arg_indent = stmt_indent + "    "
+    joined = ",\n".join(f"{arg_indent}{a}" for a in args_out)
+    return f"{callee_src}(\n{joined},\n{stmt_indent})"
+
+
+def _load_component_preset_dict(cls: type, preset_key: str) -> dict[str, Any]:
+    """Load sparse ``params`` for ``preset_key`` from ``cls``'s component presets.json."""
+    if not preset_key or preset_key == "default":
+        return {}
+    try:
+        src = inspect.getsourcefile(cls)
+    except Exception:
+        src = None
+    if not src:
+        return {}
+    src_path = Path(src).resolve()
+    parent = src_path.parent
+    presets_path = (
+        parent / "presets.json"
+        if parent.name == src_path.stem
+        else parent / f"{src_path.stem}.presets.json"
+    )
+    if not presets_path.is_file():
+        return {}
+    try:
+        data = json.loads(presets_path.read_text(encoding="utf-8-sig"))
+    except Exception:
+        return {}
+    if not isinstance(data, dict) or data.get("schema_version") != 1:
+        return {}
+    presets = data.get("presets")
+    if not isinstance(presets, dict):
+        return {}
+    entry = presets.get(preset_key)
+    if not isinstance(entry, dict):
+        return {}
+    raw_params = entry.get("params")
+    return dict(raw_params) if isinstance(raw_params, dict) else {}
+
+
+def _apply_component_preset_to_instance(instance: Any, overrides: dict[str, Any]) -> Any:
+    """Apply sparse preset overrides to a dataclass instance using _coerce_value."""
+    if not dataclasses.is_dataclass(instance) or not isinstance(overrides, dict) or not overrides:
+        return instance
+    cls = type(instance)
+    hints = _safe_get_type_hints(cls)
+    updates: dict[str, Any] = {}
+    for f in dataclasses.fields(cls):
+        if f.name not in overrides:
+            continue
+        raw_val = overrides[f.name]
+        cur_val = getattr(instance, f.name)
+        target_type = hints.get(f.name, f.type)
+        unwrapped, is_nullable = _unwrap_optional(target_type)
+        if dataclasses.is_dataclass(unwrapped) or dataclasses.is_dataclass(cur_val):
+            nested_cls = unwrapped if dataclasses.is_dataclass(unwrapped) else type(cur_val)
+            if raw_val is None and is_nullable:
+                updates[f.name] = None
+            elif isinstance(raw_val, dict):
+                base_nested = cur_val if dataclasses.is_dataclass(cur_val) else nested_cls()
+                updates[f.name] = _apply_component_preset_to_instance(base_nested, raw_val)
+        else:
+            updates[f.name] = _coerce_value(raw_val, target_type, cur_val)
+    return dataclasses.replace(instance, **updates) if updates else instance
+
+
+def _collect_sparse_component_overrides(
+    cls: type,
+    raw_override: dict[str, Any],
+    base_instance: Any,
+    prefix: str = "",
+) -> tuple[dict[str, Any], list[dict[str, Any]]]:
+    """Return (sparse_dict, unsupported_items) comparing raw_override against base_instance."""
+    hints = _safe_get_type_hints(cls)
+    sparse: dict[str, Any] = {}
+    unsupported: list[dict[str, Any]] = []
+
+    for f in dataclasses.fields(cls):
+        if f.name not in raw_override:
+            continue
+        field_path = f"{prefix}.{f.name}" if prefix else f.name
+        target_type = hints.get(f.name, f.type)
+        unwrapped, _ = _unwrap_optional(target_type)
+        base_val = getattr(base_instance, f.name)
+        val_override = raw_override[f.name]
+
+        if dataclasses.is_dataclass(unwrapped) or dataclasses.is_dataclass(base_val):
+            nested_cls = unwrapped if dataclasses.is_dataclass(unwrapped) else type(base_val)
+            if (base_val is None) != (val_override is None):
+                if val_override is None:
+                    sparse[f.name] = None
+                elif isinstance(val_override, dict):
+                    nested_sparse, nested_unsup = _collect_sparse_component_overrides(
+                        nested_cls, val_override, nested_cls(), prefix=field_path
+                    )
+                    sparse[f.name] = nested_sparse
+                    unsupported.extend(nested_unsup)
+            elif isinstance(val_override, dict):
+                nested_base = base_val if dataclasses.is_dataclass(base_val) else nested_cls()
+                nested_sparse, nested_unsup = _collect_sparse_component_overrides(
+                    nested_cls, val_override, nested_base, prefix=field_path
+                )
+                if nested_sparse:
+                    sparse[f.name] = nested_sparse
+                unsupported.extend(nested_unsup)
+            continue
+
+        coerced = _coerce_value(val_override, target_type, base_val)
+        if not _values_equal(coerced, base_val):
+            if isinstance(coerced, enum.Enum):
+                unsupported.append({"path": field_path, "reason": "Enum defaults cannot be updated automatically", "reason_code": "enum_default", "owner_class": cls})
+                continue
+            try:
+                _format_python_literal(coerced)
+            except Exception as exc:
+                unsupported.append({"path": field_path, "reason": str(exc), "reason_code": "unsupported_value", "owner_class": cls})
+                continue
+            sparse[f.name] = coerced
+
+    return sparse, unsupported
+
+
+def _collect_leaf_diffs(
+    old_dict: dict[str, Any],
+    new_dict: dict[str, Any],
+    prefix: str,
+) -> list[tuple[str, Any, Any]]:
+    """Collect (dotted_path, old_val, new_val) leaf differences between two serialized dicts."""
+    diffs: list[tuple[str, Any, Any]] = []
+    for k, new_v in new_dict.items():
+        if k not in old_dict:
+            continue
+        old_v = old_dict[k]
+        sub_path = f"{prefix}.{k}" if prefix else k
+        if isinstance(old_v, dict) and isinstance(new_v, dict):
+            diffs.extend(_collect_leaf_diffs(old_v, new_v, sub_path))
+        elif not _values_equal(old_v, new_v):
+            diffs.append((sub_path, old_v, new_v))
+    return diffs
 
 
 def _locate_default_expr(stmt: ast.AnnAssign) -> tuple[ast.AST | None, str | None]:
@@ -1169,10 +1437,22 @@ def _locate_default_expr(stmt: ast.AnnAssign) -> tuple[ast.AST | None, str | Non
     return val, None
 
 
+def _cls_is_in_file(cls: type, resolved_py: Path | None) -> bool:
+    if resolved_py is None:
+        return True
+    try:
+        cls_file = inspect.getsourcefile(cls)
+    except Exception:
+        cls_file = None
+    return bool(cls_file and Path(cls_file).resolve() == resolved_py)
+
+
 def _collect_default_changes(
     cls: type,
     overrides: dict[str, Any],
     prefix: str = "",
+    *,
+    resolved_py: Path | None = None,
 ) -> list[dict[str, Any]]:
     """Return leaf parameter changes comparing overrides against canonical dataclass defaults."""
     hints = _safe_get_type_hints(cls)
@@ -1185,12 +1465,27 @@ def _collect_default_changes(
             continue
         field_path = f"{prefix}.{f.name}" if prefix else f.name
         target_type = hints.get(f.name, f.type)
-        unwrapped, _ = _unwrap_optional(target_type)
+        unwrapped, is_nullable = _unwrap_optional(target_type)
         default_val = getattr(default_instance, f.name)
         raw_override = overrides[f.name]
 
         if dataclasses.is_dataclass(unwrapped) or dataclasses.is_dataclass(default_val):
             nested_cls = unwrapped if dataclasses.is_dataclass(unwrapped) else type(default_val)
+            if resolved_py is not None and not _cls_is_in_file(nested_cls, resolved_py):
+                changes.append(
+                    {
+                        "path": field_path,
+                        "owner_cls": cls,
+                        "field_name": f.name,
+                        "field_obj": f,
+                        "nested_cls": nested_cls,
+                        "default_val": default_val,
+                        "raw_override": raw_override,
+                        "is_nullable": is_nullable,
+                        "external_group": True,
+                    }
+                )
+                continue
             if (default_val is None) != (raw_override is None):
                 changes.append(
                     {
@@ -1203,8 +1498,15 @@ def _collect_default_changes(
                         "nullable_group_toggle": True,
                     }
                 )
-            elif isinstance(raw_override, dict):
-                changes.extend(_collect_default_changes(nested_cls, raw_override, prefix=field_path))
+            if isinstance(raw_override, dict):
+                changes.extend(
+                    _collect_default_changes(
+                        nested_cls,
+                        raw_override,
+                        prefix=field_path,
+                        resolved_py=resolved_py,
+                    )
+                )
             continue
 
         coerced = _coerce_value(raw_override, target_type, default_val)
@@ -1228,6 +1530,7 @@ def _plan_dataclass_default_updates(
     params_cls: type,
     overrides: dict[str, Any],
     library_root: Path | None = None,
+    component_presets: dict[str, Any] | None = None,
 ) -> tuple[bytes, str, list[dict[str, Any]], list[dict[str, Any]], list[tuple[int, int, bytes]]]:
     """Plan surgical UTF-8 byte-span replacements for changed dataclass default literals."""
     raw_bytes = py_path.read_bytes()
@@ -1248,7 +1551,7 @@ def _plan_dataclass_default_updates(
 
     resolved_py = py_path.resolve()
     resolved_lib_root = library_root.resolve() if library_root is not None else None
-    raw_changes = _collect_default_changes(params_cls, overrides)
+    raw_changes = _collect_default_changes(params_cls, overrides, resolved_py=resolved_py)
     changes_out: list[dict[str, Any]] = []
     unsupported_out: list[dict[str, Any]] = []
     spans: list[tuple[int, int, bytes]] = []
@@ -1276,20 +1579,46 @@ def _plan_dataclass_default_updates(
             entry["source_rel_path"] = source_rel_path
         unsupported_out.append(entry)
 
+    def _report_external_class(path: str, owner_cls: type) -> None:
+        try:
+            cls_file = inspect.getsourcefile(owner_cls)
+        except Exception:
+            cls_file = None
+        src_file: str | None = None
+        src_rel: str | None = None
+        in_lib = False
+        if cls_file:
+            resolved_cls_file = Path(cls_file).resolve()
+            if resolved_lib_root is not None:
+                try:
+                    src_rel = resolved_cls_file.relative_to(resolved_lib_root).as_posix()
+                    src_file = str(resolved_cls_file)
+                    in_lib = True
+                except ValueError:
+                    src_rel = resolved_cls_file.name
+            else:
+                src_rel = resolved_cls_file.name
+        _add_unsupported(
+            path,
+            "dataclass is defined outside this model file",
+            "external_component",
+            owner_cls,
+            source_file=src_file,
+            source_rel_path=src_rel,
+            in_library=in_lib,
+        )
+
+    def _stmt_indent(stmt: ast.AST) -> str:
+        lineno = getattr(stmt, "lineno", 1)
+        line_b = body_bytes[line_starts[lineno - 1] : line_starts[lineno]]
+        line_s = line_b.decode("utf-8", errors="replace")
+        return line_s[: len(line_s) - len(line_s.lstrip(" \t"))]
+
     for ch in raw_changes:
         path = ch["path"]
         owner_cls = ch["owner_cls"]
         field_name = ch["field_name"]
-        typed_val = ch["typed_value"]
-
-        if ch.get("nullable_group_toggle"):
-            _add_unsupported(
-                path,
-                "Optional group enabled/disabled default cannot be updated automatically",
-                "nullable_group_toggle",
-                owner_cls,
-            )
-            continue
+        typed_val = ch.get("typed_value")
 
         if isinstance(typed_val, enum.Enum):
             _add_unsupported(
@@ -1300,34 +1629,8 @@ def _plan_dataclass_default_updates(
             )
             continue
 
-        try:
-            cls_file = inspect.getsourcefile(owner_cls)
-        except Exception:
-            cls_file = None
-        if not cls_file or Path(cls_file).resolve() != resolved_py:
-            src_file: str | None = None
-            src_rel: str | None = None
-            in_lib = False
-            if cls_file:
-                resolved_cls_file = Path(cls_file).resolve()
-                if resolved_lib_root is not None:
-                    try:
-                        src_rel = resolved_cls_file.relative_to(resolved_lib_root).as_posix()
-                        src_file = str(resolved_cls_file)
-                        in_lib = True
-                    except ValueError:
-                        src_rel = resolved_cls_file.name
-                else:
-                    src_rel = resolved_cls_file.name
-            _add_unsupported(
-                path,
-                "dataclass is defined outside this model file",
-                "external_component",
-                owner_cls,
-                source_file=src_file,
-                source_rel_path=src_rel,
-                in_library=in_lib,
-            )
+        if not _cls_is_in_file(owner_cls, resolved_py):
+            _report_external_class(path, owner_cls)
             continue
 
         matches = class_defs.get(owner_cls.__name__, [])
@@ -1356,7 +1659,229 @@ def _plan_dataclass_default_updates(
             )
             continue
 
-        expr, err_reason = _locate_default_expr(ann_matches[0])
+        ann_stmt = ann_matches[0]
+
+        if ch.get("external_group"):
+            nested_cls = ch["nested_cls"]
+            default_val = ch["default_val"]
+            raw_override = ch["raw_override"]
+            is_nullable = bool(ch["is_nullable"])
+            f_obj = ch["field_obj"]
+
+            if not _is_group_call(ann_stmt.value):
+                if (default_val is None) != (raw_override is None):
+                    _add_unsupported(
+                        path,
+                        "Optional group enabled/disabled default cannot be updated automatically",
+                        "nullable_group_toggle",
+                        owner_cls,
+                    )
+                elif isinstance(raw_override, dict):
+                    ext_leaves = _collect_default_changes(
+                        nested_cls, raw_override, prefix=path, resolved_py=None
+                    )
+                    for leaf in ext_leaves:
+                        _report_external_class(leaf["path"], leaf["owner_cls"])
+                continue
+
+            call_node = ann_stmt.value
+            assert isinstance(call_node, ast.Call)
+            call_span = _ast_byte_span(call_node, bom_len, line_starts, len(raw_bytes))
+            if call_span is None:
+                _add_unsupported(path, "source span unavailable", "source_span_unavailable", owner_cls)
+                continue
+
+            cur_enabled = default_val is not None
+            cur_preset = str(f_obj.metadata.get("component_preset") or "").strip() if cur_enabled else ""
+            cur_serialized = _serialize_default(default_val) if cur_enabled else None
+
+            new_enabled = raw_override is not None
+            req_preset = str((component_presets or {}).get(path, "") or "").strip()
+            new_preset = "" if (not new_enabled or req_preset in ("", "default")) else req_preset
+
+            if new_enabled:
+                preset_base_dict = _load_component_preset_dict(nested_cls, new_preset)
+                preset_base_inst = _apply_component_preset_to_instance(nested_cls(), preset_base_dict)
+                raw_dict = raw_override if isinstance(raw_override, dict) else {}
+                new_params_dict, comp_unsup = _collect_sparse_component_overrides(
+                    nested_cls, raw_dict, preset_base_inst
+                )
+                for u in comp_unsup:
+                    _add_unsupported(
+                        f"{path}.{u['path']}",
+                        u["reason"],
+                        u["reason_code"],
+                        u["owner_class"],
+                    )
+                new_inst = _apply_component_preset_to_instance(preset_base_inst, new_params_dict)
+                new_serialized = _serialize_default(new_inst)
+            else:
+                preset_base_inst = None
+                new_params_dict = {}
+                new_serialized = None
+
+            if not cur_enabled and not new_enabled:
+                continue
+            if (
+                cur_enabled
+                and new_enabled
+                and cur_preset == new_preset
+                and _values_equal(cur_serialized, new_serialized)
+            ):
+                continue
+
+            has_enabled_kw = any(kw.arg == "enabled" for kw in call_node.keywords)
+            include_enabled: bool | None = (
+                False if not new_enabled else (True if has_enabled_kw else None)
+            )
+            new_call_src = _rewrite_group_call_source(
+                call_node,
+                raw_bytes,
+                bom_len,
+                line_starts,
+                _stmt_indent(ann_stmt),
+                include_enabled=include_enabled,
+                preset_key=new_preset,
+                params_dict=new_params_dict,
+            )
+            if new_call_src is None:
+                _add_unsupported(
+                    path,
+                    "uses a non-standard group() call",
+                    "non_literal_expression",
+                    owner_cls,
+                )
+                continue
+
+            spans.append((call_span[0], call_span[1], new_call_src.encode("utf-8")))
+            call_line = call_node.lineno or ann_stmt.lineno
+            if cur_enabled != new_enabled:
+                changes_out.append(
+                    {
+                        "path": path,
+                        "line": call_line,
+                        "old_value": cur_enabled,
+                        "new_value": new_enabled,
+                        "old_literal": f"enabled={cur_enabled}",
+                        "new_literal": f"enabled={new_enabled}",
+                    }
+                )
+            if cur_preset != new_preset and (new_enabled or cur_preset != ""):
+                changes_out.append(
+                    {
+                        "path": f"{path} (preset)",
+                        "line": call_line,
+                        "old_value": cur_preset or "default",
+                        "new_value": new_preset or "default",
+                        "old_literal": json.dumps(cur_preset, ensure_ascii=False) if cur_preset else "default",
+                        "new_literal": json.dumps(new_preset, ensure_ascii=False) if new_preset else "default",
+                    }
+                )
+            if new_enabled and isinstance(new_serialized, dict):
+                if cur_enabled and isinstance(cur_serialized, dict):
+                    for sub_path, old_v, new_v in _collect_leaf_diffs(cur_serialized, new_serialized, ""):
+                        changes_out.append(
+                            {
+                                "path": f"{path}.{sub_path}",
+                                "line": call_line,
+                                "old_value": old_v,
+                                "new_value": new_v,
+                                "old_literal": _format_python_literal(old_v),
+                                "new_literal": _format_python_literal(new_v),
+                            }
+                        )
+                elif not cur_enabled and new_params_dict and preset_base_inst is not None:
+                    preset_base_ser = _serialize_default(preset_base_inst)
+                    if isinstance(preset_base_ser, dict):
+                        for sub_path, old_v, new_v in _collect_leaf_diffs(preset_base_ser, new_serialized, ""):
+                            changes_out.append(
+                                {
+                                    "path": f"{path}.{sub_path}",
+                                    "line": call_line,
+                                    "old_value": old_v,
+                                    "new_value": new_v,
+                                    "old_literal": _format_python_literal(old_v),
+                                    "new_literal": _format_python_literal(new_v),
+                                }
+                            )
+            continue
+
+        if ch.get("nullable_group_toggle"):
+            if not _is_group_call(ann_stmt.value):
+                _add_unsupported(
+                    path,
+                    "Optional group enabled/disabled default cannot be updated automatically",
+                    "nullable_group_toggle",
+                    owner_cls,
+                )
+                continue
+            call_node = ann_stmt.value
+            assert isinstance(call_node, ast.Call)
+            old_enabled = ch["old_value"] is not None
+            target_enabled = ch["new_value"] is not None
+            enabled_kw = next((kw for kw in call_node.keywords if kw.arg == "enabled"), None)
+            if enabled_kw is not None:
+                if not (isinstance(enabled_kw.value, ast.Constant) and isinstance(enabled_kw.value.value, bool)):
+                    _add_unsupported(
+                        path,
+                        "uses a non-literal expression",
+                        "non_literal_expression",
+                        owner_cls,
+                    )
+                    continue
+                kw_val_span = _ast_byte_span(enabled_kw.value, bom_len, line_starts, len(raw_bytes))
+                if kw_val_span is None:
+                    _add_unsupported(path, "source span unavailable", "source_span_unavailable", owner_cls)
+                    continue
+                repl_str = "True" if target_enabled else "False"
+                spans.append((kw_val_span[0], kw_val_span[1], repl_str.encode("utf-8")))
+                changes_out.append(
+                    {
+                        "path": path,
+                        "line": enabled_kw.value.lineno or ann_stmt.lineno,
+                        "old_value": old_enabled,
+                        "new_value": target_enabled,
+                        "old_literal": f"enabled={old_enabled}",
+                        "new_literal": f"enabled={target_enabled}",
+                    }
+                )
+            else:
+                call_span = _ast_byte_span(call_node, bom_len, line_starts, len(raw_bytes))
+                if call_span is None:
+                    _add_unsupported(path, "source span unavailable", "source_span_unavailable", owner_cls)
+                    continue
+                new_call_src = _rewrite_group_call_source(
+                    call_node,
+                    raw_bytes,
+                    bom_len,
+                    line_starts,
+                    _stmt_indent(ann_stmt),
+                    include_enabled=target_enabled,
+                    preset_key="",
+                    params_dict={},
+                )
+                if new_call_src is None:
+                    _add_unsupported(
+                        path,
+                        "uses a non-standard group() call",
+                        "non_literal_expression",
+                        owner_cls,
+                    )
+                    continue
+                spans.append((call_span[0], call_span[1], new_call_src.encode("utf-8")))
+                changes_out.append(
+                    {
+                        "path": path,
+                        "line": call_node.lineno or ann_stmt.lineno,
+                        "old_value": old_enabled,
+                        "new_value": target_enabled,
+                        "old_literal": f"enabled={old_enabled}",
+                        "new_literal": f"enabled={target_enabled}",
+                    }
+                )
+            continue
+
+        expr, err_reason = _locate_default_expr(ann_stmt)
         if expr is None or err_reason is not None:
             _add_unsupported(
                 path,
@@ -3125,6 +3650,7 @@ class WorkerState:
         dry_run: bool = True,
         expected_sha256: str = "",
         default_preset: dict[str, Any] | None = None,
+        component_presets: dict[str, Any] | None = None,
     ) -> dict[str, Any]:
         with self.lock:
             meta = self._get_model_meta(model_id)
@@ -3152,6 +3678,7 @@ class WorkerState:
                 params_cls,
                 params_dict if isinstance(params_dict, dict) else {},
                 library_root=lib_root,
+                component_presets=component_presets if isinstance(component_presets, dict) else None,
             )
             dp_info, dp_change, dp_spans, dp_error = _plan_default_preset_updates(
                 py_path,
@@ -3715,6 +4242,9 @@ def make_handler(state: WorkerState, auth_token: str | None = None) -> type[Base
                     default_preset = body.get("default_preset")
                     if default_preset is not None and not isinstance(default_preset, dict):
                         raise _HttpError(400, "default_preset must be a JSON object")
+                    component_presets = body.get("component_presets")
+                    if component_presets is not None and not isinstance(component_presets, dict):
+                        raise _HttpError(400, "component_presets must be a JSON object")
                     dry_run = bool(body.get("dry_run", True))
                     expected_sha256 = str(body.get("expected_sha256", "") or "")
                     self._send_json(
@@ -3724,6 +4254,7 @@ def make_handler(state: WorkerState, auth_token: str | None = None) -> type[Base
                             dry_run=dry_run,
                             expected_sha256=expected_sha256,
                             default_preset=default_preset,
+                            component_presets=component_presets,
                         )
                     )
                     return

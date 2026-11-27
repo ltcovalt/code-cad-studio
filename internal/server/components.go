@@ -327,6 +327,10 @@ func normalizeModelComponentPresets(
 		}
 		defVal, hasDef := getValueAtPath(modelDefaults, path)
 		defaultIsNil := hasDef && defVal == nil
+		basePreset := strings.TrimSpace(f.ComponentPreset)
+		if basePreset == "" {
+			basePreset = "default"
+		}
 
 		rawKey := ""
 		if raw != nil {
@@ -339,8 +343,8 @@ func normalizeModelComponentPresets(
 			}
 			continue
 		}
-		if rawKey == "default" && !defaultIsNil {
-			// Implicit default for an already-enabled component group; omit to keep presets.json clean.
+		if rawKey == basePreset && !defaultIsNil {
+			// Implicit base preset for an already-enabled component group; omit to keep presets.json clean.
 			continue
 		}
 		if f.ComponentID != "" {

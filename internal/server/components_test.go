@@ -109,6 +109,36 @@ func TestComponentPresetResolutionAndSaveNormalization(t *testing.T) {
 		t.Fatalf("expected unknown path stripped, got %#v", norm)
 	}
 
+	// When a component group has a base ComponentPreset in the model source, omit that preset and preserve "default"
+	fieldsWithBasePreset := []worker.ParamField{
+		fields[0],
+		{
+			Name:            "pull_tab",
+			Path:            "pull_tab",
+			Type:            "group",
+			ComponentID:     "lib/components/pull_tab",
+			ComponentPreset: "heavy_duty",
+		},
+	}
+	normBase := normalizeModelComponentPresets(
+		map[string]string{"pull_tab": "heavy_duty"},
+		map[string]any{"pull_tab": map[string]any{"length": 8.0}},
+		modelDefaults,
+		fieldsWithBasePreset,
+	)
+	if len(normBase) != 0 {
+		t.Fatalf("expected base component_preset heavy_duty to be omitted, got %#v", normBase)
+	}
+	normReverted := normalizeModelComponentPresets(
+		map[string]string{"pull_tab": "default"},
+		map[string]any{"pull_tab": map[string]any{"length": 6.0}},
+		modelDefaults,
+		fieldsWithBasePreset,
+	)
+	if normReverted["pull_tab"] != "default" {
+		t.Fatalf("expected explicit default preserved when base component_preset is heavy_duty, got %#v", normReverted)
+	}
+
 	// Resolve preset with component_presets + sparse override
 	resolved := resolvePresetParams(
 		modelDefaults,

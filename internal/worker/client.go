@@ -713,13 +713,16 @@ func (m *Manager) ExportName(ctx context.Context, modelID string, params map[str
 	return stem, strings.TrimSpace(out.LibraryID), nil
 }
 
-func (m *Manager) UpdateDefaults(ctx context.Context, modelID string, params map[string]any, defaultPreset *DefaultPresetUpdate, dryRun bool, expectedSHA256 string) (*UpdateDefaultsResponse, error) {
+func (m *Manager) UpdateDefaults(ctx context.Context, modelID string, params map[string]any, componentPresets map[string]string, defaultPreset *DefaultPresetUpdate, dryRun bool, expectedSHA256 string) (*UpdateDefaultsResponse, error) {
 	var out UpdateDefaultsResponse
 	p := "/models/" + url.PathEscape(modelID) + "/update-defaults"
 	payload := map[string]any{
 		"params":          params,
 		"dry_run":         dryRun,
 		"expected_sha256": expectedSHA256,
+	}
+	if len(componentPresets) > 0 {
+		payload["component_presets"] = componentPresets
 	}
 	if defaultPreset != nil {
 		payload["default_preset"] = defaultPreset

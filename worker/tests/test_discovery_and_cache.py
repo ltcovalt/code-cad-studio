@@ -447,11 +447,13 @@ def test_component_discovery_and_schema_linking(tmp_path: Path, monkeypatch: pyt
         assert sp_field["group_defaults"] == {"thickness": 3.0}
         assert schema["defaults"]["spacer"] is None
 
-        # Update-defaults reports nullable group toggles cleanly as unsupported
+        # Update-defaults supports group() toggles and overrides on linked component groups
         plan = state.update_defaults("lib/can_lid", {"pull_tab": None, "spacer": {"thickness": 5.0}}, dry_run=True)
-        unsupported_by_path = {u["path"]: u for u in plan["unsupported"]}
-        assert unsupported_by_path["pull_tab"]["reason_code"] == "nullable_group_toggle"
-        assert unsupported_by_path["spacer"]["reason_code"] == "nullable_group_toggle"
+        assert plan["unsupported"] == []
+        changes_by_path = {c["path"]: c for c in plan["changes"]}
+        assert changes_by_path["pull_tab"]["new_literal"] == "enabled=False"
+        assert changes_by_path["spacer"]["new_literal"] == "enabled=True"
+        assert changes_by_path["spacer.thickness"]["new_literal"] == "5.0"
     finally:
         state._evict_project_modules()
 

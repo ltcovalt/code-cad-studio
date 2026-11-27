@@ -223,3 +223,78 @@ def test_nullable_group_introspection_and_coercion() -> None:
     )
     assert inst.enabled_by_default is None
     assert inst.disabled_by_default == _OptSubGroup(length=14.5, ribs=False)
+
+
+def test_group_preset_and_params_layering(tmp_path: Path) -> None:
+    import json
+    import sys
+
+    comp_dir = tmp_path / "comp_lib" / "components" / "widget"
+    comp_dir.mkdir(parents=True)
+    comp_py = comp_dir / "widget.py"
+    comp_py.write_text(
+        "from dataclasses import dataclass\n"
+        "@dataclass\n"
+        "class WidgetParams:\n"
+        "    enabled_feature: bool = True\n"
+        "    size: float = 10.0\n"
+        "    count: int = 2\n",
+        encoding="utf-8",
+    )
+    (comp_dir / "presets.json").write_text(
+        json.dumps(
+            {
+                "schema_version": 1,
+                "presets": {
+                    "heavy": {
+                        "label": "Heavy",
+                        "params": {"size": 25.0, "count": 4},
+                    }
+                },
+            }
+        ),
+        encoding="utf-8",
+    )
+
+    sys.path.insert(0, str(tmp_path / "comp_lib"))
+    try:
+        from components.widget.widget import WidgetParams  # type: ignore[import-not-found]
+        from dataclasses import dataclass
+
+        @dataclass
+        class ParentParams:
+            from_preset: WidgetParams = worker.params.group(
+                WidgetParams, preset="heavy"
+            ) if hasattr(worker, "params") else _OptSubGroup  # pragma: no cover
+
+        import params as params_mod
+
+        @dataclass
+        class ParentWithGroup:
+            from_preset: WidgetParams = params_mod.group(WidgetParams, preset="heavy")
+            layered: WidgetParams = params_mod.group(
+                WidgetParams, preset="heavy", params={"count": 8}
+            )
+            missing: WidgetParams = params_mod.group(
+                WidgetParams, preset="nonexistent", params={"size": 12.0}
+            )
+            disabled: WidgetParams | None = params_mod.group(
+                WidgetParams, enabled=False, preset="heavy"
+            )
+
+        p = ParentWithGroup()
+        assert p.from_preset == WidgetParams(enabled_feature=True, size=25.0, count=4)
+        assert p.layered == WidgetParams(enabled_feature=True, size=25.0, count=8)
+        assert p.missing == WidgetParams(enabled_feature=True, size=12.0, count=2)
+        assert p.disabled is None
+
+        fields, _ = worker._introspect_dataclass(ParentWithGroup)
+        by_name = {f["name"]: f for f in fields}
+        assert by_name["from_preset"]["component_preset"] == "heavy"
+        assert by_name["layered"]["component_preset"] == "heavy"
+        assert "component_preset" not in by_name["disabled"]
+    finally:
+        sys.path.remove(str(tmp_path / "comp_lib"))
+        sys.modules.pop("components.widget.widget", None)
+        sys.modules.pop("components.widget", None)
+        sys.modules.pop("components", None)
