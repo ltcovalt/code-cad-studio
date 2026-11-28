@@ -19,6 +19,7 @@
 
   const LAYOUT_STORAGE_KEY = 'code-cad-layout';
   const VALID_LAYOUTS = new Set<LayoutMode>(['stacked', 'side-by-side', 'right']);
+  const SPLITTER_SIZE = 1;
 
   function loadLayout(): LayoutState {
     const defaults: LayoutState = {
@@ -90,9 +91,9 @@
         maxParamsW: 520,
       };
     }
-    const maxModels = Math.min(420, Math.max(150, maxTotal - 220 - 5));
+    const maxModels = Math.min(420, Math.max(150, maxTotal - 220 - SPLITTER_SIZE));
     const mw = Math.max(150, Math.min(maxModels, layout.modelsWidth));
-    const maxParams = Math.max(220, maxTotal - mw - 5);
+    const maxParams = Math.max(220, maxTotal - mw - SPLITTER_SIZE);
     return {
       minSidebar: 220,
       maxSidebar: maxTotal,
@@ -116,7 +117,7 @@
         modelsHeight: layout.modelsHeight,
         modelsWidth: mw,
         paramsWidth: pw,
-        gridTemplateColumns: `${mw}px 5px minmax(0, 1fr) 5px ${pw}px`,
+        gridTemplateColumns: `${mw}px ${SPLITTER_SIZE}px minmax(0, 1fr) ${SPLITTER_SIZE}px ${pw}px`,
         gridTemplateRows: 'minmax(0, 1fr)',
       };
     }
@@ -128,8 +129,8 @@
         modelsHeight: h,
         modelsWidth: layout.modelsWidth,
         paramsWidth: layout.paramsWidth,
-        gridTemplateColumns: `${w}px 5px minmax(0, 1fr)`,
-        gridTemplateRows: `${h}px 5px minmax(0, 1fr)`,
+        gridTemplateColumns: `${w}px ${SPLITTER_SIZE}px minmax(0, 1fr)`,
+        gridTemplateRows: `${h}px ${SPLITTER_SIZE}px minmax(0, 1fr)`,
       };
     }
     // side-by-side
@@ -140,7 +141,7 @@
       modelsHeight: layout.modelsHeight,
       modelsWidth: mw,
       paramsWidth: pw,
-      gridTemplateColumns: `${mw}px 5px ${pw}px 5px minmax(0, 1fr)`,
+      gridTemplateColumns: `${mw}px ${SPLITTER_SIZE}px ${pw}px ${SPLITTER_SIZE}px minmax(0, 1fr)`,
       gridTemplateRows: 'minmax(0, 1fr)',
     };
   });

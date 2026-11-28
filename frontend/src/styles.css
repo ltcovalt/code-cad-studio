@@ -180,30 +180,60 @@ input.no-spinner {
   padding-left: 78px;
 }
 
-/* Resizable splitters */
+/* Resizable splitters: 1px resting hairline, 7px invisible grab target, 3px hover/drag highlight */
 .splitter {
+  position: relative;
   flex: none;
   background-color: var(--color-base-300);
-  transition: background-color 120ms ease;
   user-select: none;
   touch-action: none;
   z-index: 10;
 }
 
-.splitter:hover,
-.splitter.dragging {
+.splitter::before {
+  content: '';
+  position: absolute;
+}
+
+.splitter::after {
+  content: '';
+  position: absolute;
+  pointer-events: none;
   background-color: var(--color-primary);
+  opacity: 0;
+  transition: opacity 120ms ease;
+}
+
+.splitter:hover::after,
+.splitter.dragging::after {
+  opacity: 1;
 }
 
 .splitter-v {
-  width: 5px;
+  width: 1px;
   cursor: col-resize;
 }
 
+.splitter-v::before {
+  inset: 0 -3px;
+}
+
+.splitter-v::after {
+  inset: 0 -1px;
+}
+
 .splitter-h {
-  height: 5px;
+  height: 1px;
   width: 100%;
   cursor: row-resize;
+}
+
+.splitter-h::before {
+  inset: -3px 0;
+}
+
+.splitter-h::after {
+  inset: -1px 0;
 }
 
 /* Native modal dialog scroll containment & zero-transition backdrop for smooth WebGL compositing */
