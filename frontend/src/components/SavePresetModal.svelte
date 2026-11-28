@@ -269,7 +269,7 @@
         nextVerification
       );
       if (saved) {
-        if (setAsDefault && saved.key) {
+        if (setAsDefault && !isAlreadyDefault && saved.key) {
           await studio.setDefaultPreset(saved.key);
         }
         saving = false;
@@ -456,17 +456,25 @@
             </span>
           </label>
 
-          <label class="flex items-center gap-2 cursor-pointer text-xs">
+          <label
+            class="flex items-center gap-2 text-xs {isAlreadyDefault
+              ? 'opacity-70 cursor-default'
+              : 'cursor-pointer'}"
+          >
             <input
               type="checkbox"
               name="set-as-default"
-              bind:checked={setAsDefault}
+              checked={isAlreadyDefault || setAsDefault}
+              disabled={saving || isAlreadyDefault}
+              onchange={(e) => {
+                setAsDefault = e.currentTarget.checked;
+              }}
               class="checkbox checkbox-xs checkbox-primary"
             />
             <span class="font-medium">
               Set preset as model default
               {#if isAlreadyDefault}
-                <span class="font-normal opacity-60">(currently default)</span>
+                <span class="font-normal opacity-65">(currently default)</span>
               {/if}
             </span>
           </label>
@@ -502,9 +510,7 @@
             </button>
             <button
               type="submit"
-              class="btn btn-sm"
-              class:btn-error={Boolean(overwriteNotice)}
-              class:btn-primary={!overwriteNotice}
+              class="btn btn-sm btn-primary"
               disabled={saving}
             >
               {#if saving}
