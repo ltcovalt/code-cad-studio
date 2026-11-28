@@ -441,30 +441,29 @@
         {/if}
 
         {#if exportSuccess}
-          <Alert variant="success">
-            <div class="space-y-2">
-              <div class="font-medium select-text">
-                Exported <span class="font-mono">{exportSuccess.filename}</span> ({exportSuccess.sizeKb} KB)
+          <Alert variant="success" title="Exported">
+            <p class="select-text">
+              <code class="font-mono break-all">{exportSuccess.filename}</code>
+              <span class="opacity-75 whitespace-nowrap">({exportSuccess.sizeKb} KB)</span>
+            </p>
+            {#if studio.hasDesktop && studio.lastExportPath}
+              <div class="flex flex-wrap items-center gap-1.5 pt-1">
+                <button
+                  type="button"
+                  class="btn btn-xs btn-ghost btn-success border border-success/30 hover:bg-success/15 hover:border-success/50 hover:text-success h-6 min-h-0 px-2 font-medium"
+                  onclick={() => void studio.revealLastExport()}
+                >
+                  {revealLabel}
+                </button>
+                <button
+                  type="button"
+                  class="btn btn-xs btn-ghost btn-success border border-success/30 hover:bg-success/15 hover:border-success/50 hover:text-success h-6 min-h-0 px-2 font-medium"
+                  onclick={() => void studio.openLastExportInSlicer()}
+                >
+                  Open in Slicer
+                </button>
               </div>
-              {#if studio.hasDesktop && studio.lastExportPath}
-                <div class="flex flex-wrap items-center gap-1.5">
-                  <button
-                    type="button"
-                    class="btn btn-xs btn-ghost border border-current/25 h-6 min-h-0 px-2"
-                    onclick={() => void studio.revealLastExport()}
-                  >
-                    {revealLabel}
-                  </button>
-                  <button
-                    type="button"
-                    class="btn btn-xs btn-ghost border border-current/25 h-6 min-h-0 px-2"
-                    onclick={() => void studio.openLastExportInSlicer()}
-                  >
-                    Open in Slicer
-                  </button>
-                </div>
-              {/if}
-            </div>
+            {/if}
           </Alert>
         {/if}
 
